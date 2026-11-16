@@ -39,15 +39,42 @@ import FoundationXML
         check(toss?.isPhoneToss == true && abs((toss?.heightMeters ?? 0) - 0.5021) < 0.001 && toss?.distanceMeters == nil,
               "Half-meter phone toss works without barometer or GPS")
         var simulation = HandSimulationDetector()
-        let raised = [0.01, 0.02, 0.00, 0.33, 0.52, 0.49, 0.17]
+        let raised = [0.01, 0.02, 0.00, 0.33, 0.52, 0.49, 0.17, 0.14]
         let lifts = raised.enumerated().compactMap { index, meters in simulation.consume(altitude(Double(index), meters)) }
-        check(lifts.count == 1 && abs(lifts[0].1 - 0.51) < 1e-9 && lifts[0].0.unloadingSeconds == 2,
+        check(lifts.count == 1 && abs(lifts[0].1 - 0.51) < 1e-9 && lifts[0].0.unloadingSeconds == 3,
               "Hand simulation detects a lift, time above its baseline, and return without free fall")
         var gapSimulation = HandSimulationDetector()
         let brokenLift = raised.enumerated().compactMap { index, meters in
-            gapSimulation.consume(altitude(Double(index) + (index == 6 ? 4 : 0), meters))
+            gapSimulation.consume(altitude(Double(index) + (index >= 6 ? 4 : 0), meters))
         }
         check(brokenLift.isEmpty, "Hand simulation cannot bridge a barometer gap")
+        var slowSimulation = HandSimulationDetector()
+        let ascent = (1...32).map { min(2.5, Double($0) * 0.08) }
+        let descent = (1...25).map { 2.5 - Double($0) * 0.085 }
+        let slowLift = [0.0, 0.02, 0.01] + ascent + descent
+        for (index, meters) in slowLift.enumerated() {
+            check(slowSimulation.consume(altitude(Double(index), meters)) == nil, "A slow lift must wait for a settled return")
+        }
+        let firstNearFloor = Double(slowLift.count)
+        check(slowSimulation.consume(altitude(firstNearFloor, 0.20)) == nil, "First reading near floor does not end the test")
+        let slowResult = slowSimulation.consume(altitude(firstNearFloor + 1, 0.23))
+        check(abs((slowResult?.1 ?? 0) - 2.49) < 1e-9, "A slow ceiling test preserves the original baseline and its peak")
+
+        let airborne = JumpCandidate(startSeconds: 3, endSeconds: 5, minimumLoadG: 0.7,
+                                     returnPeakG: 2.1, maximumRotationRadiansPerSecond: 0.5)
+        let trajectory = [RidingJumpDetector.Point(time: 3, height: 0), .init(time: 4, height: 1.5),
+                          .init(time: 5, height: 0.05), .init(time: 5.3, height: 0)]
+        let rideFlight = RidingJumpDetector.Flight(event: airborne, trajectory: trajectory, settledHeight: 0, residualVelocity: 0)
+        let sparsePressure = [altitude(1.9, 0), altitude(2.9, 0), altitude(4, 1.4), altitude(5.9, 0), altitude(6.9, 0)]
+        let rideResult = LiveJumpEstimate.riding(rideFlight, altitude: sparsePressure, gps: [], motionClock: nil)
+        check(rideResult.heightMeters == 1.5 && rideResult.airtimeSeconds == 2, "A sparse barometer can support the inertial peak")
+        let conflicting = sparsePressure.map { $0.elapsedSinceFirstSampleSeconds == 4 ? altitude(4, 3.4) : $0 }
+        let uncertain = LiveJumpEstimate.riding(rideFlight, altitude: conflicting, gps: [], motionClock: nil)
+        check(uncertain.heightMeters == nil && uncertain.airtimeSeconds == 2, "Retain flight time if pressure contradicts the calculated height")
+        check(LiveJumpEstimate.riding(rideFlight, altitude: [], gps: [], motionClock: nil).heightMeters == nil,
+              "Missing pressure cannot certify a height")
+        let restoredEstimate = try JSONDecoder().decode(LiveJumpEstimate.self, from: JSONEncoder().encode(uncertain))
+        check(restoredEstimate.heightMeters == nil && restoredEstimate.airtimeSeconds == 2, "An unknown height survives a checkpoint")
         let measurement = MotionCalibration(completedAtSeconds: 5, frequencyHz: 99, verticalOffset: 0.04, verticalNoise: 0.01)
         let preset = SavedMotionCalibration(measurement: measurement, measuredAt: origin, systemVersion: "26.1")
         check(preset.usable(at: origin.addingTimeInterval(600), systemVersion: "26.1")?.completedAtSeconds == 0,
@@ -61,6 +88,24 @@ import FoundationXML
         check(SessionSetup(sport: .windsurf, kiteStyle: .bigAir).cleaned.kiteStyle == nil &&
               SessionSetup(sport: .kite, kiteStyle: .wakestyle).activityTitle.contains("Вейкстайл"),
               "Kite style is scoped to compatible activities")
+
+        let spot = RiderSpot(name: "  Тестовый спот  ", latitude: "55,75", longitude: "37.62")!
+        check(spot.name == "Тестовый спот" && spot.latitude == 55.75 && spot.longitude == 37.62, "Parse decimal commas in spot coordinates")
+        check(RiderSpot(name: "Bad", latitude: "91", longitude: "37") == nil &&
+              RiderSpot(name: "Bad", latitude: "nan", longitude: "37") == nil, "Invalid coordinates cannot create a spot")
+        var setupWithSpot = SessionSetup(sport: .kite)
+        setupWithSpot.selectSpot(spot)
+        let renamed = RiderSpot(id: spot.id, name: "Новое имя", latitude: "55.75", longitude: "37.62")!
+        check(renamed.matches(setupWithSpot), "Renaming a spot preserves the links from sessions")
+        setupWithSpot.setSpotName("Тестовый Спот")
+        check(setupWithSpot.spotID == nil && spot.matches(setupWithSpot), "Legacy text labels and saved spots can match")
+        let yandex = URLComponents(url: spot.yandexURL!, resolvingAgainstBaseURL: false)?.queryItems
+        check(yandex?.first(where: { $0.name == "ll" })?.value == "37.62,55.75", "Yandex longitude and latitude are in the right order")
+        let fixture = #"{"timezone":"Europe/Moscow","hourly":{"time":[1699980000,1700000000,1700003600,1700007200],"wind_speed_10m":[8,12,null,17],"wind_gusts_10m":[10,19,null],"wind_direction_10m":[0,90,null,225],"temperature_2m":[2,-3,null,0]}}"#
+        let forecast = try JSONDecoder().decode(SpotForecast.self, from: Data(fixture.utf8))
+        let hours = forecast.hours(near: origin)
+        check(hours.count == 2 && hours.first?.temperature == -3 && hours.last?.gust == nil, "Handle past and unavailable forecasts without mismatching arrays")
+        check(SpotForecast.compass(360) == "С" && SpotForecast.compass(hours.last?.direction) == "ЮЗ", "Show correct turn and wrap at north")
 
         var filter = RouteFilter()
         let first = filter.accept(point(0), notBefore: origin)!

@@ -79,6 +79,42 @@ enum DetectorTests {
         check(run(trace(peak: 1)).isEmpty, "Require a return impulse")
         check(run(trace(lowStart: 0)).isEmpty, "Do not infer takeoff before recording")
         check(run(Array(standard.prefix(145))).isEmpty, "Do not invent landing at EOF")
+        var phoneToss = JumpDetector(confirmsPhoneCatch: true)
+        let bumpyToss = (0..<300).map { i in
+            let load: Double
+            if i == 145 || i == 228 { load = 3 }
+            else if (100..<228).contains(i) { load = 0.1 }
+            else { load = 1 }
+            return sample(Double(i) / 100, load, angle: Double(i) * 0.08)
+        }
+        let tossBeforeCatch = bumpyToss.prefix(240).compactMap { phoneToss.process($0) }
+        check(tossBeforeCatch.isEmpty, "A mid-flight spike cannot announce a phone toss")
+        let afterCatch = bumpyToss.dropFirst(240).compactMap { phoneToss.process($0) }
+        check(afterCatch.count == 1 && abs(afterCatch[0].unloadingSeconds - 1.28) < 1e-9 &&
+              abs((LiveJumpEstimate.phoneToss(afterCatch[0])?.heightMeters ?? 0) - 2.0084) < 0.001,
+              "Use release to first real catch sample, excluding confirmation latency")
+
+        let ridingTrace = (0..<480).map { i -> MotionSample in
+            let vertical: Double
+            switch i {
+            case 100..<134: vertical = 10
+            case 134..<334: vertical = -3
+            case 334..<358: vertical = 12
+            default: vertical = 0
+            }
+            return sample(Double(i) / 100, 1 + vertical / 9.80665)
+        }
+        var riding = RidingJumpDetector()
+        let beforeLanding = ridingTrace.prefix(342).compactMap { riding.process($0, calibration: nil, moving: false) }
+        check(beforeLanding.isEmpty, "Riding jump waits for landing confirmation")
+        let ridingJumps = ridingTrace.dropFirst(342).compactMap { riding.process($0, calibration: nil, moving: false) }
+        check(ridingJumps.count == 1 && ridingJumps[0].event.minimumLoadG > 0.65 &&
+              (1.5...2.3).contains(ridingJumps[0].event.unloadingSeconds), "Detect a supported riding jump without GPS or free fall")
+        var ridingGap = RidingJumpDetector()
+        let brokenRide = ridingTrace.enumerated().filter { !(230..<250).contains($0.offset) }.compactMap {
+            ridingGap.process($0.element, calibration: nil, moving: true)
+        }
+        check(brokenRide.isEmpty && ridingGap.discontinuities == 1, "Do not join takeoff and landing across a sensor gap")
         check(run((0..<250).map { sample(Double($0) / 100, $0 == 100 ? 15 : 1) }).isEmpty, "Impact alone is not a jump")
         let longUnloading: [MotionSample] = (0..<500).map { i in
             let load: Double
