@@ -8,9 +8,7 @@ permissions:
 
 jobs:
   build:
-    # Standard Intel runner; avoids the currently delayed macOS 26 pool.
-    # Xcode still cross-compiles the application for a physical arm64 iPhone.
-    runs-on: macos-15-intel
+    runs-on: macos-15
     timeout-minutes: 15
     steps:
       - name: Check out source
@@ -27,7 +25,7 @@ jobs:
           build/event-tests
       - name: Render the session card preview
         run: |
-          swiftc -target x86_64-apple-macos13.0 Sources/SessionLog.swift Sources/JumpDetector.swift Sources/SessionInsights.swift Sources/EventReview.swift Sources/CardArtwork.swift card_preview.swift -o build/card-preview
+          swiftc -target "$(uname -m)-apple-macos13.0" Sources/SessionLog.swift Sources/JumpDetector.swift Sources/SessionInsights.swift Sources/EventReview.swift Sources/CardArtwork.swift card_preview.swift -o build/card-preview
           build/card-preview
       - name: Build for a physical iPhone
         run: |
