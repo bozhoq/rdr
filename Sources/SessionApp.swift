@@ -398,7 +398,7 @@ struct SessionDetail: View {
             } header: {
                 Text("Возможные прыжки · эксперимент")
             } footer: {
-                Text("Разгрузка — участок со сниженной нагрузкой на телефон, а не измеренное время полёта. Высота пока не рассчитывается. Время события отсчитывается от первого измерения движения. Разбор выполняется на iPhone.")
+                Text("Время события отсчитывается от первого измерения движения. Для оценки высоты подброса выберите отметку «Подброс телефона». Высота прыжка райдера пока недоступна.")
             }
             .listRowBackground(RiderTheme.surface)
             if let markers = session.markers, !markers.isEmpty {
@@ -472,6 +472,7 @@ private struct CandidateRow: View {
                 .font(.headline)
                 .foregroundStyle(RiderTheme.accent)
             Text("Разгрузка: \(metric(candidate.unloadingSeconds, unit: "с", digits: 2))")
+            TossHeightReadout(candidate: candidate, label: label)
             if candidate.fastRotation {
                 Label("Сильное вращение телефона", systemImage: "arrow.triangle.2.circlepath").font(.footnote)
             }

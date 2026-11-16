@@ -8,10 +8,18 @@ struct JumpCandidate: Codable, Identifiable, Sendable {
     let returnPeakG: Double
     let maximumRotationRadiansPerSecond: Double
 
-    // This is an unloading interval, NOT validated airtime or height.
+    // Interval between unloading and return thresholds.
     var unloadingSeconds: Double { endSeconds - startSeconds }
     var strongImpact: Bool { returnPeakG >= 8 }
     var fastRotation: Bool { maximumRotationRadiansPerSecond >= 12 }
+
+    /// Approximate rise from release to apex for a hand-labeled toss with
+    /// release and catch at the same height, using unloading as a time proxy.
+    func approximateTossHeightMeters(label: JumpLabel) -> Double? {
+        let duration = unloadingSeconds
+        guard label == .phoneToss, duration.isFinite, duration >= 0.22, duration <= 3 else { return nil }
+        return 9.80665 * duration * duration / 8
+    }
 }
 
 struct JumpAnalysis: Codable, Sendable {

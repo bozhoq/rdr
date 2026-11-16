@@ -19,6 +19,10 @@ struct EventDetailView: View {
     private var currentIndex: Int { min(max(0, index), max(0, candidates.count - 1)) }
     private var candidate: JumpCandidate? { candidates.isEmpty ? nil : candidates[currentIndex] }
 
+    private func label(for candidate: JumpCandidate) -> JumpLabel {
+        session.review?.label(for: candidate, version: session.jumpAnalysis?.detectorVersion ?? "") ?? .unreviewed
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
@@ -35,6 +39,7 @@ struct EventDetailView: View {
                     VStack(spacing: 12) {
                         LabeledContent("Момент", value: eventTimeText(candidate.startSeconds))
                         LabeledContent("Разгрузка", value: metric(candidate.unloadingSeconds, unit: "с", digits: 2))
+                        TossHeightReadout(candidate: candidate, label: label(for: candidate))
                         LabeledContent("Минимальная нагрузка", value: metric(candidate.minimumLoadG, unit: "g", digits: 2))
                         LabeledContent("Импульс после события", value: metric(candidate.returnPeakG, unit: "g"))
                         if candidate.fastRotation { Label("Телефон сильно вращался", systemImage: "arrow.triangle.2.circlepath") }
@@ -66,7 +71,7 @@ struct EventDetailView: View {
                     VStack(alignment: .leading, spacing: 10) {
                         Text("Что происходило на самом деле").font(.headline)
                         Picker("Ваша отметка", selection: Binding(
-                            get: { session.review?.label(for: candidate, version: session.jumpAnalysis?.detectorVersion ?? "") ?? .unreviewed },
+                            get: { label(for: candidate) },
                             set: { recorder.label(candidate.id, as: $0, in: session.id) }
                         )) {
                             ForEach(JumpLabel.allCases, id: \.self) { Text($0.title).tag($0) }
@@ -85,7 +90,7 @@ struct EventDetailView: View {
                             }.lagoonCard()
                         }
                     }
-                    Text("Это просмотр данных телефона, а не подтверждение прыжка. Разгрузка не равна времени полёта; высота пока не рассчитывается. Нагрузка около 1 g соответствует покою, около 0 g — почти свободному падению телефона.")
+                    Text("Разгрузка — участок со сниженной нагрузкой на телефон. Около 1 g соответствует покою, около 0 g — почти свободному падению телефона.")
                         .font(.footnote).foregroundStyle(.secondary)
                 } else {
                     ContentUnavailableView("Событий нет", systemImage: "waveform", description: Text("Вернитесь в сводку и выполните разбор сессии."))
@@ -140,6 +145,26 @@ struct EventDetailView: View {
             window = value
         } catch is CancellationError { }
         catch { self.error = "Не удалось прочитать данные. \(error.localizedDescription)" }
+    }
+}
+
+struct TossHeightReadout: View {
+    let candidate: JumpCandidate
+    let label: JumpLabel
+
+    var body: some View {
+        if let height = candidate.approximateTossHeightMeters(label: label) {
+            VStack(alignment: .leading, spacing: 4) {
+                LabeledContent("Высота подброса", value: "≈ \(metric(height, unit: "м", digits: 2))")
+                    .font(.headline)
+                Text("Оценка по разгрузке, если телефон отпустили и поймали примерно на одном уровне.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        } else if label == .bodyJump {
+            LabeledContent("Высота прыжка", value: "Пока недоступна")
+                .foregroundStyle(.secondary)
+        }
     }
 }
 
