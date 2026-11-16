@@ -11,6 +11,8 @@
         C00100000000000000000003 /* SessionLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00200000000000000000003 /* SessionLog.swift */; };
         C00100000000000000000004 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = C00200000000000000000006 /* Assets.xcassets */; };
         C00100000000000000000005 /* JumpDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00200000000000000000007 /* JumpDetector.swift */; };
+        C00100000000000000000006 /* SessionInsights.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00200000000000000000008 /* SessionInsights.swift */; };
+        C00100000000000000000007 /* InsightsViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00200000000000000000009 /* InsightsViews.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -21,6 +23,8 @@
         C00200000000000000000005 /* KiteSessions.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = KiteSessions.app; sourceTree = BUILT_PRODUCTS_DIR; };
         C00200000000000000000006 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
         C00200000000000000000007 /* JumpDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JumpDetector.swift; sourceTree = "<group>"; };
+        C00200000000000000000008 /* SessionInsights.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionInsights.swift; sourceTree = "<group>"; };
+        C00200000000000000000009 /* InsightsViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InsightsViews.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -50,6 +54,8 @@
                 C00200000000000000000002 /* SessionRecorder.swift */,
                 C00200000000000000000003 /* SessionLog.swift */,
                 C00200000000000000000007 /* JumpDetector.swift */,
+                C00200000000000000000009 /* InsightsViews.swift */,
+                C00200000000000000000008 /* SessionInsights.swift */,
             );
             path = Sources;
             sourceTree = "<group>";
@@ -124,6 +130,8 @@
                 C00100000000000000000002 /* SessionRecorder.swift in Sources */,
                 C00100000000000000000003 /* SessionLog.swift in Sources */,
                 C00100000000000000000005 /* JumpDetector.swift in Sources */,
+                C00100000000000000000007 /* InsightsViews.swift in Sources */,
+                C00100000000000000000006 /* SessionInsights.swift in Sources */,
             );
             runOnlyForDeploymentPostprocessing = 0;
         };
@@ -161,10 +169,10 @@
             buildSettings = {
                 ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
                 CODE_SIGN_STYLE = Automatic;
-                CURRENT_PROJECT_VERSION = 5;
+                CURRENT_PROJECT_VERSION = 6;
                 GENERATE_INFOPLIST_FILE = NO;
                 INFOPLIST_FILE = Info.plist;
-                MARKETING_VERSION = 0.3.0;
+                MARKETING_VERSION = 0.4.0;
                 PRODUCT_BUNDLE_IDENTIFIER = local.kitesessions.prototype;
                 PRODUCT_NAME = "$(TARGET_NAME)";
                 SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -177,10 +185,10 @@
             buildSettings = {
                 ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
                 CODE_SIGN_STYLE = Automatic;
-                CURRENT_PROJECT_VERSION = 5;
+                CURRENT_PROJECT_VERSION = 6;
                 GENERATE_INFOPLIST_FILE = NO;
                 INFOPLIST_FILE = Info.plist;
-                MARKETING_VERSION = 0.3.0;
+                MARKETING_VERSION = 0.4.0;
                 PRODUCT_BUNDLE_IDENTIFIER = local.kitesessions.prototype;
                 PRODUCT_NAME = "$(TARGET_NAME)";
                 SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
