@@ -1,5 +1,14 @@
 # Rider
 
+## Новое в 0.8.0
+
+- В «Тесте на земле» есть режимы «Подброс телефона» и «Имитация рукой». Подброс использует интервал разгрузки и предполагает одинаковую высоту выпуска и ловли. Имитация ищет подъём и возврат по барометру, показывает подъём и время выше исходного уровня. Подержите телефон внизу около трёх секунд, поднимите его и верните вниз. Голос сообщает результат после завершения события. Дистанция остаётся пустой при неточных или отсутствующих точках GPS.
+- Калибровка после обычной записи сохраняется для указанного положения телефона. Rider повторно использует её до 30 дней на той же версии iOS. В «Настройках записи» можно пропустить сохранённую поправку и откалибровать заново в следующей записи. После смены чехла или крепления лучше перемерить её.
+- «Активность» над спотом и в фильтре истории. Для кайтсёрфинга и сноукайтинга можно выбрать биг-эйр или вейкстайл. Вкладка «Прогресс» временно скрыта.
+- В «Кайт» выбирается бренд, затем модель. Поиск поддерживает варианты написания популярных брендов кириллицей. Для других моделей, размера и года есть ручной ввод. Каталог работает офлайн и включает актуальные и некоторые прошлые модели.
+
+Источники каталога: [Airush](https://airush.com/collections/kites), [Cabrinha](https://www.cabrinha.com/collections/kites), [CORE](https://ridecore.com/us/kite/bars/sensor-4-pro), [CrazyFly](https://www.crazyflykites.com/kites), [Duotone](https://www.duotonesports.com/en/uk/kiteboarding/kites), [Eleveight](https://eleveight.world/kite/kites/), [Epic Kites](https://www.epickiteskiteboarding.com/gear/kites/), [F-ONE](https://www.f-one.world/en/kite/kites), [FLYSURFER](https://flysurfer.com/products/kites/), [GA Kites](https://ga-kiteboarding.com/homepage-2022/kites/), [GIN](https://ginkiteboarding.com/our-collection), [GONG](https://www.gong-galaxy.com/en/blogs/magazine/gear-our-new-range-of-kites), [Harlem](https://harlemkitesurfing.com/collections/kites), [Naish](https://www.naish.com/collections/kite), [North](https://northactionsports.com/collections/kites), [Ozone](https://ozonekites.com/kite/), [ParAAvis](https://paraavis.com/kites/), [PLKB](https://www.plkb.world/kiteboarding/products), [Reedin](https://reedin.com/kitesurfing/kites/), [RRD](https://watersports.robertoriccidesigns.com/collections/kites), [Slingshot](https://slingshotsports.com/pages/kite), [Spleene](https://www.spleene-kiteboarding.com/en/Kites-Bars/), [Takoon](https://takoon.com/en-eu/collections/collection-kite), [Ventum](https://ventumkiteboarding.com/kites/).
+
 ## Новое в 0.7.0
 
 Перед стартом спот, снаряжение и доска выбираются отдельными строками. В переключателе «Устройство» можно выбрать телефон или посмотреть статус записи с часов. Для записи с часов требуется отдельная версия Rider для Apple Watch.

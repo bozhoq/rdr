@@ -33,6 +33,35 @@ import FoundationXML
         check(LiveJumpEstimate.spokenHeight(2) == "два метра", "Russian plural for integer height")
         check(LiveJumpEstimate.spokenHeight(10.1) == "десять целых одна десятая метра", "Russian speech preserves tenths")
 
+        let smallToss = JumpCandidate(startSeconds: 0, endSeconds: 0.64, minimumLoadG: 0.1,
+                                     returnPeakG: 7, maximumRotationRadiansPerSecond: 1)
+        let toss = LiveJumpEstimate.phoneToss(smallToss)
+        check(toss?.isPhoneToss == true && abs((toss?.heightMeters ?? 0) - 0.5021) < 0.001 && toss?.distanceMeters == nil,
+              "Half-meter phone toss works without barometer or GPS")
+        var simulation = HandSimulationDetector()
+        let raised = [0.01, 0.02, 0.00, 0.33, 0.52, 0.49, 0.17]
+        let lifts = raised.enumerated().compactMap { index, meters in simulation.consume(altitude(Double(index), meters)) }
+        check(lifts.count == 1 && abs(lifts[0].1 - 0.51) < 1e-9 && lifts[0].0.unloadingSeconds == 2,
+              "Hand simulation detects a lift, time above its baseline, and return without free fall")
+        var gapSimulation = HandSimulationDetector()
+        let brokenLift = raised.enumerated().compactMap { index, meters in
+            gapSimulation.consume(altitude(Double(index) + (index == 6 ? 4 : 0), meters))
+        }
+        check(brokenLift.isEmpty, "Hand simulation cannot bridge a barometer gap")
+        let measurement = MotionCalibration(completedAtSeconds: 5, frequencyHz: 99, verticalOffset: 0.04, verticalNoise: 0.01)
+        let preset = SavedMotionCalibration(measurement: measurement, measuredAt: origin, systemVersion: "26.1")
+        check(preset.usable(at: origin.addingTimeInterval(600), systemVersion: "26.1")?.completedAtSeconds == 0,
+              "A fresh calibration applies from the start of a new session")
+        check(preset.usable(at: origin.addingTimeInterval(600), systemVersion: "26.2") == nil &&
+              preset.usable(at: origin.addingTimeInterval(31 * 86_400), systemVersion: "26.1") == nil,
+              "Stale calibrations and calibrations from another iOS version do not carry over")
+        check(KiteCatalog.brands.first(where: { $0.name == "CORE" })?.matches("кор") == true &&
+              KiteCatalog.brands.first(where: { $0.name == "Duotone" })?.models.contains("Evo D/LAB") == true,
+              "Catalogue preserves model variants and Russian aliases")
+        check(SessionSetup(sport: .windsurf, kiteStyle: .bigAir).cleaned.kiteStyle == nil &&
+              SessionSetup(sport: .kite, kiteStyle: .wakestyle).activityTitle.contains("Вейкстайл"),
+              "Kite style is scoped to compatible activities")
+
         var filter = RouteFilter()
         let first = filter.accept(point(0), notBefore: origin)!
         check(first.segment == 1 && filter.metrics.distanceMeters == 0, "First fix is not travelled distance")
