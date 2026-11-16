@@ -86,17 +86,23 @@ struct SessionSummary: Codable, Identifiable {
     var altitude: AltitudeMetrics?
     var motionCalibration: MotionCalibration?
     var liveJumpEstimates: [String: LiveJumpEstimate]?
+    var phoneTossTest: Bool?
+    var handSimulationTest: Bool?
+    var reusedMotionCalibration: Bool?
 
     func liveEstimate(for event: JumpCandidate) -> LiveJumpEstimate? {
-        guard let version = jumpAnalysis?.detectorVersion, version == JumpDetector.version else { return nil }
+        guard let version = jumpAnalysis?.detectorVersion else { return nil }
+        guard let estimate = liveJumpEstimates?[SessionReview.key(for: event, version: version)] else { return nil }
         let label = review?.label(for: event, version: version)
-        guard label != .phoneToss, label != .otherMovement else { return nil }
-        return liveJumpEstimates?[SessionReview.key(for: event, version: version)]
+        guard label != .otherMovement else { return nil }
+        if version == HandSimulationDetector.version { return estimate }
+        if estimate.isPhoneToss == true { return label == .bodyJump ? nil : estimate }
+        return label == .phoneToss ? nil : estimate
     }
 
     func matches(_ query: String) -> Bool {
         let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        return query.isEmpty || [review?.title ?? "", review?.notes ?? "", setup?.spot ?? "", setup?.kite ?? "", setup?.board ?? "", setup?.sport.title ?? ""]
+        return query.isEmpty || [review?.title ?? "", review?.notes ?? "", setup?.spot ?? "", setup?.kite ?? "", setup?.board ?? "", setup?.activityTitle ?? ""]
             .contains { $0.localizedStandardContains(query) }
     }
 }
@@ -255,6 +261,20 @@ struct MotionCalibration: Codable {
 
     func correctedVertical(_ raw: Double, at seconds: Double) -> Double {
         seconds > completedAtSeconds ? raw - verticalOffset : raw
+    }
+}
+
+struct SavedMotionCalibration: Codable {
+    let measurement: MotionCalibration
+    let measuredAt: Date
+    let systemVersion: String
+
+    func usable(at now: Date, systemVersion: String) -> MotionCalibration? {
+        guard self.systemVersion == systemVersion, (0...30 * 86_400).contains(now.timeIntervalSince(measuredAt)),
+              measurement.verticalOffset.isFinite, abs(measurement.verticalOffset) <= 0.30,
+              (90...200).contains(measurement.frequencyHz), (0...0.20).contains(measurement.verticalNoise) else { return nil }
+        return MotionCalibration(completedAtSeconds: 0, frequencyHz: measurement.frequencyHz,
+                                 verticalOffset: measurement.verticalOffset, verticalNoise: measurement.verticalNoise)
     }
 }
 

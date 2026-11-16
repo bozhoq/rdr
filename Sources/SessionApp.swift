@@ -23,7 +23,7 @@ private struct Tabs: View {
     @State private var selectedTab = Tab.record
 
     private enum Tab: Hashable {
-        case record, history, progress
+        case record, history
     }
 
     var body: some View {
@@ -43,9 +43,6 @@ private struct Tabs: View {
             .tabItem { Label("История", systemImage: "clock.arrow.circlepath") }
             .tag(Tab.history)
 
-            NavigationStack { ProgressViewRider(recorder: recorder) }
-                .tabItem { Label("Прогресс", systemImage: "chart.bar.fill") }
-                .tag(Tab.progress)
         }
         .tint(RiderTheme.accent)
         .alert("Rider", isPresented: Binding(
@@ -72,7 +69,7 @@ private struct RecordingView: View {
     private enum RecordingDevice: Hashable { case phone, watch }
     private enum GearField: String, Identifiable {
         case spot = "Спот"
-        case kite = "Снаряжение"
+        case kite = "Кайт"
         case board = "Доска"
         var id: Self { self }
 
@@ -105,9 +102,14 @@ private struct RecordingView: View {
             }
         }
         .sheet(item: $gear) { field in
-            GearChoice(title: field.rawValue, initial: recorder.draftSetup[keyPath: field.key],
-                       options: field.choices(SetupSuggestions(history: recorder.history))) { value in
-                recorder.draftSetup[keyPath: field.key] = value
+            let suggestions = SetupSuggestions(history: recorder.history)
+            if field == .kite, usesKitePicker {
+                KitePicker(selection: $recorder.draftSetup.kite, recent: suggestions.kites)
+            } else {
+                GearChoice(title: gearTitle(field), initial: recorder.draftSetup[keyPath: field.key],
+                           options: field.choices(suggestions)) { value in
+                    recorder.draftSetup[keyPath: field.key] = value
+                }
             }
         }
         .sheet(isPresented: $showingTools) {
@@ -126,6 +128,19 @@ private struct RecordingView: View {
                 Text("Новая сессия").font(.largeTitle.bold())
 
                 VStack(spacing: 0) {
+                    VStack(spacing: 11) {
+                        ActivityFields(setup: $recorder.draftSetup)
+                        if recorder.draftSetup.sport == .groundTest {
+                            Picker("Режим теста", selection: $recorder.groundTestMode) {
+                                ForEach(GroundTestMode.allCases, id: \.self) { Text($0.title).tag($0) }
+                            }
+                            if recorder.groundTestMode == .handSimulation {
+                                Text("Подержите телефон внизу около трёх секунд, плавно поднимите и верните вниз.")
+                                    .font(.footnote).foregroundStyle(.secondary)
+                            }
+                        }
+                    }.padding(.vertical, 12)
+                    Divider()
                     gearRow(.spot)
                     Divider()
                     gearRow(.kite)
@@ -156,11 +171,11 @@ private struct RecordingView: View {
 
                 DisclosureGroup("Настройки записи") {
                     VStack(spacing: 15) {
-                        Picker("Занятие", selection: $recorder.draftSetup.sport) {
-                            ForEach(SessionSport.allCases, id: \.self) { Text($0.title).tag($0) }
-                        }
                         Picker("Где телефон", selection: $recorder.draftSetup.placement) {
                             ForEach(PhonePlacement.allCases, id: \.self) { Text($0.title).tag($0) }
+                        }
+                        if recorder.savedCalibration != nil {
+                            Toggle("Калибровать заново при следующей записи", isOn: $recorder.recalibrateNextSession)
                         }
                         locationControls
                     }.padding(.top, 12)
@@ -175,7 +190,7 @@ private struct RecordingView: View {
         let value = recorder.draftSetup[keyPath: field.key]
         return Button { gear = field } label: {
             HStack(spacing: 10) {
-                Text(field.rawValue).font(.body.weight(.medium)).foregroundStyle(.primary)
+                Text(gearTitle(field)).font(.body.weight(.medium)).foregroundStyle(.primary)
                 Spacer(minLength: 8)
                 Text(value.isEmpty ? "Выбрать" : value).foregroundStyle(.secondary).lineLimit(2)
                 Image(systemName: "chevron.right").font(.caption.weight(.semibold)).accessibilityHidden(true)
@@ -183,6 +198,18 @@ private struct RecordingView: View {
             .padding(.vertical, 13)
             .contentShape(Rectangle())
         }.buttonStyle(.plain)
+    }
+
+    private var usesKitePicker: Bool {
+        let sport = recorder.draftSetup.sport
+        return sport.usesKite || sport == .groundTest || sport == .unclassified
+    }
+
+    private func gearTitle(_ field: GearField) -> String {
+        guard field == .kite else { return field.rawValue }
+        if recorder.draftSetup.sport == .wing { return "Винг" }
+        if recorder.draftSetup.sport == .windsurf { return "Парус" }
+        return field.rawValue
     }
 
     private func recording(_ session: SessionSummary) -> some View {
@@ -261,6 +288,9 @@ private struct RecordingView: View {
             Form {
                 Section("Калибровка телефона") {
                     if let calibration = session.motionCalibration {
+                        if session.reusedMotionCalibration == true {
+                            Label("Используется сохранённая калибровка", systemImage: "checkmark.circle")
+                        }
                         CalibrationRows(calibration: calibration)
                     } else if recorder.isCalibrating {
                         ProgressView("Замрите на 5 секунд")
@@ -394,8 +424,15 @@ private struct HistoryView: View {
     @ObservedObject var recorder: SessionRecorder
     @State private var pendingDeletion: SessionSummary?
     @State private var search = ""
+    @State private var activityFilter: SessionSport?
+    @State private var styleFilter: KiteStyle?
 
-    private var filtered: [SessionSummary] { recorder.history.filter { $0.matches(search) } }
+    private var filtered: [SessionSummary] {
+        recorder.history.filter { session in
+            (activityFilter == nil || activityFilter == (session.setup?.sport ?? .unclassified)) &&
+            (styleFilter == nil || styleFilter == session.setup?.kiteStyle) && session.matches(search)
+        }
+    }
 
     var body: some View {
         Group {
@@ -427,7 +464,7 @@ private struct HistoryView: View {
                                     .foregroundStyle(.secondary)
                             }
                             if let setup = session.setup {
-                                Text([setup.sport.title, setup.spot].filter { !$0.isEmpty }.joined(separator: " · "))
+                                Text([setup.activityTitle, setup.spot].filter { !$0.isEmpty }.joined(separator: " · "))
                                     .font(.subheadline).foregroundStyle(RiderTheme.foam).lineLimit(2)
                             }
                             HStack(spacing: 16) {
@@ -455,7 +492,9 @@ private struct HistoryView: View {
                 .listStyle(.insetGrouped)
                 .scrollContentBackground(.hidden)
                 .overlay {
-                    if filtered.isEmpty { ContentUnavailableView.search(text: search) }
+                    if filtered.isEmpty {
+                        ContentUnavailableView("Нет подходящих сессий", systemImage: "line.3.horizontal.decrease.circle")
+                    }
                 }
             }
         }
@@ -464,6 +503,27 @@ private struct HistoryView: View {
         .toolbarBackground(.visible, for: .navigationBar, .tabBar)
         .navigationTitle("История")
         .searchable(text: $search, prompt: "Название, спот, снаряжение, заметки")
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
+                    Picker("Активность", selection: $activityFilter) {
+                        Text("Все активности").tag(nil as SessionSport?)
+                        ForEach(SessionSport.allCases, id: \.self) { Text($0.title).tag(Optional($0)) }
+                    }
+                    if activityFilter == nil || activityFilter?.supportsKiteStyle == true {
+                        Picker("Стиль", selection: $styleFilter) {
+                            Text("Все стили").tag(nil as KiteStyle?)
+                            ForEach(KiteStyle.allCases, id: \.self) { Text($0.title).tag(Optional($0)) }
+                        }
+                    }
+                } label: {
+                    Label(activityFilter?.title ?? "Активность", systemImage: "line.3.horizontal.decrease.circle")
+                }
+            }
+        }
+        .onChange(of: activityFilter) { _, newFilter in
+            if newFilter?.supportsKiteStyle == false { styleFilter = nil }
+        }
         .confirmationDialog("Удалить сессию и её лог?", isPresented: Binding(
             get: { pendingDeletion != nil },
             set: { if !$0 { pendingDeletion = nil } }
@@ -554,10 +614,12 @@ struct SessionDetail: View {
         Button("Название и заметки") { editingNotes = true }
             .disabled(recorder.analyzingSessionID == session.id)
 
-        LabeledContent("Занятие", value: session.setup?.sport.title ?? "Не указано")
+        LabeledContent("Активность", value: session.setup?.activityTitle ?? "Не указано")
         if let setup = session.setup {
             if !setup.spot.isEmpty { LabeledContent("Спот", value: setup.spot) }
-            if !setup.kite.isEmpty { LabeledContent("Кайт / винг", value: setup.kite) }
+            if !setup.kite.isEmpty {
+                LabeledContent(setup.sport == .wing ? "Винг" : setup.sport == .windsurf ? "Парус" : "Кайт", value: setup.kite)
+            }
             if !setup.board.isEmpty { LabeledContent("Доска / лыжи", value: setup.board) }
             LabeledContent("Где телефон", value: setup.placement.title)
         }
@@ -579,7 +641,7 @@ struct SessionDetail: View {
                 }
             }
         }
-        if session.jumpAnalysis != nil { analyzeButton("Повторить разбор") }
+        if session.jumpAnalysis != nil, session.handSimulationTest != true { analyzeButton("Повторить разбор") }
 
         NavigationLink { SessionCardPreview(session: session) } label: {
             Label("Карточка сессии", systemImage: "photo")
@@ -616,7 +678,7 @@ struct SessionDetail: View {
         if let calibration = session.motionCalibration {
             DisclosureGroup("Калибровка телефона") {
                 CalibrationRows(calibration: calibration)
-                LabeledContent("Поправка применяется после", value: eventTimeText(calibration.completedAtSeconds))
+                LabeledContent("Поправка", value: session.reusedMotionCalibration == true ? "Сохранённая, с начала" : "После \(eventTimeText(calibration.completedAtSeconds))")
             }
         }
     }

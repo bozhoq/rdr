@@ -4,20 +4,114 @@ import MapKit
 import SwiftUI
 import UniformTypeIdentifiers
 
+struct ActivityFields: View {
+    @Binding var setup: SessionSetup
+
+    var body: some View {
+        Picker("Активность", selection: $setup.sport) {
+            ForEach(SessionSport.allCases, id: \.self) { Text($0.title).tag($0) }
+        }
+        .onChange(of: setup.sport) { _, activity in
+            if !activity.supportsKiteStyle { setup.kiteStyle = nil }
+        }
+        if setup.sport.supportsKiteStyle {
+            Picker("Стиль", selection: $setup.kiteStyle) {
+                Text("Не указан").tag(nil as KiteStyle?)
+                ForEach(KiteStyle.allCases, id: \.self) { Text($0.title).tag(Optional($0)) }
+            }
+        }
+    }
+}
+
+struct KitePicker: View {
+    @Environment(\.dismiss) private var dismiss
+    @Binding var selection: String
+    let recent: [String]
+    @State private var brandSearch = ""
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if brandSearch.isEmpty, !recent.isEmpty {
+                    Section("Недавние") {
+                        ForEach(recent, id: \.self) { kite in Button(kite) { choose(kite) } }
+                    }
+                }
+                Section("Бренды") {
+                    ForEach(KiteCatalog.brands.filter { $0.matches(brandSearch) }) { brand in
+                        NavigationLink(brand.name) {
+                            KiteModels(brand: brand, choose: choose)
+                        }
+                    }
+                }
+                NavigationLink("Ввести кайт вручную") { KiteManualEntry(value: selection, choose: choose) }
+            }
+            .searchable(text: $brandSearch, prompt: "Поиск бренда")
+            .navigationTitle("Кайт")
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Закрыть") { dismiss() } } }
+        }
+        .tint(RiderTheme.accent)
+    }
+
+    private func choose(_ value: String) {
+        selection = String(value.trimmingCharacters(in: .whitespacesAndNewlines).prefix(100))
+        dismiss()
+    }
+}
+
+private struct KiteModels: View {
+    let brand: KiteCatalog.Brand
+    let choose: (String) -> Void
+    @State private var search = ""
+
+    var body: some View {
+        List {
+            let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
+            ForEach(brand.models.filter { query.isEmpty || $0.localizedStandardContains(query) }, id: \.self) { model in
+                Button(model) { choose("\(brand.name) \(model)") }
+            }
+            NavigationLink("Другой вариант \(brand.name)") {
+                KiteManualEntry(value: brand.name + " ", choose: choose)
+            }
+        }
+        .searchable(text: $search, prompt: "Поиск модели")
+        .navigationTitle(brand.name)
+    }
+}
+
+private struct KiteManualEntry: View {
+    @State var value: String
+    let choose: (String) -> Void
+
+    var body: some View {
+        Form {
+            TextField("Бренд, модель и размер", text: $value)
+                .onChange(of: value) { _, text in if text.count > 100 { value = String(text.prefix(100)) } }
+            Button("Сохранить кайт") { choose(value) }
+        }.navigationTitle("Указать вручную")
+    }
+}
+
 struct SetupFields: View {
     @Binding var setup: SessionSetup
     var recent: [SessionSummary] = []
+    @State private var showingKitePicker = false
     var body: some View {
         let suggestions = SetupSuggestions(history: recent)
-        Picker("Занятие", selection: $setup.sport) {
-            ForEach(SessionSport.allCases, id: \.self) { Text($0.title).tag($0) }
-        }
+        ActivityFields(setup: $setup)
         TextField("Спот или место", text: $setup.spot)
             .onChange(of: setup.spot) { _, value in setup.spot = String(value.prefix(100)) }
         RecentChoice(title: "Недавние споты", values: suggestions.spots, selection: $setup.spot)
-        TextField("Кайт / винг и размер, например 9 м²", text: $setup.kite)
-            .onChange(of: setup.kite) { _, value in setup.kite = String(value.prefix(100)) }
-        RecentChoice(title: "Мои кайты / винги", values: suggestions.kites, selection: $setup.kite)
+        if setup.sport == .wing || setup.sport == .windsurf {
+            TextField(setup.sport == .wing ? "Винг" : "Парус", text: $setup.kite)
+                .onChange(of: setup.kite) { _, value in setup.kite = String(value.prefix(100)) }
+        } else {
+            Button { showingKitePicker = true } label: {
+                LabeledContent("Кайт", value: setup.kite.isEmpty ? "Выбрать" : setup.kite)
+            }.sheet(isPresented: $showingKitePicker) {
+                KitePicker(selection: $setup.kite, recent: suggestions.kites)
+            }
+        }
         TextField("Доска / лыжи", text: $setup.board)
             .onChange(of: setup.board) { _, value in setup.board = String(value.prefix(100)) }
         RecentChoice(title: "Мои доски / лыжи", values: suggestions.boards, selection: $setup.board)

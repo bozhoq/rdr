@@ -16,6 +16,8 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
     @Published private(set) var isCalibrating = false
     @Published private(set) var calibrationMessage: String?
     @Published private(set) var voiceEnabled = (UserDefaults.standard.object(forKey: "rider.jumpVoice") as? Bool) ?? true
+    @Published var groundTestMode = GroundTestMode.normal
+    @Published var recalibrateNextSession = false
 
     private let store = SessionStore()
     private let motion = CMMotionManager()
@@ -33,6 +35,7 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
     private var lastLocationTimestamp: Date?
     private var routeFilter = RouteFilter()
     private var jumpDetector = JumpDetector()
+    private var handSimulation = HandSimulationDetector()
     private var lastMarkerAt: ContinuousClock.Instant?
     private var calibrationStartedAt: ContinuousClock.Instant?
     private var calibrationSamples: [MotionSample] = []
@@ -40,9 +43,20 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
     private var recentFixes: [RoutePoint] = []
     private var pendingJumps: [JumpCandidate] = []
     private var motionClock: Date?
+    private let calibrationKey = "rider.calibrationByPlacement"
 
     var motionAvailable: Bool { motion.isDeviceMotionAvailable }
     var locationAuthorized: Bool { authorization == .authorizedWhenInUse || authorization == .authorizedAlways }
+
+    private var calibrationPresets: [String: SavedMotionCalibration] {
+        guard let data = UserDefaults.standard.data(forKey: calibrationKey) else { return [:] }
+        return (try? JSONDecoder().decode([String: SavedMotionCalibration].self, from: data)) ?? [:]
+    }
+
+    var savedCalibration: MotionCalibration? {
+        guard draftSetup.placement != .unspecified else { return nil }
+        return calibrationPresets[draftSetup.placement.rawValue]?.usable(at: Date(), systemVersion: UIDevice.current.systemVersion)
+    }
 
     override init() {
         super.init()
@@ -72,16 +86,23 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
     func start() {
         guard summary == nil, analyzingSessionID == nil, motionAvailable else { return }
         UIDevice.current.isBatteryMonitoringEnabled = true
+        let practiceMode = draftSetup.sport == .groundTest ? groundTestMode : .normal
+        let reusedCalibration = recalibrateNextSession || practiceMode != .normal ? nil : savedCalibration
+        let detectorVersion = practiceMode == .handSimulation ? HandSimulationDetector.version : JumpDetector.version
         let session = SessionSummary(
             startedAt: Date(),
             gpsEnabledAtStart: locationAuthorized,
             batteryAtStartPercent: batteryPercent,
-            jumpAnalysis: JumpAnalysis(),
+            jumpAnalysis: JumpAnalysis(detectorVersion: detectorVersion),
             markers: [],
             setup: draftSetup.cleaned,
             gpsMetrics: RouteMetrics(),
             altitude: AltitudeMetrics(supported: CMAltimeter.isRelativeAltitudeAvailable()),
-            liveJumpEstimates: [:]
+            motionCalibration: reusedCalibration,
+            liveJumpEstimates: [:],
+            phoneTossTest: practiceMode == .phoneToss,
+            handSimulationTest: practiceMode == .handSimulation,
+            reusedMotionCalibration: reusedCalibration != nil
         )
         do {
             let newLog = try store.makeLog(for: session)
@@ -101,6 +122,7 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
         }
 
         live = session
+        recalibrateNextSession = false
         startedAt = clock.now
         lastCheckpoint = startedAt
         lastMotionReceivedAt = nil
@@ -109,6 +131,7 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
         routeFilter = RouteFilter()
         if let data = try? JSONEncoder().encode(draftSetup.cleaned) { UserDefaults.standard.set(data, forKey: "rider.sessionSetup") }
         jumpDetector = JumpDetector()
+        handSimulation = HandSimulationDetector()
         lastMarkerAt = nil
         motionIsRecent = false
         resetCalibration()
@@ -248,7 +271,8 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
 
     @MainActor
     func analyze(_ id: UUID) async {
-        guard summary == nil, analyzingSessionID == nil else { return }
+        guard summary == nil, analyzingSessionID == nil,
+              history.first(where: { $0.id == id })?.handSimulationTest != true else { return }
         analyzingSessionID = id
         defer { analyzingSessionID = nil }
         let url = store.logURL(for: id)
@@ -314,10 +338,14 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
             try log.append("motion", sample)
             session.motion.add(elapsed)
             try updateCalibration(sample, session: &session, log: log)
-            if let candidate = jumpDetector.process(sample) {
+            if session.handSimulationTest != true, let candidate = jumpDetector.process(sample) {
                 try log.append("jumpCandidate", candidate)
                 session.jumpAnalysis?.candidates.append(candidate)
-                if session.altitude?.supported == true, session.altitude?.stoppedWithError == false {
+                if session.phoneTossTest == true {
+                    if let estimate = LiveJumpEstimate.phoneToss(candidate) {
+                        try storeEstimate(estimate, for: candidate, session: &session, log: log, speak: true)
+                    }
+                } else if session.altitude?.supported == true, session.altitude?.stoppedWithError == false {
                     pendingJumps.append(candidate)
                 }
             }
@@ -352,6 +380,12 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
         }
         try log.append("motionCalibration", result)
         session.motionCalibration = result
+        if let placement = session.setup?.placement, placement != .unspecified,
+           session.phoneTossTest != true, session.handSimulationTest != true {
+            var presets = calibrationPresets
+            presets[placement.rawValue] = SavedMotionCalibration(measurement: result, measuredAt: Date(), systemVersion: UIDevice.current.systemVersion)
+            if let data = try? JSONEncoder().encode(presets) { UserDefaults.standard.set(data, forKey: calibrationKey) }
+        }
         resetCalibration()
     }
 
@@ -374,6 +408,13 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
                     self.recentAltitude.append(sample)
                     self.recentAltitude.removeAll { sample.elapsedSinceFirstSampleSeconds - $0.elapsedSinceFirstSampleSeconds > 12 }
                     if self.recentAltitude.count > 128 { self.recentAltitude.removeFirst() }
+                    if session.handSimulationTest == true, let (event, height) = self.handSimulation.consume(sample) {
+                        session.jumpAnalysis?.candidates.append(event)
+                        let distance = LiveJumpEstimate.gpsDistance(start: event.startSeconds, end: event.endSeconds,
+                                                                    gps: self.recentFixes, motionClock: self.motionClock)
+                        let estimate = LiveJumpEstimate(heightMeters: height, airtimeSeconds: event.unloadingSeconds, distanceMeters: distance)
+                        try self.storeEstimate(estimate, for: event, session: &session, log: log, speak: true)
+                    }
                 } else { return }
                 session.altitude = altitude
                 self.summary = session
@@ -404,7 +445,7 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
             session.locationCount += 1
             if let accepted = routeFilter.accept(sample, notBefore: session.startedAt) {
                 recentFixes.append(accepted)
-                recentFixes.removeAll { sample.timestamp.timeIntervalSince($0.sample.timestamp) > 12 }
+                recentFixes.removeAll { sample.timestamp.timeIntervalSince($0.sample.timestamp) > 24 }
                 if recentFixes.count > 128 { recentFixes.removeFirst() }
             }
             session.gpsMetrics = routeFilter.metrics
@@ -430,14 +471,19 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
               finishing || elapsed >= event.endSeconds + 2.5 {
             pendingJumps.removeFirst()
             guard let estimate = LiveJumpEstimate.measure(event, altitude: recentAltitude, gps: recentFixes, motionClock: motionClock) else { continue }
-            let key = SessionReview.key(for: event, version: JumpDetector.version)
-            try log.append("liveJumpEstimate", JumpEstimateEntry(startSeconds: event.startSeconds, endSeconds: event.endSeconds, estimate: estimate))
-            session.liveJumpEstimates?[key] = estimate
-            if !finishing, voiceEnabled, let phrase = LiveJumpEstimate.spokenHeight(estimate.heightMeters) {
-                let utterance = AVSpeechUtterance(string: phrase)
-                utterance.voice = AVSpeechSynthesisVoice(language: "ru-RU")
-                speech.speak(utterance)
-            }
+            try storeEstimate(estimate, for: event, session: &session, log: log, speak: !finishing)
+        }
+    }
+
+    private func storeEstimate(_ estimate: LiveJumpEstimate, for event: JumpCandidate,
+                               session: inout SessionSummary, log: SessionLog, speak: Bool) throws {
+        let key = SessionReview.key(for: event, version: session.jumpAnalysis?.detectorVersion ?? JumpDetector.version)
+        try log.append("liveJumpEstimate", JumpEstimateEntry(startSeconds: event.startSeconds, endSeconds: event.endSeconds, estimate: estimate))
+        session.liveJumpEstimates?[key] = estimate
+        if speak, voiceEnabled, let phrase = LiveJumpEstimate.spokenHeight(estimate.heightMeters) {
+            let utterance = AVSpeechUtterance(string: phrase)
+            utterance.voice = AVSpeechSynthesisVoice(language: "ru-RU")
+            speech.speak(utterance)
         }
     }
 

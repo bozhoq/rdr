@@ -39,8 +39,9 @@ struct JumpHistoryTable<Destination: View>: View {
         analysis.candidates.enumerated().map { index, event in
             let label = session.review?.label(for: event, version: analysis.detectorVersion) ?? .unreviewed
             let estimate = session.liveEstimate(for: event)
-            return Row(index: index, event: event, height: estimate?.heightMeters ?? event.approximateTossHeightMeters(label: label),
-                       airtime: estimate?.airtimeSeconds, distance: estimate?.distanceMeters)
+            let manualToss = session.handSimulationTest == true ? nil : event.approximateTossHeightMeters(label: label)
+            return Row(index: index, event: event, height: estimate?.heightMeters ?? manualToss,
+                       airtime: estimate?.airtimeSeconds ?? manualToss.map { _ in event.unloadingSeconds }, distance: estimate?.distanceMeters)
         }.sorted { first, second in
             switch (first.value(for: sort), second.value(for: sort)) {
             case let (a?, b?) where a != b: return ascending ? a < b : a > b
@@ -155,17 +156,20 @@ struct EventDetailView: View {
                     }.buttonStyle(.bordered)
                     VStack(alignment: .leading, spacing: 12) {
                         LabeledContent("Момент", value: eventTimeText(candidate.startSeconds))
-                        Picker("Что происходило", selection: Binding(
-                            get: { label(for: candidate) },
-                            set: { recorder.label(candidate.id, as: $0, in: session.id) }
-                        )) {
-                            ForEach(JumpLabel.allCases, id: \.self) { Text($0.title).tag($0) }
-                        }.disabled(recorder.analyzingSessionID == session.id)
+                        if session.handSimulationTest != true {
+                            Picker("Что происходило", selection: Binding(
+                                get: { label(for: candidate) },
+                                set: { recorder.label(candidate.id, as: $0, in: session.id) }
+                            )) {
+                                ForEach(JumpLabel.allCases, id: \.self) { Text($0.title).tag($0) }
+                            }.disabled(recorder.analyzingSessionID == session.id)
+                        }
                         if let estimate = session.liveEstimate(for: candidate) {
-                            LabeledContent("Высота", value: "≈ \(metric(estimate.heightMeters, unit: "м"))")
-                            LabeledContent("Зависание", value: "≈ \(metric(estimate.airtimeSeconds, unit: "с"))")
+                            LabeledContent(estimate.isPhoneToss == true ? "Высота подброса" : "Высота", value: "≈ \(metric(estimate.heightMeters, unit: "м"))")
+                            LabeledContent(session.handSimulationTest == true ? "Время выше исходного уровня" : estimate.isPhoneToss == true ? "Полёт телефона" : "Зависание",
+                                           value: "≈ \(metric(estimate.airtimeSeconds, unit: "с"))")
                             LabeledContent("Дистанция", value: metric(estimate.distanceMeters, unit: "м"))
-                            Text("Экспериментальная оценка по движению и барометру.").font(.footnote).foregroundStyle(.secondary)
+                            Text(estimateExplanation(estimate)).font(.footnote).foregroundStyle(.secondary)
                         } else {
                             TossHeightReadout(candidate: candidate, label: label(for: candidate))
                         }
@@ -188,13 +192,21 @@ struct EventDetailView: View {
         }
     }
 
+    private func estimateExplanation(_ estimate: LiveJumpEstimate) -> String {
+        if session.handSimulationTest == true { return "Имитация рукой. Барометр замеряет подъём телефона и время выше исходного уровня." }
+        if estimate.isPhoneToss == true { return "Оценка по времени полёта, если телефон отпустили и поймали примерно на одном уровне." }
+        return "Экспериментальная оценка по движению и барометру."
+    }
+
     private func diagnostics(_ candidate: JumpCandidate) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            LabeledContent("Разгрузка", value: metric(candidate.unloadingSeconds, unit: "с", digits: 2))
-            LabeledContent("Минимальная нагрузка", value: metric(candidate.minimumLoadG, unit: "g", digits: 2))
-            LabeledContent("Пик после события", value: metric(candidate.returnPeakG, unit: "g"))
-            if candidate.fastRotation { Label("Телефон сильно вращался", systemImage: "arrow.triangle.2.circlepath") }
-            if candidate.strongImpact { Label("Резкий удар или ловля телефона", systemImage: "exclamationmark.circle") }
+            if session.handSimulationTest != true {
+                LabeledContent("Разгрузка", value: metric(candidate.unloadingSeconds, unit: "с", digits: 2))
+                LabeledContent("Минимальная нагрузка", value: metric(candidate.minimumLoadG, unit: "g", digits: 2))
+                LabeledContent("Пик после события", value: metric(candidate.returnPeakG, unit: "g"))
+                if candidate.fastRotation { Label("Телефон сильно вращался", systemImage: "arrow.triangle.2.circlepath") }
+                if candidate.strongImpact { Label("Резкий удар или ловля телефона", systemImage: "exclamationmark.circle") }
+            }
 
             Picker("График", selection: $signal) {
                 Text("Нагрузка").tag(Signal.load)
@@ -223,7 +235,7 @@ struct EventDetailView: View {
                     LabeledContent(marker.kind.title, value: eventTimeText(marker.elapsedSeconds))
                 }
             }
-            Text("Выделенный участок — разгрузка. Около 1 g соответствует покою, около 0 g — почти свободному падению телефона.")
+            Text(session.handSimulationTest == true ? "Выделен подъём, обнаруженный барометром." : "Выделенный участок — разгрузка. Около 1 g соответствует покою, около 0 g — почти свободному падению телефона.")
                 .font(.footnote).foregroundStyle(.secondary)
         }.padding(.top, 12)
     }
