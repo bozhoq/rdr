@@ -95,13 +95,17 @@ private struct KiteManualEntry: View {
 struct SetupFields: View {
     @Binding var setup: SessionSetup
     var recent: [SessionSummary] = []
+    var spots: [RiderSpot] = []
     @State private var showingKitePicker = false
+    @State private var showingSpotPicker = false
     var body: some View {
         let suggestions = SetupSuggestions(history: recent)
         ActivityFields(setup: $setup)
-        TextField("Спот или место", text: $setup.spot)
-            .onChange(of: setup.spot) { _, value in setup.spot = String(value.prefix(100)) }
-        RecentChoice(title: "Недавние споты", values: suggestions.spots, selection: $setup.spot)
+        Button { showingSpotPicker = true } label: {
+            LabeledContent("Спот", value: setup.spot.isEmpty ? "Выбрать" : setup.spot)
+        }.sheet(isPresented: $showingSpotPicker) {
+            SpotChoice(setup: $setup, spots: spots, recent: suggestions.spots)
+        }
         if setup.sport == .wing || setup.sport == .windsurf {
             TextField(setup.sport == .wing ? "Винг" : "Парус", text: $setup.kite)
                 .onChange(of: setup.kite) { _, value in setup.kite = String(value.prefix(100)) }
@@ -138,13 +142,14 @@ struct SetupEditor: View {
     @Environment(\.dismiss) private var dismiss
     @State var setup: SessionSetup
     var recent: [SessionSummary] = []
+    var spots: [RiderSpot] = []
     @State private var failed = false
     let onSave: (SessionSetup) -> Bool
 
     var body: some View {
         NavigationStack {
             Form {
-                Section { SetupFields(setup: $setup, recent: recent) }
+                Section { SetupFields(setup: $setup, recent: recent, spots: spots) }
                 footer: { Text("Тесты на земле и сессии без указанного занятия не входят в статистику катания. Положение телефона помогает разбирать реальные движения чехла.") }
                 .listRowBackground(RiderTheme.surface)
                 if failed { Text("Не удалось сохранить. Попробуйте ещё раз.").foregroundStyle(.red) }

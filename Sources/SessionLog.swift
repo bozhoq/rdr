@@ -90,12 +90,16 @@ struct SessionSummary: Codable, Identifiable {
     var handSimulationTest: Bool?
     var reusedMotionCalibration: Bool?
 
+    var canReplayGroundEvents: Bool {
+        handSimulationTest != true && (jumpAnalysis?.detectorVersion ?? JumpDetector.version) == JumpDetector.version
+    }
+
     func liveEstimate(for event: JumpCandidate) -> LiveJumpEstimate? {
         guard let version = jumpAnalysis?.detectorVersion else { return nil }
         guard let estimate = liveJumpEstimates?[SessionReview.key(for: event, version: version)] else { return nil }
         let label = review?.label(for: event, version: version)
         guard label != .otherMovement else { return nil }
-        if version == HandSimulationDetector.version { return estimate }
+        if handSimulationTest == true { return estimate }
         if estimate.isPhoneToss == true { return label == .bodyJump ? nil : estimate }
         return label == .phoneToss ? nil : estimate
     }

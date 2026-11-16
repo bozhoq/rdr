@@ -165,7 +165,8 @@ struct EventDetailView: View {
                             }.disabled(recorder.analyzingSessionID == session.id)
                         }
                         if let estimate = session.liveEstimate(for: candidate) {
-                            LabeledContent(estimate.isPhoneToss == true ? "Высота подброса" : "Высота", value: "≈ \(metric(estimate.heightMeters, unit: "м"))")
+                            LabeledContent(estimate.isPhoneToss == true ? "Высота подброса" : "Высота",
+                                           value: estimate.heightMeters.map { "≈ \(metric($0, unit: "м"))" } ?? "—")
                             LabeledContent(session.handSimulationTest == true ? "Время выше исходного уровня" : estimate.isPhoneToss == true ? "Полёт телефона" : "Зависание",
                                            value: "≈ \(metric(estimate.airtimeSeconds, unit: "с"))")
                             LabeledContent("Дистанция", value: metric(estimate.distanceMeters, unit: "м"))
@@ -195,13 +196,15 @@ struct EventDetailView: View {
     private func estimateExplanation(_ estimate: LiveJumpEstimate) -> String {
         if session.handSimulationTest == true { return "Имитация рукой. Барометр замеряет подъём телефона и время выше исходного уровня." }
         if estimate.isPhoneToss == true { return "Оценка по времени полёта, если телефон отпустили и поймали примерно на одном уровне." }
+        if estimate.heightMeters == nil { return "Приземление зафиксировано. Данных для оценки высоты недостаточно." }
         return "Экспериментальная оценка по движению и барометру."
     }
 
     private func diagnostics(_ candidate: JumpCandidate) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             if session.handSimulationTest != true {
-                LabeledContent("Разгрузка", value: metric(candidate.unloadingSeconds, unit: "с", digits: 2))
+                LabeledContent(session.jumpAnalysis?.detectorVersion == RidingJumpDetector.version ? "Полёт" : "Разгрузка",
+                               value: metric(candidate.unloadingSeconds, unit: "с", digits: 2))
                 LabeledContent("Минимальная нагрузка", value: metric(candidate.minimumLoadG, unit: "g", digits: 2))
                 LabeledContent("Пик после события", value: metric(candidate.returnPeakG, unit: "g"))
                 if candidate.fastRotation { Label("Телефон сильно вращался", systemImage: "arrow.triangle.2.circlepath") }
@@ -235,7 +238,7 @@ struct EventDetailView: View {
                     LabeledContent(marker.kind.title, value: eventTimeText(marker.elapsedSeconds))
                 }
             }
-            Text(session.handSimulationTest == true ? "Выделен подъём, обнаруженный барометром." : "Выделенный участок — разгрузка. Около 1 g соответствует покою, около 0 g — почти свободному падению телефона.")
+            Text(graphExplanation)
                 .font(.footnote).foregroundStyle(.secondary)
         }.padding(.top, 12)
     }
@@ -285,6 +288,12 @@ struct EventDetailView: View {
                     .font(.footnote).foregroundStyle(.secondary)
             }
         }
+    }
+
+    private var graphExplanation: String {
+        if session.handSimulationTest == true { return "Выделен подъём, обнаруженный барометром." }
+        if session.jumpAnalysis?.detectorVersion == RidingJumpDetector.version { return "Выделен интервал от отрыва до начала приземления." }
+        return "Выделенный участок — разгрузка. Около 1 g соответствует покою, около 0 g — почти свободному падению телефона."
     }
 
     @MainActor private func load() async {

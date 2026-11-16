@@ -58,6 +58,17 @@ struct SessionSetup: Codable {
     var board = ""
     var placement: PhonePlacement = .unspecified
     var kiteStyle: KiteStyle?
+    var spotID: UUID?
+
+    mutating func selectSpot(_ selected: RiderSpot) {
+        spot = selected.name
+        spotID = selected.id
+    }
+
+    mutating func setSpotName(_ name: String) {
+        if spot != name { spotID = nil }
+        spot = name
+    }
 
     var activityTitle: String {
         guard sport.supportsKiteStyle, let kiteStyle else { return sport.title }
@@ -70,6 +81,117 @@ struct SessionSetup: Codable {
         copy.board = String(board.trimmingCharacters(in: .whitespacesAndNewlines).prefix(100))
         if !sport.supportsKiteStyle { copy.kiteStyle = nil }
         return copy
+    }
+}
+
+struct RiderSpot: Codable, Identifiable, Hashable {
+    let id: UUID
+    let name: String
+    let latitude: Double
+    let longitude: Double
+    let notes: String?
+    let windyLink: URL?
+
+    init?(id: UUID = UUID(), name: String, latitude: String, longitude: String, notes: String = "", windyLink: String = "") {
+        let cleaned = String(name.trimmingCharacters(in: .whitespacesAndNewlines).prefix(100))
+        func coordinate(_ text: String) -> Double? {
+            Double(text.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: ",", with: "."))
+        }
+        guard !cleaned.isEmpty, let lat = coordinate(latitude), let lon = coordinate(longitude),
+              (-90...90).contains(lat), (-180...180).contains(lon) else { return nil }
+        self.id = id
+        self.name = cleaned
+        self.latitude = lat
+        self.longitude = lon
+        self.notes = String(notes.trimmingCharacters(in: .whitespacesAndNewlines).prefix(1000))
+        let link = URL(string: windyLink.trimmingCharacters(in: .whitespacesAndNewlines))
+        self.windyLink = link?.scheme == "https" && link?.host == "windy.app" ? link : nil
+    }
+
+    func matches(_ setup: SessionSetup?) -> Bool {
+        guard let setup else { return false }
+        if let id = setup.spotID { return self.id == id }
+        return name.caseInsensitiveCompare(setup.spot.trimmingCharacters(in: .whitespacesAndNewlines)) == .orderedSame
+    }
+
+    var yandexURL: URL? {
+        var url = URLComponents()
+        url.scheme = "https"
+        url.host = "yandex.ru"
+        url.path = "/maps/"
+        url.queryItems = [URLQueryItem(name: "ll", value: "\(longitude),\(latitude)"),
+                          URLQueryItem(name: "text", value: "\(latitude), \(longitude)"),
+                          URLQueryItem(name: "z", value: "15")]
+        return url.url
+    }
+}
+
+struct SpotForecast: Decodable {
+    let timezone: String
+    private let hourly: Hourly
+
+    struct Hour: Identifiable {
+        let time: Date
+        let speed: Double
+        let gust: Double?
+        let direction: Double?
+        let temperature: Double?
+        var id: Date { time }
+    }
+
+    private struct Hourly: Decodable {
+        let time: [Double]
+        let speed: [Double?]
+        let gust: [Double?]
+        let direction: [Double?]
+        let temperature: [Double?]?
+
+        enum CodingKeys: String, CodingKey {
+            case time
+            case speed = "wind_speed_10m"
+            case gust = "wind_gusts_10m"
+            case direction = "wind_direction_10m"
+            case temperature = "temperature_2m"
+        }
+    }
+
+    static func requestURL(for spot: RiderSpot) -> URL? {
+        var url = URLComponents()
+        url.scheme = "https"
+        url.host = "api.open-meteo.com"
+        url.path = "/v1/forecast"
+        url.queryItems = [
+            URLQueryItem(name: "latitude", value: String(spot.latitude)),
+            URLQueryItem(name: "longitude", value: String(spot.longitude)),
+            URLQueryItem(name: "hourly", value: "wind_speed_10m,wind_gusts_10m,wind_direction_10m,temperature_2m"),
+            URLQueryItem(name: "wind_speed_unit", value: "kn"),
+            URLQueryItem(name: "forecast_hours", value: "25"),
+            URLQueryItem(name: "timezone", value: "auto"),
+            URLQueryItem(name: "timeformat", value: "unixtime")
+        ]
+        return url.url
+    }
+
+    func hours(near now: Date) -> [Hour] {
+        func value(_ items: [Double?], at i: Int) -> Double? {
+            guard items.indices.contains(i), let number = items[i], number.isFinite, number >= 0 else { return nil }
+            return number
+        }
+        return hourly.time.enumerated().compactMap { index, timestamp in
+            guard timestamp.isFinite, let speed = value(hourly.speed, at: index) else { return nil }
+            let time = Date(timeIntervalSince1970: timestamp)
+            guard time.timeIntervalSince(now) > -3600 else { return nil }
+            let temperatures = hourly.temperature ?? []
+            let temperature = temperatures.indices.contains(index) ? temperatures[index] : nil
+            return Hour(time: time, speed: speed, gust: value(hourly.gust, at: index),
+                        direction: value(hourly.direction, at: index), temperature: temperature)
+        }.sorted { $0.time < $1.time }
+    }
+
+    static func compass(_ direction: Double?) -> String {
+        guard let direction, direction.isFinite, (0...360).contains(direction) else { return "—" }
+        let points = ["С", "СВ", "В", "ЮВ", "Ю", "ЮЗ", "З", "СЗ"]
+        return points[Int((direction / 45).rounded()) % points.count]
     }
 }
 
@@ -139,7 +261,7 @@ struct RoutePoint: Identifiable, Sendable {
 }
 
 struct LiveJumpEstimate: Codable {
-    let heightMeters: Double
+    let heightMeters: Double?
     let airtimeSeconds: Double
     let distanceMeters: Double?
     var isPhoneToss: Bool?
@@ -148,6 +270,47 @@ struct LiveJumpEstimate: Codable {
         guard event.minimumLoadG.isFinite, (0...0.2).contains(event.minimumLoadG),
               let height = event.approximateTossHeightMeters(label: .phoneToss) else { return nil }
         return Self(heightMeters: height, airtimeSeconds: event.unloadingSeconds, distanceMeters: nil, isPhoneToss: true)
+    }
+
+    static func riding(_ flight: RidingJumpDetector.Flight, altitude: [AltitudeSample],
+                       gps: [RoutePoint], motionClock: Date?) -> Self {
+        let event = flight.event
+        let start = event.startSeconds, end = event.endSeconds
+        return Self(heightMeters: ridingHeight(flight, altitude: altitude), airtimeSeconds: event.unloadingSeconds,
+                    distanceMeters: gpsDistance(start: start, end: end, gps: gps, motionClock: motionClock))
+    }
+
+    private static func ridingHeight(_ flight: RidingJumpDetector.Flight, altitude: [AltitudeSample]) -> Double? {
+        let start = flight.event.startSeconds, end = flight.event.endSeconds
+        let before = altitude.filter { (start - 3...start).contains($0.elapsedSinceFirstSampleSeconds) }.suffix(2)
+        let after = altitude.filter { (end + 0.15...end + 3).contains($0.elapsedSinceFirstSampleSeconds) }.prefix(2)
+        guard before.count == 2, after.count == 2, let beforeLast = before.last, let afterFirst = after.first,
+              start - beforeLast.elapsedSinceFirstSampleSeconds <= 1.6,
+              afterFirst.elapsedSinceFirstSampleSeconds - end <= 1.6 else { return nil }
+        let baseline = before.map(\.relativeAltitudeMeters).reduce(0, +) / 2
+        let landed = after.map(\.relativeAltitudeMeters).reduce(0, +) / 2
+        guard before.allSatisfy({ abs($0.relativeAltitudeMeters - baseline) <= 0.20 }),
+              after.allSatisfy({ abs($0.relativeAltitudeMeters - landed) <= 0.20 }),
+              abs(landed - baseline) <= 0.6 else { return nil }
+
+        let peak = flight.trajectory.filter { $0.time <= end }.map(\.height).max() ?? 0
+        let drift = flight.settledHeight - (landed - baseline)
+        let duration = (flight.trajectory.last?.time ?? end) - start
+        guard duration > 0, abs(flight.residualVelocity) <= 1.3,
+              abs(drift) <= max(0.45, 0.20 * peak) else { return nil }
+        let corrected = flight.trajectory.prefix { $0.time <= end }.map { point in
+            RidingJumpDetector.Point(time: point.time, height: point.height - drift * (point.time - start) / duration)
+        }
+        guard let maximum = corrected.map(\.height).max(), (0.25...35).contains(maximum) else { return nil }
+        let inFlight = altitude.filter {
+            $0.elapsedSinceFirstSampleSeconds > start + 0.15 && $0.elapsedSinceFirstSampleSeconds < end - 0.15
+        }
+        guard inFlight.contains(where: { $0.relativeAltitudeMeters - baseline >= max(0.15, maximum * 0.2) }) else { return nil }
+        for sample in inFlight {
+            guard let point = corrected.min(by: { abs($0.time - sample.elapsedSinceFirstSampleSeconds) < abs($1.time - sample.elapsedSinceFirstSampleSeconds) }),
+                  abs(point.height - (sample.relativeAltitudeMeters - baseline)) <= max(0.75, maximum * 0.35) else { return nil }
+        }
+        return maximum
     }
 
     static func measure(_ event: JumpCandidate, altitude: [AltitudeSample], gps: [RoutePoint],
@@ -217,54 +380,67 @@ struct LiveJumpEstimate: Codable {
 
 /// A supported lift of the phone is a barometric exercise, not a free-fall event.
 struct HandSimulationDetector {
-    static let version = "hand-practice-1"
+    static let version = "hand-practice-2"
     private var quiet: [Double] = []
     private var baseline: Double?
+    private var returnTolerance = 0.28
     private var previousTime: Double?
     private var lift: Lift?
 
     private struct Lift {
         let start: Double
-        var lastRaised: Double
         var peak: Double
+        var returnTime: Double?
+        var returnAltitude: Double?
     }
 
     mutating func consume(_ sample: AltitudeSample) -> (JumpCandidate, Double)? {
         let time = sample.elapsedSinceFirstSampleSeconds, altitude = sample.relativeAltitudeMeters
         guard time.isFinite, altitude.isFinite else { return nil }
-        if let previousTime, time <= previousTime || time - previousTime > 1.5 {
+        if let previousTime, time <= previousTime || time - previousTime > 2.6 {
             self = Self()
         }
         previousTime = time
         if var lift, let baseline {
-            if time - lift.start > 20 {
-                self = Self()
+            if time - lift.start > 60 {
+                self.lift = nil
                 return nil
             }
             let relative = altitude - baseline
-            if relative >= 0.28 {
-                lift.lastRaised = time
-                lift.peak = max(lift.peak, relative)
-                self.lift = lift
-            } else if relative <= 0.20 {
+            lift.peak = max(lift.peak, relative)
+            if relative <= returnTolerance, lift.peak - relative >= 0.25 {
+                if let returned = lift.returnTime, let prior = lift.returnAltitude,
+                   abs(prior - altitude) <= 0.18 {
+                    self.lift = nil
+                    quiet = [prior, altitude]
+                    self.baseline = nil
+                    guard lift.peak >= 0.40, returned - lift.start >= 0.65 else { return nil }
+                    return (JumpCandidate(startSeconds: lift.start, endSeconds: returned,
+                                          minimumLoadG: 0, returnPeakG: 0, maximumRotationRadiansPerSecond: 0), lift.peak)
+                }
+                lift.returnTime = time
+                lift.returnAltitude = altitude
+            } else if relative < returnTolerance {
                 self.lift = nil
-                quiet = [altitude]
-                self.baseline = nil
-                guard (0.40...5).contains(lift.peak), lift.lastRaised - lift.start >= 0.65 else { return nil }
-                return (JumpCandidate(startSeconds: lift.start, endSeconds: lift.lastRaised,
-                                      minimumLoadG: 0, returnPeakG: 0, maximumRotationRadiansPerSecond: 0), lift.peak)
+                return nil
+            } else {
+                lift.returnTime = nil
+                lift.returnAltitude = nil
             }
+            self.lift = lift
             return nil
         }
-        if let baseline, altitude - baseline >= 0.28 {
-            lift = Lift(start: time, lastRaised: time, peak: altitude - baseline)
+        if let baseline, altitude - baseline >= returnTolerance + 0.04 {
+            lift = Lift(start: time, peak: altitude - baseline)
             quiet.removeAll()
             return nil
         }
         quiet.append(altitude)
         if quiet.count > 3 { quiet.removeFirst() }
-        if quiet.count == 3, let low = quiet.min(), let high = quiet.max(), high - low <= 0.12 {
+        if quiet.count == 3, let low = quiet.min(), let high = quiet.max(), high - low <= 0.16,
+           baseline == nil || high < (baseline ?? high) - 0.3 {
             baseline = quiet.reduce(0, +) / 3
+            returnTolerance = 0.26 + high - low
         }
         return nil
     }

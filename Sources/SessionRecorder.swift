@@ -8,6 +8,7 @@ import UIKit
 final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelegate {
     @Published private(set) var live: SessionSummary?
     @Published private(set) var history: [SessionSummary] = []
+    @Published private(set) var spots: [RiderSpot] = []
     @Published private(set) var authorization: CLAuthorizationStatus = .notDetermined
     @Published private(set) var motionIsRecent = false
     @Published var errorMessage: String?
@@ -35,6 +36,7 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
     private var lastLocationTimestamp: Date?
     private var routeFilter = RouteFilter()
     private var jumpDetector = JumpDetector()
+    private var ridingDetector = RidingJumpDetector()
     private var handSimulation = HandSimulationDetector()
     private var lastMarkerAt: ContinuousClock.Instant?
     private var calibrationStartedAt: ContinuousClock.Instant?
@@ -42,6 +44,7 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
     private var recentAltitude: [AltitudeSample] = []
     private var recentFixes: [RoutePoint] = []
     private var pendingJumps: [JumpCandidate] = []
+    private var pendingRides: [RidingJumpDetector.Flight] = []
     private var motionClock: Date?
     private let calibrationKey = "rider.calibrationByPlacement"
 
@@ -70,6 +73,8 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
         location.showsBackgroundLocationIndicator = true
         if let data = UserDefaults.standard.data(forKey: "rider.sessionSetup"),
            let setup = try? JSONDecoder().decode(SessionSetup.self, from: data) { draftSetup = setup }
+        if let data = UserDefaults.standard.data(forKey: "rider.spots"),
+           let saved = try? JSONDecoder().decode([RiderSpot].self, from: data) { spots = saved }
         reloadHistory()
     }
 
@@ -83,19 +88,52 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
         if let data = try? JSONEncoder().encode(draftSetup) { UserDefaults.standard.set(data, forKey: "rider.sessionSetup") }
     }
 
+    func saveSpot(_ spot: RiderSpot) -> Bool {
+        if spots.contains(where: { $0.id != spot.id && $0.name.caseInsensitiveCompare(spot.name) == .orderedSame }) {
+            return false
+        }
+        var updated = spots.filter { $0.id != spot.id }
+        updated.append(spot)
+        updated.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        guard let data = try? JSONEncoder().encode(updated) else { return false }
+        UserDefaults.standard.set(data, forKey: "rider.spots")
+        spots = updated
+        if draftSetup.spotID == spot.id {
+            var setup = draftSetup
+            setup.selectSpot(spot)
+            reuseSetup(setup)
+        }
+        return true
+    }
+
+    func chooseSpot(_ spot: RiderSpot) {
+        var setup = draftSetup
+        setup.selectSpot(spot)
+        reuseSetup(setup)
+    }
+
     func start() {
         guard summary == nil, analyzingSessionID == nil, motionAvailable else { return }
         UIDevice.current.isBatteryMonitoringEnabled = true
         let practiceMode = draftSetup.sport == .groundTest ? groundTestMode : .normal
         let reusedCalibration = recalibrateNextSession || practiceMode != .normal ? nil : savedCalibration
-        let detectorVersion = practiceMode == .handSimulation ? HandSimulationDetector.version : JumpDetector.version
+        var sessionSetup = draftSetup.cleaned
+        let detectorVersion: String
+        switch practiceMode {
+        case .handSimulation: detectorVersion = HandSimulationDetector.version
+        case .phoneToss: detectorVersion = JumpDetector.phoneTossVersion
+        case .normal: detectorVersion = sessionSetup.sport.isRiding ? RidingJumpDetector.version : JumpDetector.version
+        }
+        if sessionSetup.spotID == nil, let matching = spots.first(where: { $0.matches(sessionSetup) }) {
+            sessionSetup.selectSpot(matching)
+        }
         let session = SessionSummary(
             startedAt: Date(),
             gpsEnabledAtStart: locationAuthorized,
             batteryAtStartPercent: batteryPercent,
             jumpAnalysis: JumpAnalysis(detectorVersion: detectorVersion),
             markers: [],
-            setup: draftSetup.cleaned,
+            setup: sessionSetup,
             gpsMetrics: RouteMetrics(),
             altitude: AltitudeMetrics(supported: CMAltimeter.isRelativeAltitudeAvailable()),
             motionCalibration: reusedCalibration,
@@ -130,7 +168,8 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
         lastLocationTimestamp = nil
         routeFilter = RouteFilter()
         if let data = try? JSONEncoder().encode(draftSetup.cleaned) { UserDefaults.standard.set(data, forKey: "rider.sessionSetup") }
-        jumpDetector = JumpDetector()
+        jumpDetector = JumpDetector(confirmsPhoneCatch: practiceMode == .phoneToss)
+        ridingDetector = RidingJumpDetector()
         handSimulation = HandSimulationDetector()
         lastMarkerAt = nil
         motionIsRecent = false
@@ -138,6 +177,7 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
         recentAltitude.removeAll()
         recentFixes.removeAll()
         pendingJumps.removeAll()
+        pendingRides.removeAll()
         motionClock = nil
 
         if session.gpsEnabledAtStart {
@@ -272,7 +312,7 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
     @MainActor
     func analyze(_ id: UUID) async {
         guard summary == nil, analyzingSessionID == nil,
-              history.first(where: { $0.id == id })?.handSimulationTest != true else { return }
+              history.first(where: { $0.id == id })?.canReplayGroundEvents == true else { return }
         analyzingSessionID = id
         defer { analyzingSessionID = nil }
         let url = store.logURL(for: id)
@@ -338,18 +378,37 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
             try log.append("motion", sample)
             session.motion.add(elapsed)
             try updateCalibration(sample, session: &session, log: log)
-            if session.handSimulationTest != true, let candidate = jumpDetector.process(sample) {
-                try log.append("jumpCandidate", candidate)
-                session.jumpAnalysis?.candidates.append(candidate)
-                if session.phoneTossTest == true {
-                    if let estimate = LiveJumpEstimate.phoneToss(candidate) {
-                        try storeEstimate(estimate, for: candidate, session: &session, log: log, speak: true)
-                    }
-                } else if session.altitude?.supported == true, session.altitude?.stoppedWithError == false {
-                    pendingJumps.append(candidate)
+            if session.jumpAnalysis?.detectorVersion == RidingJumpDetector.version {
+                let moving: Bool
+                if let latest = recentFixes.last, let speed = latest.speed, let motionClock {
+                    let age = motionClock.addingTimeInterval(elapsed).timeIntervalSince(latest.sample.timestamp)
+                    moving = speed >= 2 && (0...2).contains(age)
+                } else {
+                    moving = false
                 }
+                if let flight = ridingDetector.process(sample, calibration: session.motionCalibration, moving: moving) {
+                    try log.append("jumpCandidate", flight.event)
+                    session.jumpAnalysis?.candidates.append(flight.event)
+                    let key = SessionReview.key(for: flight.event, version: RidingJumpDetector.version)
+                    session.liveJumpEstimates?[key] = LiveJumpEstimate(heightMeters: nil, airtimeSeconds: flight.event.unloadingSeconds,
+                                                                      distanceMeters: nil)
+                    pendingRides.append(flight)
+                }
+                session.jumpAnalysis?.discontinuities = ridingDetector.discontinuities
+            } else if session.handSimulationTest != true {
+                if let candidate = jumpDetector.process(sample) {
+                    try log.append("jumpCandidate", candidate)
+                    session.jumpAnalysis?.candidates.append(candidate)
+                    if session.phoneTossTest == true {
+                        if let estimate = LiveJumpEstimate.phoneToss(candidate) {
+                            try storeEstimate(estimate, for: candidate, session: &session, log: log, speak: true)
+                        }
+                    } else if session.altitude?.supported == true, session.altitude?.stoppedWithError == false {
+                        pendingJumps.append(candidate)
+                    }
+                }
+                session.jumpAnalysis?.discontinuities = jumpDetector.discontinuities
             }
-            session.jumpAnalysis?.discontinuities = jumpDetector.discontinuities
             summary = session
             motionTimeOrigin = origin
             if firstSample { motionClock = Date().addingTimeInterval(origin - ProcessInfo.processInfo.systemUptime) }
@@ -406,9 +465,10 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
                     guard altitude.add(sample) else { return }
                     try log.append("altitude", sample)
                     self.recentAltitude.append(sample)
-                    self.recentAltitude.removeAll { sample.elapsedSinceFirstSampleSeconds - $0.elapsedSinceFirstSampleSeconds > 12 }
+                    self.recentAltitude.removeAll { sample.elapsedSinceFirstSampleSeconds - $0.elapsedSinceFirstSampleSeconds > 24 }
                     if self.recentAltitude.count > 128 { self.recentAltitude.removeFirst() }
                     if session.handSimulationTest == true, let (event, height) = self.handSimulation.consume(sample) {
+                        try log.append("jumpCandidate", event)
                         session.jumpAnalysis?.candidates.append(event)
                         let distance = LiveJumpEstimate.gpsDistance(start: event.startSeconds, end: event.endSeconds,
                                                                     gps: self.recentFixes, motionClock: self.motionClock)
@@ -465,8 +525,14 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
     }
 
     private func resolveJumps(_ session: inout SessionSummary, log: SessionLog, finishing: Bool = false) throws {
-        guard !pendingJumps.isEmpty else { return }
         let elapsed = session.motion.lastElapsedSeconds ?? 0
+        let pressureAvailable = session.altitude?.supported == true && session.altitude?.stoppedWithError == false
+        while let flight = pendingRides.first,
+              finishing || elapsed >= flight.event.endSeconds + (pressureAvailable ? 3.0 : 0.8) {
+            pendingRides.removeFirst()
+            let estimate = LiveJumpEstimate.riding(flight, altitude: recentAltitude, gps: recentFixes, motionClock: motionClock)
+            try storeEstimate(estimate, for: flight.event, session: &session, log: log, speak: !finishing)
+        }
         while let event = pendingJumps.first,
               finishing || elapsed >= event.endSeconds + 2.5 {
             pendingJumps.removeFirst()
@@ -480,7 +546,7 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
         let key = SessionReview.key(for: event, version: session.jumpAnalysis?.detectorVersion ?? JumpDetector.version)
         try log.append("liveJumpEstimate", JumpEstimateEntry(startSeconds: event.startSeconds, endSeconds: event.endSeconds, estimate: estimate))
         session.liveJumpEstimates?[key] = estimate
-        if speak, voiceEnabled, let phrase = LiveJumpEstimate.spokenHeight(estimate.heightMeters) {
+        if speak, voiceEnabled, let height = estimate.heightMeters, let phrase = LiveJumpEstimate.spokenHeight(height) {
             let utterance = AVSpeechUtterance(string: phrase)
             utterance.voice = AVSpeechSynthesisVoice(language: "ru-RU")
             speech.speak(utterance)

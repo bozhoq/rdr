@@ -23,11 +23,17 @@ private struct Tabs: View {
     @State private var selectedTab = Tab.record
 
     private enum Tab: Hashable {
-        case record, history
+        case spot, record, history
     }
 
     var body: some View {
         TabView(selection: $selectedTab) {
+            NavigationStack {
+                SpotsView(recorder: recorder) { selectedTab = .record }
+            }
+            .tabItem { Label("Спот", systemImage: "mappin.and.ellipse") }
+            .tag(Tab.spot)
+
             NavigationStack {
                 RecordingView(recorder: recorder) {
                     recorder.stop()
@@ -103,7 +109,9 @@ private struct RecordingView: View {
         }
         .sheet(item: $gear) { field in
             let suggestions = SetupSuggestions(history: recorder.history)
-            if field == .kite, usesKitePicker {
+            if field == .spot {
+                SpotChoice(setup: $recorder.draftSetup, spots: recorder.spots, recent: suggestions.spots)
+            } else if field == .kite, usesKitePicker {
                 KitePicker(selection: $recorder.draftSetup.kite, recent: suggestions.kites)
             } else {
                 GearChoice(title: gearTitle(field), initial: recorder.draftSetup[keyPath: field.key],
@@ -135,7 +143,7 @@ private struct RecordingView: View {
                                 ForEach(GroundTestMode.allCases, id: \.self) { Text($0.title).tag($0) }
                             }
                             if recorder.groundTestMode == .handSimulation {
-                                Text("Подержите телефон внизу около трёх секунд, плавно поднимите и верните вниз.")
+                                Text("Подержите телефон внизу около трёх секунд. Плавно поднимите, ненадолго задержите наверху, затем опустите и подождите внизу.")
                                     .font(.footnote).foregroundStyle(.secondary)
                             }
                         }
@@ -254,7 +262,7 @@ private struct RecordingView: View {
 
     private func recordingMetrics(_ session: SessionSummary) -> some View {
         let estimates = (session.liveJumpEstimates ?? [:]).values
-        let height = estimates.map(\.heightMeters).max()
+        let height = estimates.compactMap(\.heightMeters).max()
         let airtime = estimates.map(\.airtimeSeconds).max()
         let distance = estimates.compactMap(\.distanceMeters).max()
         return VStack(spacing: 0) {
@@ -426,11 +434,14 @@ private struct HistoryView: View {
     @State private var search = ""
     @State private var activityFilter: SessionSport?
     @State private var styleFilter: KiteStyle?
+    @State private var spotFilter: UUID?
 
     private var filtered: [SessionSummary] {
         recorder.history.filter { session in
             (activityFilter == nil || activityFilter == (session.setup?.sport ?? .unclassified)) &&
-            (styleFilter == nil || styleFilter == session.setup?.kiteStyle) && session.matches(search)
+            (styleFilter == nil || styleFilter == session.setup?.kiteStyle) &&
+            (spotFilter == nil || recorder.spots.first(where: { $0.id == spotFilter })?.matches(session.setup) == true) &&
+            session.matches(search)
         }
     }
 
@@ -516,8 +527,14 @@ private struct HistoryView: View {
                             ForEach(KiteStyle.allCases, id: \.self) { Text($0.title).tag(Optional($0)) }
                         }
                     }
+                    if !recorder.spots.isEmpty {
+                        Picker("Спот", selection: $spotFilter) {
+                            Text("Все споты").tag(nil as UUID?)
+                            ForEach(recorder.spots) { spot in Text(spot.name).tag(Optional(spot.id)) }
+                        }
+                    }
                 } label: {
-                    Label(activityFilter?.title ?? "Активность", systemImage: "line.3.horizontal.decrease.circle")
+                    Label("Фильтры", systemImage: "line.3.horizontal.decrease.circle")
                 }
             }
         }
@@ -571,7 +588,7 @@ struct SessionDetail: View {
             }
         }
         .sheet(isPresented: $editingSetup) {
-            SetupEditor(setup: session.setup ?? SessionSetup(), recent: recorder.history) { recorder.saveSetup($0, for: session.id) }
+            SetupEditor(setup: session.setup ?? SessionSetup(), recent: recorder.history, spots: recorder.spots) { recorder.saveSetup($0, for: session.id) }
         }
     }
 
@@ -641,7 +658,7 @@ struct SessionDetail: View {
                 }
             }
         }
-        if session.jumpAnalysis != nil, session.handSimulationTest != true { analyzeButton("Повторить разбор") }
+        if session.jumpAnalysis != nil, session.canReplayGroundEvents { analyzeButton("Повторить разбор") }
 
         NavigationLink { SessionCardPreview(session: session) } label: {
             Label("Карточка сессии", systemImage: "photo")
