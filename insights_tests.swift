@@ -14,6 +14,25 @@ import FoundationXML
         LocationSample(timestamp: origin.addingTimeInterval(t), latitude: lat, longitude: lon, horizontalAccuracyMeters: accuracy, speedMetersPerSecond: speed, speedAccuracyMetersPerSecond: speedAccuracy)
     }
     static func main() throws {
+        let event = JumpCandidate(startSeconds: 3, endSeconds: 5.8, minimumLoadG: 0.2,
+                                  returnPeakG: 4, maximumRotationRadiansPerSecond: 2)
+        func altitude(_ time: Double, _ meters: Double) -> AltitudeSample {
+            AltitudeSample(elapsedSinceFirstSampleSeconds: time, pressureKilopascals: 101, relativeAltitudeMeters: meters)
+        }
+        let arc = [altitude(1.1, 0), altitude(2.2, 0), altitude(3.25, 1), altitude(4.3, 2), altitude(5.35, 0.8), altitude(6.4, 0)]
+        var jumpGPS = RouteFilter()
+        let fixes = [jumpGPS.accept(point(3.25), notBefore: origin), jumpGPS.accept(point(6, lon: 0.0002), notBefore: origin)].compactMap { $0 }
+        let jump = LiveJumpEstimate.measure(event, altitude: arc, gps: fixes, motionClock: origin)
+        check(jump?.heightMeters == 2 && abs((jump?.airtimeSeconds ?? 0) - 2.8) < 1e-9, "Report a bracketed peak and unloading interval")
+        check(abs((jump?.distanceMeters ?? 0) - 22.239) < 0.01, "Use only accepted GPS fixes near both boundaries")
+        check(LiveJumpEstimate.measure(event, altitude: arc, gps: fixes, motionClock: nil)?.distanceMeters == nil, "No jump distance without a common clock")
+        check(LiveJumpEstimate.measure(event, altitude: Array(arc.dropLast()), gps: [], motionClock: nil) == nil, "A rise without a return cannot trigger the voice")
+        var interrupted = arc
+        interrupted.remove(at: 3)
+        check(LiveJumpEstimate.measure(event, altitude: interrupted, gps: [], motionClock: nil) == nil, "Reject a gap across the pressure peak")
+        check(LiveJumpEstimate.spokenHeight(2) == "два метра", "Russian plural for integer height")
+        check(LiveJumpEstimate.spokenHeight(10.1) == "десять целых одна десятая метра", "Russian speech preserves tenths")
+
         var filter = RouteFilter()
         let first = filter.accept(point(0), notBefore: origin)!
         check(first.segment == 1 && filter.metrics.distanceMeters == 0, "First fix is not travelled distance")
