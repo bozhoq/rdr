@@ -1,0 +1,200 @@
+// !$*UTF8*$!
+{
+    archiveVersion = 1;
+    classes = {};
+    objectVersion = 56;
+    objects = {
+
+/* Begin PBXBuildFile section */
+        C00100000000000000000001 /* SessionApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00200000000000000000001 /* SessionApp.swift */; };
+        C00100000000000000000002 /* SessionRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00200000000000000000002 /* SessionRecorder.swift */; };
+        C00100000000000000000003 /* SessionLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00200000000000000000003 /* SessionLog.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+        C00200000000000000000001 /* SessionApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionApp.swift; sourceTree = "<group>"; };
+        C00200000000000000000002 /* SessionRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionRecorder.swift; sourceTree = "<group>"; };
+        C00200000000000000000003 /* SessionLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionLog.swift; sourceTree = "<group>"; };
+        C00200000000000000000004 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+        C00200000000000000000005 /* KiteSessions.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = KiteSessions.app; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+        C00300000000000000000001 /* Frameworks */ = {
+            isa = PBXFrameworksBuildPhase;
+            buildActionMask = 2147483647;
+            files = ();
+            runOnlyForDeploymentPostprocessing = 0;
+        };
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+        C00400000000000000000001 = {
+            isa = PBXGroup;
+            children = (
+                C00400000000000000000002 /* Sources */,
+                C00200000000000000000004 /* Info.plist */,
+                C00400000000000000000003 /* Products */,
+            );
+            sourceTree = "<group>";
+        };
+        C00400000000000000000002 /* Sources */ = {
+            isa = PBXGroup;
+            children = (
+                C00200000000000000000001 /* SessionApp.swift */,
+                C00200000000000000000002 /* SessionRecorder.swift */,
+                C00200000000000000000003 /* SessionLog.swift */,
+            );
+            path = Sources;
+            sourceTree = "<group>";
+        };
+        C00400000000000000000003 /* Products */ = {
+            isa = PBXGroup;
+            children = (C00200000000000000000005 /* KiteSessions.app */,);
+            name = Products;
+            sourceTree = "<group>";
+        };
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+        C00500000000000000000001 /* KiteSessions */ = {
+            isa = PBXNativeTarget;
+            buildConfigurationList = C00A00000000000000000002 /* Target configurations */;
+            buildPhases = (
+                C00800000000000000000001 /* Sources */,
+                C00300000000000000000001 /* Frameworks */,
+                C00700000000000000000001 /* Resources */,
+            );
+            buildRules = ();
+            dependencies = ();
+            name = KiteSessions;
+            productName = KiteSessions;
+            productReference = C00200000000000000000005 /* KiteSessions.app */;
+            productType = "com.apple.product-type.application";
+        };
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+        C00600000000000000000001 /* Project object */ = {
+            isa = PBXProject;
+            attributes = {
+                LastUpgradeCheck = 1600;
+                TargetAttributes = {
+                    C00500000000000000000001 = {
+                        CreatedOnToolsVersion = 16.0;
+                        ProvisioningStyle = Automatic;
+                        SystemCapabilities = { com.apple.BackgroundModes = { enabled = 1; }; };
+                    };
+                };
+            };
+            buildConfigurationList = C00A00000000000000000001 /* Project configurations */;
+            compatibilityVersion = "Xcode 14.0";
+            developmentRegion = ru;
+            hasScannedForEncodings = 0;
+            knownRegions = (ru, Base);
+            mainGroup = C00400000000000000000001;
+            productRefGroup = C00400000000000000000003 /* Products */;
+            projectDirPath = "";
+            projectRoot = "";
+            targets = (C00500000000000000000001 /* KiteSessions */,);
+        };
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+        C00700000000000000000001 /* Resources */ = {
+            isa = PBXResourcesBuildPhase;
+            buildActionMask = 2147483647;
+            files = ();
+            runOnlyForDeploymentPostprocessing = 0;
+        };
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+        C00800000000000000000001 /* Sources */ = {
+            isa = PBXSourcesBuildPhase;
+            buildActionMask = 2147483647;
+            files = (
+                C00100000000000000000001 /* SessionApp.swift in Sources */,
+                C00100000000000000000002 /* SessionRecorder.swift in Sources */,
+                C00100000000000000000003 /* SessionLog.swift in Sources */,
+            );
+            runOnlyForDeploymentPostprocessing = 0;
+        };
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+        C00900000000000000000001 /* Debug */ = {
+            isa = XCBuildConfiguration;
+            buildSettings = {
+                CLANG_ENABLE_MODULES = YES;
+                DEBUG_INFORMATION_FORMAT = dwarf;
+                ENABLE_TESTABILITY = YES;
+                IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+                SDKROOT = iphoneos;
+                SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+                SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+                SWIFT_VERSION = 5.0;
+            };
+            name = Debug;
+        };
+        C00900000000000000000002 /* Release */ = {
+            isa = XCBuildConfiguration;
+            buildSettings = {
+                CLANG_ENABLE_MODULES = YES;
+                DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+                IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+                SDKROOT = iphoneos;
+                SWIFT_COMPILATION_MODE = wholemodule;
+                SWIFT_VERSION = 5.0;
+            };
+            name = Release;
+        };
+        C00900000000000000000003 /* Debug */ = {
+            isa = XCBuildConfiguration;
+            buildSettings = {
+                CODE_SIGN_STYLE = Automatic;
+                CURRENT_PROJECT_VERSION = 1;
+                GENERATE_INFOPLIST_FILE = NO;
+                INFOPLIST_FILE = Info.plist;
+                MARKETING_VERSION = 0.1.0;
+                PRODUCT_BUNDLE_IDENTIFIER = local.kitesessions.prototype;
+                PRODUCT_NAME = "$(TARGET_NAME)";
+                SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+                TARGETED_DEVICE_FAMILY = 1;
+            };
+            name = Debug;
+        };
+        C00900000000000000000004 /* Release */ = {
+            isa = XCBuildConfiguration;
+            buildSettings = {
+                CODE_SIGN_STYLE = Automatic;
+                CURRENT_PROJECT_VERSION = 1;
+                GENERATE_INFOPLIST_FILE = NO;
+                INFOPLIST_FILE = Info.plist;
+                MARKETING_VERSION = 0.1.0;
+                PRODUCT_BUNDLE_IDENTIFIER = local.kitesessions.prototype;
+                PRODUCT_NAME = "$(TARGET_NAME)";
+                SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+                TARGETED_DEVICE_FAMILY = 1;
+            };
+            name = Release;
+        };
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+        C00A00000000000000000001 /* Project configurations */ = {
+            isa = XCConfigurationList;
+            buildConfigurations = (C00900000000000000000001 /* Debug */, C00900000000000000000002 /* Release */,);
+            defaultConfigurationIsVisible = 0;
+            defaultConfigurationName = Release;
+        };
+        C00A00000000000000000002 /* Target configurations */ = {
+            isa = XCConfigurationList;
+            buildConfigurations = (C00900000000000000000003 /* Debug */, C00900000000000000000004 /* Release */,);
+            defaultConfigurationIsVisible = 0;
+            defaultConfigurationName = Release;
+        };
+/* End XCConfigurationList section */
+    };
+    rootObject = C00600000000000000000001 /* Project object */;
+}
