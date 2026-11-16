@@ -38,6 +38,13 @@ enum DetectorTests {
         let detected = run(standard)
         check(detected.count == 1, "Expected one unloading and return")
         check(abs(detected[0].unloadingSeconds - 0.5) < 1e-9, "Duration is from sensor timestamps")
+        let toss = detected[0]
+        check(abs((toss.approximateTossHeightMeters(label: .phoneToss) ?? 0) - 0.3064578125) < 1e-9, "Toss estimate uses same-height ballistic model")
+        for label in [JumpLabel.unreviewed, .bodyJump, .otherMovement] {
+            check(toss.approximateTossHeightMeters(label: label) == nil, "Estimate is restricted to labeled phone tosses")
+        }
+        let badToss = JumpCandidate(startSeconds: 2, endSeconds: 1, minimumLoadG: 0.1, returnPeakG: 3, maximumRotationRadiansPerSecond: 0)
+        check(badToss.approximateTossHeightMeters(label: .phoneToss) == nil, "Invalid time cannot produce height")
         let rotated = run(trace(rotating: true))
         check(rotated.count == 1 && abs(rotated[0].unloadingSeconds - 0.5) < 1e-9, "Rotation invariance")
         check(rotated[0].fastRotation, "Rotation is flagged, not automatically rejected")
