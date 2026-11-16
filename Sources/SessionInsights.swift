@@ -69,25 +69,24 @@ struct LiveJumpEstimate: Codable {
     static func measure(_ event: JumpCandidate, altitude: [AltitudeSample], gps: [RoutePoint],
                         motionClock: Date?) -> Self? {
         let start = event.startSeconds, end = event.endSeconds
-        let time = \AltitudeSample.elapsedSinceFirstSampleSeconds
-        let meters = \AltitudeSample.relativeAltitudeMeters
         // Sparse pressure samples can only support a coarse estimate for a
         // well-bracketed peak. A hill or sustained elevation is not a jump.
-        let before = altitude.filter { (start - 3...start).contains($0[keyPath: time]) }.suffix(2)
-        let during = altitude.filter { $0[keyPath: time] > start && $0[keyPath: time] < end }
+        let before = altitude.filter { (start - 3...start).contains($0.elapsedSinceFirstSampleSeconds) }.suffix(2)
+        let during = altitude.filter { $0.elapsedSinceFirstSampleSeconds > start && $0.elapsedSinceFirstSampleSeconds < end }
         guard before.count == 2, let first = before.first, let last = before.last,
-              start - last[keyPath: time] <= 1.3, last[keyPath: time] - first[keyPath: time] <= 1.35,
-              abs(first[keyPath: meters] - last[keyPath: meters]) <= 0.30,
-              during.count >= 2, let peak = during.map(meters).max() else { return nil }
-        let baseline = before.map(meters).reduce(0, +) / 2
+              start - last.elapsedSinceFirstSampleSeconds <= 1.3,
+              last.elapsedSinceFirstSampleSeconds - first.elapsedSinceFirstSampleSeconds <= 1.35,
+              abs(first.relativeAltitudeMeters - last.relativeAltitudeMeters) <= 0.30,
+              during.count >= 2, let peak = during.map(\.relativeAltitudeMeters).max() else { return nil }
+        let baseline = (first.relativeAltitudeMeters + last.relativeAltitudeMeters) / 2
         let height = peak - baseline
-        guard (0.6...35).contains(height), during.filter({ $0[keyPath: meters] - baseline >= 0.50 }).count >= 2,
+        guard (0.6...35).contains(height), during.filter({ $0.relativeAltitudeMeters - baseline >= 0.50 }).count >= 2,
               let returned = altitude.first(where: {
-                  (end...end + 2.5).contains($0[keyPath: time]) && abs($0[keyPath: meters] - baseline) <= 0.40
+                  (end...end + 2.5).contains($0.elapsedSinceFirstSampleSeconds) && abs($0.relativeAltitudeMeters - baseline) <= 0.40
               }) else { return nil }
-        let window = altitude.filter { (first[keyPath: time]...returned[keyPath: time]).contains($0[keyPath: time]) }
-        guard zip(window, window.dropFirst()).allSatisfy({ previous, next in
-            let interval = next[keyPath: time] - previous[keyPath: time]
+        let window = altitude.filter { (first.elapsedSinceFirstSampleSeconds...returned.elapsedSinceFirstSampleSeconds).contains($0.elapsedSinceFirstSampleSeconds) }
+        guard zip(window, window.dropFirst()).allSatisfy({ pair in
+            let interval = pair.1.elapsedSinceFirstSampleSeconds - pair.0.elapsedSinceFirstSampleSeconds
             return interval > 0 && interval <= 1.35
         }) else { return nil }
 
