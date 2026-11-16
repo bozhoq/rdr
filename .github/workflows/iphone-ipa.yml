@@ -1,0 +1,38 @@
+name: Build iPhone IPA
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Build for a physical iPhone
+        run: |
+          xcodebuild -version
+          xcodebuild -project KiteSessions.xcodeproj \
+            -scheme KiteSessions \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO build
+      - name: Package the unsigned IPA
+        run: |
+          mkdir -p build/package/Payload
+          ditto build/Build/Products/Release-iphoneos/KiteSessions.app build/package/Payload/KiteSessions.app
+          cd build/package
+          ditto -c -k --keepParent Payload KiteSessions.ipa
+          unzip -Z1 KiteSessions.ipa | grep -Fx 'Payload/KiteSessions.app/Info.plist'
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: KiteSessions-iPhone
+          path: build/package/KiteSessions.ipa
+          if-no-files-found: error
