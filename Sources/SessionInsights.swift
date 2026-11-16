@@ -77,44 +77,46 @@ enum KiteCatalog {
     struct Brand: Identifiable {
         let name: String
         let models: [String]
+        let alias: String
         var id: String { name }
 
-        init(_ name: String, _ models: [String]) {
+        init(_ name: String, _ models: [String], alias: String = "") {
             self.name = name
             self.models = models.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+            self.alias = alias
         }
 
         func matches(_ query: String) -> Bool {
             let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
-            return query.isEmpty || name.localizedStandardContains(query)
+            return query.isEmpty || name.localizedStandardContains(query) || alias.localizedStandardContains(query)
         }
     }
 
     // Current and recent named models with a manual entry for other releases.
     static let brands = [
         Brand("Airush", ["Lift V3", "Lift V4", "Lift Team V4", "Lithium V13", "Lithium V14", "Lithium Team V13", "Lithium Team V14", "Razor V11", "Ultra V5", "Ultra Team DS V5"]),
-        Brand("Cabrinha", ["2027 Drifter", "Drifter Apex", "Moto Apex", "Moto X Apex", "Moto X Lite", "Moto XL Apex", "Nitro Apex", "Switchblade Apex", "Switchblade Design Works"]),
-        Brand("CORE", ["Air", "Air Pro", "Free", "GTS4", "GTS5", "GTS6", "Nexus", "Nexus 2", "Nexus 3", "Nexus 4", "Pace", "Pace Pro", "Section 2", "Section 3", "Section 4", "XLITE", "XR4", "XR5", "XR6", "XR7", "XR8", "XR X", "XR Pro", "XR Pro 2"]),
-        Brand("CrazyFly", ["Hyper", "Sculp"]),
-        Brand("Duotone", ["Dice SLS", "Evo", "Evo Concept Blue", "Evo D/LAB", "Evo SLS", "Juice", "Juice D/LAB", "Mono", "Neo", "Neo Concept Blue", "Neo D/LAB", "Neo SLS", "Rebel D/LAB", "Rebel SLS", "Rebel SLS Concept Blue", "Vegas", "Vegas Concept Blue"]),
-        Brand("Eleveight", ["FS V8", "OS V7", "PS V10", "RS V10", "RS+ V4", "RS Pro V2", "Stratos+", "WS V10"]),
+        Brand("Cabrinha", ["2027 Drifter", "Drifter Apex", "Moto Apex", "Moto X Apex", "Moto X Lite", "Moto XL Apex", "Nitro Apex", "Switchblade Apex", "Switchblade Design Works"], alias: "Кабрина Кэбринья Кабринья"),
+        Brand("CORE", ["Air", "Air Pro", "Free", "GTS4", "GTS5", "GTS6", "Nexus", "Nexus 2", "Nexus 3", "Nexus 4", "Pace", "Pace Pro", "Section 2", "Section 3", "Section 4", "XLITE", "XR4", "XR5", "XR6", "XR7", "XR8", "XR X", "XR Pro", "XR Pro 2"], alias: "Кор Коре"),
+        Brand("CrazyFly", ["Hyper", "Sculp"], alias: "Крейзифлай"),
+        Brand("Duotone", ["Dice SLS", "Evo", "Evo Concept Blue", "Evo D/LAB", "Evo SLS", "Juice", "Juice D/LAB", "Mono", "Neo", "Neo Concept Blue", "Neo D/LAB", "Neo SLS", "Rebel D/LAB", "Rebel SLS", "Rebel SLS Concept Blue", "Vegas", "Vegas Concept Blue"], alias: "Дуотон Дюотон"),
+        Brand("Eleveight", ["FS V8", "OS V7", "PS V10", "RS V10", "RS+ V4", "RS Pro V2", "Stratos+", "WS V10"], alias: "Элевейт"),
         Brand("Epic Kites", ["Infinity", "Junior Pro", "Renegade", "Screamer", "Screamer 7G", "Surf"]),
-        Brand("F-ONE", ["Addikt", "Addikt TEC", "Bandit", "Bandit Brainchild", "Banger QuadX", "Breeze", "Breeze TEC", "Diablo", "Trigger Brainchild", "Trigger TEC", "WTF?!"]),
-        Brand("FLYSURFER", ["ERA 2", "HELI", "HYBRID 2", "PEAK 6", "SONIC 5", "SOUL 4", "STOKE 4", "SUPERSONIC", "VMG 3"]),
-        Brand("GA Kites", ["IQ", "Max", "One", "Pact", "Pure", "Spark"]),
+        Brand("F-ONE", ["Addikt", "Addikt TEC", "Bandit", "Bandit Brainchild", "Banger QuadX", "Breeze", "Breeze TEC", "Diablo", "Trigger Brainchild", "Trigger TEC", "WTF?!"], alias: "Фон Ф-Уан"),
+        Brand("FLYSURFER", ["ERA 2", "HELI", "HYBRID 2", "PEAK 6", "SONIC 5", "SOUL 4", "STOKE 4", "SUPERSONIC", "VMG 3"], alias: "Флайсёрфер Флайсерфер"),
+        Brand("GA Kites", ["IQ", "Max", "One", "Pact", "Pure", "Spark"], alias: "Gaastra Гаастра"),
         Brand("GIN Kiteboarding", ["Marabou V2", "Spirit"]),
-        Brand("GONG", ["Ayto", "Ayto Aramid", "Display", "Elips", "Strutless", "Strutless Revo", "Unik", "Vertigo", "Vertigo Aramid"]),
-        Brand("Harlem", ["Flow", "Hadlow Pro", "Peak", "Thrive", "Thrive LiteX", "Thrive V2"]),
-        Brand("Naish", ["Boxer [Q]Series", "Hunt [Q]Series", "Pivot", "Pivot [Q]Series", "Pivot [Q]Series LW", "Pivot LTD", "Pivot NVision", "Psycho [Q]Series", "Psycho NVision", "Torch", "Xeon"]),
-        Brand("North", ["Carve", "Code Zero", "Code Zero Pro", "Orbit", "Orbit Ultra", "Pioneer Trainer", "Pulse", "Reach", "Reach Ultra"]),
-        Brand("Ozone", ["Alpha V3 Ultra-X", "Catalyst V5", "Chrono", "Edge V12", "Edge VT", "Edge VT Ultra-X", "Enduro", "EXP V2", "Explore V3", "Hyperlink V4", "Ignition V3", "Mach1", "R1 V5", "Reflex", "Reo V7", "Reo V7 Ultra-X", "Subzero V1", "Subzero V2", "Uno V2", "Vortex V2 Ultra-X", "Zephyr V8 Ultra-X"]),
-        Brand("ParAAvis", ["Fancy", "Ion 2", "Ion 4", "JKS", "Octane 2", "Q 2", "Smile 3"]),
-        Brand("PLKB", ["Aero V2", "Escape", "Gambit", "Hook V4", "Ibex", "Lynx", "Nova V2", "Raw", "Swell V5", "Synergy"]),
-        Brand("Reedin", ["HyperModel", "MasterModel", "SuperModel A.F.T.", "SuperModel HTF", "WhisperModel"]),
-        Brand("RRD", ["Gold Obsession Y30", "Gold Religion Y30", "Obsession Y31", "Passion Y31", "Religion Y32"]),
-        Brand("Slingshot", ["Code 95", "Code NXT", "Code V2", "Machine V3", "RPX", "UFO V4"]),
-        Brand("Spleene", ["BIG", "HAZE", "PUNK"]),
-        Brand("Takoon", ["Furia V2", "Furia V3", "One Light V2", "Wook V2"]),
+        Brand("GONG", ["Ayto", "Ayto Aramid", "Display", "Elips", "Strutless", "Strutless Revo", "Unik", "Vertigo", "Vertigo Aramid"], alias: "Гонг"),
+        Brand("Harlem", ["Flow", "Hadlow Pro", "Peak", "Thrive", "Thrive LiteX", "Thrive V2"], alias: "Харлем"),
+        Brand("Naish", ["Boxer [Q]Series", "Hunt [Q]Series", "Pivot", "Pivot [Q]Series", "Pivot [Q]Series LW", "Pivot LTD", "Pivot NVision", "Psycho [Q]Series", "Psycho NVision", "Torch", "Xeon"], alias: "Нэш Наиш"),
+        Brand("North", ["Carve", "Code Zero", "Code Zero Pro", "Orbit", "Orbit Ultra", "Pioneer Trainer", "Pulse", "Reach", "Reach Ultra"], alias: "Норт"),
+        Brand("Ozone", ["Alpha V3 Ultra-X", "Catalyst V5", "Chrono", "Edge V12", "Edge VT", "Edge VT Ultra-X", "Enduro", "EXP V2", "Explore V3", "Hyperlink V4", "Ignition V3", "Mach1", "R1 V5", "Reflex", "Reo V7", "Reo V7 Ultra-X", "Subzero V1", "Subzero V2", "Uno V2", "Vortex V2 Ultra-X", "Zephyr V8 Ultra-X"], alias: "Озон"),
+        Brand("ParAAvis", ["Fancy", "Ion 2", "Ion 4", "JKS", "Octane 2", "Q 2", "Smile 3"], alias: "Параавис ПараАвис"),
+        Brand("PLKB", ["Aero V2", "Escape", "Gambit", "Hook V4", "Ibex", "Lynx", "Nova V2", "Raw", "Swell V5", "Synergy"], alias: "Peter Lynn Питер Линн"),
+        Brand("Reedin", ["HyperModel", "MasterModel", "SuperModel A.F.T.", "SuperModel HTF", "WhisperModel"], alias: "Ридин"),
+        Brand("RRD", ["Gold Obsession Y30", "Gold Religion Y30", "Obsession Y31", "Passion Y31", "Religion Y32"], alias: "РРД"),
+        Brand("Slingshot", ["Code 95", "Code NXT", "Code V2", "Machine V3", "RPX", "UFO V4"], alias: "Слингшот"),
+        Brand("Spleene", ["BIG", "HAZE", "PUNK"], alias: "Сплин"),
+        Brand("Takoon", ["Furia V2", "Furia V3", "One Light V2", "Wook V2"], alias: "Такун"),
         Brand("Ventum", ["Mute", "Xcite V3", "Xplore V3"])
     ].sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
 }
