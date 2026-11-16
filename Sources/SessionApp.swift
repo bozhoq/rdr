@@ -44,7 +44,7 @@ private struct Tabs: View {
             .tag(Tab.history)
         }
         .tint(RiderTheme.accent)
-        .alert("Запись сессии", isPresented: Binding(
+        .alert("Rider", isPresented: Binding(
             get: { recorder.errorMessage != nil },
             set: { if !$0 { recorder.errorMessage = nil } }
         )) {
@@ -59,6 +59,8 @@ private struct RecordingView: View {
     @Environment(\.openURL) private var openURL
     @ObservedObject var recorder: SessionRecorder
     let onStop: () -> Void
+    @State private var markerKind = MarkerKind.walking
+    @State private var confirmingStop = false
 
     var body: some View {
         ScrollView {
@@ -84,7 +86,34 @@ private struct RecordingView: View {
                     }
                     .lagoonCard()
 
-                    Button(action: onStop) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Picker("Упражнение", selection: $markerKind) {
+                            ForEach(MarkerKind.allCases, id: \.self) { kind in
+                                Text(kind.title).tag(kind)
+                            }
+                        }
+                        Button {
+                            recorder.addMarker(markerKind)
+                        } label: {
+                            Label("Поставить метку", systemImage: "flag.fill")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(RiderTheme.action)
+                        .controlSize(.large)
+                        .disabled(!recorder.motionIsRecent)
+                        if let last = session.markers?.last {
+                            Text("Метка \(session.markers?.count ?? 0): \(last.kind.title) · \(eventTimeText(last.elapsedSeconds))")
+                                .font(.footnote.monospacedDigit())
+                                .foregroundStyle(RiderTheme.accent)
+                        }
+                        Text("Нажмите перед упражнением. Метка отмечает момент, но не подтверждает прыжок.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                    .lagoonCard()
+
+                    Button { confirmingStop = true } label: {
                         Label("Завершить запись", systemImage: "stop.fill")
                             .frame(maxWidth: .infinity)
                     }
@@ -121,6 +150,10 @@ private struct RecordingView: View {
         .toolbarBackground(RiderTheme.canvas, for: .navigationBar, .tabBar)
         .toolbarBackground(.visible, for: .navigationBar, .tabBar)
         .navigationTitle("Сессия")
+        .confirmationDialog("Завершить запись?", isPresented: $confirmingStop, titleVisibility: .visible) {
+            Button("Завершить и сохранить", action: onStop)
+            Button("Продолжить запись", role: .cancel) {}
+        }
     }
 
     private var recordingPanel: some View {
@@ -184,6 +217,9 @@ private struct RecordingView: View {
 private struct HistoryView: View {
     @ObservedObject var recorder: SessionRecorder
     @State private var pendingDeletion: SessionSummary?
+    @State private var search = ""
+
+    private var filtered: [SessionSummary] { recorder.history.filter { $0.matches(search) } }
 
     var body: some View {
         Group {
@@ -199,11 +235,14 @@ private struct HistoryView: View {
                     Text("Завершите запись, чтобы увидеть сводку и выгрузить лог.")
                 }
             } else {
-                List(recorder.history) { session in
+                List(filtered) { session in
                     NavigationLink {
                         SessionDetail(recorder: recorder, originalSession: session)
                     } label: {
                         VStack(alignment: .leading, spacing: 6) {
+                            if let title = session.review?.title, !title.isEmpty {
+                                Text(title).font(.headline).lineLimit(2)
+                            }
                             Text(session.startedAt, format: .dateTime.day().month(.wide).year().hour().minute())
                                 .font(.headline)
                             if session.status == .interrupted {
@@ -214,6 +253,11 @@ private struct HistoryView: View {
                             Text(durationText(session.durationSeconds))
                                 .font(.subheadline.monospacedDigit())
                                 .foregroundStyle(RiderTheme.accent)
+                            if let analysis = session.jumpAnalysis {
+                                Text("Событий: \(analysis.candidates.count) · Отмечено: \(reviewedCount(session))")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
                         }
                         .padding(.vertical, 4)
                     }
@@ -223,17 +267,22 @@ private struct HistoryView: View {
                         } label: {
                             Label("Удалить", systemImage: "trash")
                         }
+                        .disabled(recorder.analyzingSessionID == session.id)
                     }
                     .listRowBackground(RiderTheme.surface)
                 }
                 .listStyle(.insetGrouped)
                 .scrollContentBackground(.hidden)
+                .overlay {
+                    if filtered.isEmpty { ContentUnavailableView.search(text: search) }
+                }
             }
         }
         .background(RiderTheme.canvas.ignoresSafeArea())
         .toolbarBackground(RiderTheme.canvas, for: .navigationBar, .tabBar)
         .toolbarBackground(.visible, for: .navigationBar, .tabBar)
         .navigationTitle("История")
+        .searchable(text: $search, prompt: "Название или заметки")
         .confirmationDialog("Удалить сессию и её лог?", isPresented: Binding(
             get: { pendingDeletion != nil },
             set: { if !$0 { pendingDeletion = nil } }
@@ -247,6 +296,7 @@ private struct HistoryView: View {
 private struct SessionDetail: View {
     @ObservedObject var recorder: SessionRecorder
     let originalSession: SessionSummary
+    @State private var editingNotes = false
 
     private var session: SessionSummary {
         recorder.history.first { $0.id == originalSession.id } ?? originalSession
@@ -262,31 +312,30 @@ private struct SessionDetail: View {
                 }
                 LabeledContent("Длительность", value: durationText(session.durationSeconds))
                 MetricsRows(session: session)
+                if let title = session.review?.title, !title.isEmpty {
+                    LabeledContent("Название", value: title)
+                }
+                if let notes = session.review?.notes, !notes.isEmpty {
+                    Text(notes).textSelection(.enabled)
+                }
+                Button("Название и заметки") { editingNotes = true }
+                    .disabled(recorder.analyzingSessionID == session.id)
             }
             .listRowBackground(RiderTheme.surface)
             Section {
                 if let analysis = session.jumpAnalysis {
                     LabeledContent("Найдено событий", value: analysis.candidates.count.formatted())
+                    LabeledContent("Отмечено вами", value: "\(reviewedCount(session)) из \(analysis.candidates.count)")
                     if analysis.candidates.isEmpty {
                         Text("Подходящих эпизодов не найдено. Это не доказывает, что прыжков не было.")
                             .foregroundStyle(.secondary)
                     }
                     ForEach(Array(analysis.candidates.enumerated()), id: \.element.id) { index, candidate in
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text("Событие \(index + 1) · \(durationText(candidate.startSeconds))")
-                                .font(.headline)
-                                .foregroundStyle(RiderTheme.accent)
-                            Text("Разгрузка: \(metric(candidate.unloadingSeconds, unit: "с", digits: 2))")
-                            if candidate.fastRotation {
-                                Label("Сильное вращение телефона", systemImage: "arrow.triangle.2.circlepath")
-                                    .font(.footnote)
-                            }
-                            if candidate.strongImpact {
-                                Label("Резкий удар или ловля телефона", systemImage: "exclamationmark.circle")
-                                    .font(.footnote)
-                            }
-                        }
-                        .padding(.vertical, 4)
+                        CandidateRow(index: index, candidate: candidate, label: Binding(
+                            get: { session.review?.label(for: candidate, version: analysis.detectorVersion) ?? .unreviewed },
+                            set: { recorder.label(candidate.id, as: $0, in: session.id) }
+                        ))
+                        .disabled(recorder.analyzingSessionID == session.id)
                     }
                     if analysis.discontinuities > 0 {
                         Text("Разрывов данных: \(analysis.discontinuities). События через разрывы не объединяются.")
@@ -311,6 +360,15 @@ private struct SessionDetail: View {
                 Text("Разгрузка — участок со сниженной нагрузкой на телефон, а не измеренное время полёта. Высота пока не рассчитывается. Время события отсчитывается от первого измерения движения. Разбор выполняется на iPhone.")
             }
             .listRowBackground(RiderTheme.surface)
+            if let markers = session.markers, !markers.isEmpty {
+                Section {
+                    ForEach(markers) { marker in
+                        LabeledContent(marker.kind.title, value: eventTimeText(marker.elapsedSeconds))
+                    }
+                } header: { Text("Метки упражнений") }
+                footer: { Text("Момент нажатия по последнему измерению движения. Это ориентир для разбора, а не автоматическое определение упражнения.") }
+                .listRowBackground(RiderTheme.surface)
+            }
             Section("Диагностика") {
                 LabeledContent("Измерений движения", value: session.motion.count.formatted())
                 LabeledContent("Точек GPS", value: session.locationCount.formatted())
@@ -323,8 +381,17 @@ private struct SessionDetail: View {
             }
             .listRowBackground(RiderTheme.surface)
             Section {
+                ShareLink(item: SessionResultExport(session: session), preview: SharePreview("Результаты Rider")) {
+                    Label("Экспортировать результат", systemImage: "square.and.arrow.up")
+                        .foregroundStyle(RiderTheme.accent)
+                }
+            } footer: {
+                Text("Найденные события, ваши отметки, название и заметки. GPS-координаты автоматически не добавляются.")
+            }
+            .listRowBackground(RiderTheme.surface)
+            Section {
                 ShareLink(item: SessionExport(url: logURL), preview: SharePreview(logURL.lastPathComponent)) {
-                    Label("Экспортировать лог", systemImage: "square.and.arrow.up")
+                    Label("Экспортировать исходный лог", systemImage: "doc.text")
                         .foregroundStyle(RiderTheme.accent)
                 }
             } footer: {
@@ -339,7 +406,88 @@ private struct SessionDetail: View {
         .toolbarBackground(.visible, for: .navigationBar, .tabBar)
         .navigationTitle("Сводка")
         .navigationBarTitleDisplayMode(.inline)
+        .sheet(isPresented: $editingNotes) {
+            NotesEditor(title: session.review?.title ?? "", notes: session.review?.notes ?? "") { title, notes in
+                recorder.saveNotes(title: title, notes: notes, for: session.id)
+            }
+        }
     }
+}
+
+private struct CandidateRow: View {
+    let index: Int
+    let candidate: JumpCandidate
+    @Binding var label: JumpLabel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Событие \(index + 1) · \(eventTimeText(candidate.startSeconds))")
+                .font(.headline)
+                .foregroundStyle(RiderTheme.accent)
+            Text("Разгрузка: \(metric(candidate.unloadingSeconds, unit: "с", digits: 2))")
+            if candidate.fastRotation {
+                Label("Сильное вращение телефона", systemImage: "arrow.triangle.2.circlepath").font(.footnote)
+            }
+            if candidate.strongImpact {
+                Label("Резкий удар или ловля телефона", systemImage: "exclamationmark.circle").font(.footnote)
+            }
+            Picker("Что происходило", selection: $label) {
+                ForEach(JumpLabel.allCases, id: \.self) { label in
+                    Text(label.title).tag(label)
+                }
+            }
+            .pickerStyle(.menu)
+            .accessibilityLabel("Отметка для события \(index + 1)")
+        }
+        .padding(.vertical, 4)
+    }
+}
+
+private struct NotesEditor: View {
+    @Environment(\.dismiss) private var dismiss
+    @State var title: String
+    @State var notes: String
+    let onSave: (String, String) -> Bool
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Название") {
+                    TextField("Например, тест на прогулке", text: $title)
+                        .onChange(of: title) { _, value in title = String(value.prefix(100)) }
+                }
+                .listRowBackground(RiderTheme.surface)
+                Section {
+                    TextEditor(text: $notes)
+                        .frame(minHeight: 160)
+                        .scrollContentBackground(.hidden)
+                        .accessibilityLabel("Заметки о сессии")
+                        .onChange(of: notes) { _, value in notes = String(value.prefix(4000)) }
+                } header: { Text("Заметки") }
+                footer: { Text("Какие движения делали, где закреплён телефон и насколько свободно он двигался. До 4000 символов.") }
+                .listRowBackground(RiderTheme.surface)
+            }
+            .scrollContentBackground(.hidden)
+            .background(RiderTheme.canvas.ignoresSafeArea())
+            .navigationTitle("О сессии")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Отмена") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Сохранить") { if onSave(title, notes) { dismiss() } }
+                }
+            }
+        }
+        .tint(RiderTheme.accent)
+        .interactiveDismissDisabled()
+    }
+}
+
+private func reviewedCount(_ session: SessionSummary) -> Int {
+    guard let analysis = session.jumpAnalysis, let review = session.review else { return 0 }
+    return analysis.candidates.filter { review.label(for: $0, version: analysis.detectorVersion) != .unreviewed }.count
 }
 
 private enum RiderTheme {
@@ -401,6 +549,21 @@ private struct SessionExport: Transferable {
             SentTransferredFile($0.url)
         }
     }
+}
+
+private struct SessionResultExport: Transferable {
+    let session: SessionSummary
+
+    static var transferRepresentation: some TransferRepresentation {
+        FileRepresentation(exportedContentType: .json) { item in
+            SentTransferredFile(try SessionReport.write(item.session))
+        }
+    }
+}
+
+private func eventTimeText(_ seconds: Double) -> String {
+    let tenths = Int((seconds * 10).rounded())
+    return String(format: "%02d:%02d,%d", tenths / 600, tenths / 10 % 60, tenths % 10)
 }
 
 private func durationText(_ seconds: Double) -> String {

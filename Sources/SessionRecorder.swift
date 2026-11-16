@@ -26,6 +26,7 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
     private var lastLocationTimestamp: Date?
     private var distanceAnchor: CLLocation?
     private var jumpDetector = JumpDetector()
+    private var lastMarkerAt: ContinuousClock.Instant?
 
     var motionAvailable: Bool { motion.isDeviceMotionAvailable }
     var locationAuthorized: Bool { authorization == .authorizedWhenInUse || authorization == .authorizedAlways }
@@ -53,7 +54,8 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
             startedAt: Date(),
             gpsEnabledAtStart: locationAuthorized,
             batteryAtStartPercent: batteryPercent,
-            jumpAnalysis: JumpAnalysis()
+            jumpAnalysis: JumpAnalysis(),
+            markers: []
         )
         do {
             let newLog = try store.makeLog(for: session)
@@ -80,6 +82,7 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
         lastLocationTimestamp = nil
         distanceAnchor = nil
         jumpDetector = JumpDetector()
+        lastMarkerAt = nil
         motionIsRecent = false
 
         if session.gpsEnabledAtStart {
@@ -106,6 +109,49 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
 
     func stop() {
         finish(.finished)
+    }
+
+    func addMarker(_ kind: MarkerKind) {
+        guard var session = summary, let log,
+              let elapsed = session.motion.lastElapsedSeconds,
+              let received = lastMotionReceivedAt,
+              received.duration(to: clock.now) <= .milliseconds(250) else {
+            errorMessage = "Для метки нужны свежие данные движения. Дождитесь возобновления записи датчиков."
+            return
+        }
+        if let lastMarkerAt, lastMarkerAt.duration(to: clock.now) < .milliseconds(500) { return }
+        let marker = SessionMarker(elapsedSeconds: elapsed, kind: kind)
+        do {
+            try log.append("marker", marker)
+            if session.markers == nil { session.markers = [] }
+            session.markers?.append(marker)
+            summary = session
+            lastMarkerAt = clock.now
+            checkpointIfDue(force: true)
+        } catch { failStorage(error) }
+    }
+
+    @discardableResult
+    func saveNotes(title: String, notes: String, for id: UUID) -> Bool {
+        guard summary?.id != id, analyzingSessionID != id else { return false }
+        do {
+            try store.saveNotes(title: title, notes: notes, for: id)
+            reloadHistory()
+            return true
+        } catch {
+            errorMessage = "Не удалось сохранить заметки. \(error.localizedDescription)"
+            return false
+        }
+    }
+
+    func label(_ candidate: UUID, as label: JumpLabel, in id: UUID) {
+        guard summary?.id != id, analyzingSessionID != id else { return }
+        do {
+            try store.saveLabel(label, candidateID: candidate, for: id)
+            reloadHistory()
+        } catch {
+            errorMessage = "Не удалось сохранить отметку. \(error.localizedDescription)"
+        }
     }
 
     func sceneChanged(_ phase: ScenePhase) {

@@ -40,6 +40,96 @@ struct SessionSummary: Codable, Identifiable {
     var batteryAtCheckpointPercent: Int?
     // Optional for backwards-compatible decoding of existing session summaries.
     var jumpAnalysis: JumpAnalysis?
+    var review: SessionReview?
+    var markers: [SessionMarker]?
+
+    func matches(_ query: String) -> Bool {
+        let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        return query.isEmpty || [review?.title ?? "", review?.notes ?? ""]
+            .contains { $0.localizedStandardContains(query) }
+    }
+}
+
+enum JumpLabel: String, Codable, CaseIterable {
+    case unreviewed, bodyJump, phoneToss, otherMovement
+
+    var title: String {
+        switch self {
+        case .unreviewed: return "Не отмечено"
+        case .bodyJump: return "Прыжок человека"
+        case .phoneToss: return "Подброс телефона"
+        case .otherMovement: return "Другое движение"
+        }
+    }
+}
+
+struct SessionReview: Codable {
+    var title = ""
+    var notes = ""
+    var labels: [String: JumpLabel] = [:]
+
+    // UUIDs change on replay. Sensor times and detector version identify the
+    // same event; a future changed detector cannot silently inherit its label.
+    static func key(for candidate: JumpCandidate, version: String) -> String {
+        let start = String(format: "%.3f", locale: Locale(identifier: "en_US_POSIX"), candidate.startSeconds)
+        let end = String(format: "%.3f", locale: Locale(identifier: "en_US_POSIX"), candidate.endSeconds)
+        return "\(version):\(start):\(end)"
+    }
+
+    func label(for candidate: JumpCandidate, version: String) -> JumpLabel {
+        labels[Self.key(for: candidate, version: version)] ?? .unreviewed
+    }
+
+    mutating func setLabel(_ label: JumpLabel, for candidate: JumpCandidate, version: String) {
+        let key = Self.key(for: candidate, version: version)
+        if label == .unreviewed { labels.removeValue(forKey: key) }
+        else { labels[key] = label }
+    }
+}
+
+enum MarkerKind: String, Codable, CaseIterable {
+    case walking, running, bodyJumps, phoneToss, caseMovement, other
+
+    var title: String {
+        switch self {
+        case .walking: return "Ходьба"
+        case .running: return "Бег"
+        case .bodyJumps: return "Прыжки на месте"
+        case .phoneToss: return "Подброс телефона"
+        case .caseMovement: return "Движение чехла"
+        case .other: return "Другое упражнение"
+        }
+    }
+}
+
+struct SessionMarker: Codable, Identifiable {
+    var id = UUID()
+    let elapsedSeconds: Double
+    let kind: MarkerKind
+}
+
+/// Snapshot of the latest summary, including replay results and manual labels.
+/// The raw log is never read here, so automatic GPS coordinates cannot leak in.
+enum SessionReport {
+    private struct Report: Encodable {
+        let formatVersion = 1
+        let kind = "rider-session-result"
+        let interpretation = "Experimental candidates, not validated airtime or height. Labels are supplied by the user. Marker times refer to the first motion sample."
+        let session: SessionSummary
+    }
+
+    static func data(for session: SessionSummary) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .millisecondsSince1970
+        return try encoder.encode(Report(session: session))
+    }
+
+    static func write(_ session: SessionSummary) throws -> URL {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("Rider-result-\(session.id)-\(UUID()).json")
+        try data(for: session).write(to: url, options: .atomic)
+        return url
+    }
 }
 
 struct Vector3: Codable {
@@ -81,7 +171,11 @@ struct SessionEvent: Encodable {
 
 final class SessionStore {
     private let files = FileManager.default
-    private let root = URL.applicationSupportDirectory.appendingPathComponent("Sessions", isDirectory: true)
+    private let root: URL
+
+    init(root: URL = URL.applicationSupportDirectory.appendingPathComponent("Sessions", isDirectory: true)) {
+        self.root = root
+    }
 
     func makeLog(for summary: SessionSummary) throws -> SessionLog {
         try files.createDirectory(at: root, withIntermediateDirectories: true)
@@ -119,11 +213,37 @@ final class SessionStore {
     }
 
     func saveAnalysis(_ analysis: JumpAnalysis, for id: UUID) throws {
+        try updateSummary(id) { $0.jumpAnalysis = analysis }
+    }
+
+    func saveNotes(title: String, notes: String, for id: UUID) throws {
+        try updateSummary(id) { summary in
+            var review = summary.review ?? SessionReview()
+            review.title = String(title.trimmingCharacters(in: .whitespacesAndNewlines).prefix(100))
+            review.notes = String(notes.trimmingCharacters(in: .whitespacesAndNewlines).prefix(4000))
+            summary.review = review
+        }
+    }
+
+    func saveLabel(_ label: JumpLabel, candidateID: UUID, for id: UUID) throws {
+        try updateSummary(id) { summary in
+            guard let analysis = summary.jumpAnalysis,
+                  let candidate = analysis.candidates.first(where: { $0.id == candidateID }) else {
+                throw CocoaError(.fileReadCorruptFile)
+            }
+            var review = summary.review ?? SessionReview()
+            review.setLabel(label, for: candidate, version: analysis.detectorVersion)
+            summary.review = review
+        }
+    }
+
+    private func updateSummary(_ id: UUID, change: (inout SessionSummary) throws -> Void) throws {
         let url = directory(for: id).appendingPathComponent("summary.json")
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .millisecondsSince1970
         var summary = try decoder.decode(SessionSummary.self, from: Data(contentsOf: url))
-        summary.jumpAnalysis = analysis
+        guard summary.id == id else { throw CocoaError(.fileReadCorruptFile) }
+        try change(&summary)
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .millisecondsSince1970
         try encoder.encode(summary).write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
