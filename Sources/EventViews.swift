@@ -177,16 +177,13 @@ struct SessionCardPreview: View {
 
     @MainActor private func render() {
         error = nil
-        let renderer = ImageRenderer(content: SessionCardView(data: SessionCardData(session: session)))
-        renderer.scale = 3
-        renderer.isOpaque = true
-        guard let image = renderer.uiImage, let png = image.pngData() else {
+        guard let cg = CardArtwork.render(SessionCardData(session: session)), let png = CardArtwork.png(cg) else {
             error = "Не удалось создать картинку. Попробуйте ещё раз."; return
         }
         do {
             let file = FileManager.default.temporaryDirectory.appendingPathComponent("Rider-card-\(UUID()).png")
             try png.write(to: file, options: .atomic)
-            self.image = image; self.file = file
+            self.image = UIImage(cgImage: cg); self.file = file
         } catch { self.error = error.localizedDescription }
     }
 }
