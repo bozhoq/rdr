@@ -48,7 +48,14 @@ enum DetectorTests {
         check(run(trace(lowStart: 0)).isEmpty, "Do not infer takeoff before recording")
         check(run(Array(standard.prefix(145))).isEmpty, "Do not invent landing at EOF")
         check(run((0..<250).map { sample(Double($0) / 100, $0 == 100 ? 15 : 1) }).isEmpty, "Impact alone is not a jump")
-        check(run((0..<500).map { sample(Double($0) / 100, $0 >= 50 && $0 < 400 ? 0.1 : ($0 == 400 ? 3 : 1)) }).isEmpty, "Reject excessively long unloading")
+        let longUnloading: [MotionSample] = (0..<500).map { i in
+            let load: Double
+            if i >= 50 && i < 400 { load = 0.1 }
+            else if i == 400 { load = 3 }
+            else { load = 1 }
+            return sample(Double(i) / 100, load)
+        }
+        check(run(longUnloading).isEmpty, "Reject excessively long unloading")
 
         var gap = standard
         gap.removeSubrange(120..<140)
