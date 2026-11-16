@@ -19,8 +19,10 @@ jobs:
         run: |
           mkdir -p build
           python3 replay_detector.py --synthetic-fixtures build/parity.json
-          swiftc Sources/SessionLog.swift Sources/JumpDetector.swift detector_tests.swift -o build/detector-tests
+          swiftc Sources/SessionLog.swift Sources/JumpDetector.swift Sources/SessionInsights.swift detector_tests.swift -o build/detector-tests
           build/detector-tests build/parity.json
+          swiftc Sources/SessionLog.swift Sources/JumpDetector.swift Sources/SessionInsights.swift insights_tests.swift -o build/insights-tests
+          build/insights-tests
       - name: Build for a physical iPhone
         run: |
           xcodebuild -version
