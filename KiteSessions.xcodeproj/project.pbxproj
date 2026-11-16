@@ -13,6 +13,9 @@
         C00100000000000000000005 /* JumpDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00200000000000000000007 /* JumpDetector.swift */; };
         C00100000000000000000006 /* SessionInsights.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00200000000000000000008 /* SessionInsights.swift */; };
         C00100000000000000000007 /* InsightsViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00200000000000000000009 /* InsightsViews.swift */; };
+        C00100000000000000000008 /* EventReview.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0020000000000000000000A /* EventReview.swift */; };
+        C00100000000000000000009 /* EventViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0020000000000000000000B /* EventViews.swift */; };
+        C0010000000000000000000A /* CardArtwork.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0020000000000000000000C /* CardArtwork.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -25,6 +28,9 @@
         C00200000000000000000007 /* JumpDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JumpDetector.swift; sourceTree = "<group>"; };
         C00200000000000000000008 /* SessionInsights.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionInsights.swift; sourceTree = "<group>"; };
         C00200000000000000000009 /* InsightsViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InsightsViews.swift; sourceTree = "<group>"; };
+        C0020000000000000000000A /* EventReview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EventReview.swift; sourceTree = "<group>"; };
+        C0020000000000000000000B /* EventViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EventViews.swift; sourceTree = "<group>"; };
+        C0020000000000000000000C /* CardArtwork.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CardArtwork.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -54,6 +60,9 @@
                 C00200000000000000000002 /* SessionRecorder.swift */,
                 C00200000000000000000003 /* SessionLog.swift */,
                 C00200000000000000000007 /* JumpDetector.swift */,
+                C0020000000000000000000C /* CardArtwork.swift */,
+                C0020000000000000000000B /* EventViews.swift */,
+                C0020000000000000000000A /* EventReview.swift */,
                 C00200000000000000000009 /* InsightsViews.swift */,
                 C00200000000000000000008 /* SessionInsights.swift */,
             );
@@ -130,6 +139,9 @@
                 C00100000000000000000002 /* SessionRecorder.swift in Sources */,
                 C00100000000000000000003 /* SessionLog.swift in Sources */,
                 C00100000000000000000005 /* JumpDetector.swift in Sources */,
+                C0010000000000000000000A /* CardArtwork.swift in Sources */,
+                C00100000000000000000009 /* EventViews.swift in Sources */,
+                C00100000000000000000008 /* EventReview.swift in Sources */,
                 C00100000000000000000007 /* InsightsViews.swift in Sources */,
                 C00100000000000000000006 /* SessionInsights.swift in Sources */,
             );
@@ -169,10 +181,10 @@
             buildSettings = {
                 ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
                 CODE_SIGN_STYLE = Automatic;
-                CURRENT_PROJECT_VERSION = 6;
+                CURRENT_PROJECT_VERSION = 7;
                 GENERATE_INFOPLIST_FILE = NO;
                 INFOPLIST_FILE = Info.plist;
-                MARKETING_VERSION = 0.4.0;
+                MARKETING_VERSION = 0.5.0;
                 PRODUCT_BUNDLE_IDENTIFIER = local.kitesessions.prototype;
                 PRODUCT_NAME = "$(TARGET_NAME)";
                 SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -185,10 +197,10 @@
             buildSettings = {
                 ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
                 CODE_SIGN_STYLE = Automatic;
-                CURRENT_PROJECT_VERSION = 6;
+                CURRENT_PROJECT_VERSION = 7;
                 GENERATE_INFOPLIST_FILE = NO;
                 INFOPLIST_FILE = Info.plist;
-                MARKETING_VERSION = 0.4.0;
+                MARKETING_VERSION = 0.5.0;
                 PRODUCT_BUNDLE_IDENTIFIER = local.kitesessions.prototype;
                 PRODUCT_NAME = "$(TARGET_NAME)";
                 SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
