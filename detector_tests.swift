@@ -34,6 +34,17 @@ enum DetectorTests {
     }
 
     static func main() throws {
+        var altitude = AltitudeMetrics(supported: true)
+        let first = AltitudeSample(elapsedSinceFirstSampleSeconds: 1, pressureKilopascals: 100, relativeAltitudeMeters: 0)
+        let upper = AltitudeSample(elapsedSinceFirstSampleSeconds: 3, pressureKilopascals: 99.96, relativeAltitudeMeters: 3.4)
+        let lower = AltitudeSample(elapsedSinceFirstSampleSeconds: 4, pressureKilopascals: 100.01, relativeAltitudeMeters: -0.2)
+        check(altitude.add(first) && altitude.add(upper) && altitude.add(lower), "Record signed altitude samples on the motion timeline")
+        check(!altitude.add(upper), "Reject altitude timestamps that move backwards")
+        check(!altitude.add(AltitudeSample(elapsedSinceFirstSampleSeconds: 5, pressureKilopascals: .nan, relativeAltitudeMeters: 0)), "Drop invalid pressure")
+        let altitudeData = try JSONEncoder().encode(altitude)
+        let restoredAltitude = try JSONDecoder().decode(AltitudeMetrics.self, from: altitudeData)
+        check(restoredAltitude.count == 3 && restoredAltitude.lowestMeters == -0.2 && restoredAltitude.highestMeters == 3.4 && restoredAltitude.longestIntervalSeconds == 2, "Restore barometer range and interval from checkpoint")
+
         let standard = trace()
         let detected = run(standard)
         check(detected.count == 1, "Expected one unloading and return")
