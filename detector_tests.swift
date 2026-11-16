@@ -145,8 +145,9 @@ enum DetectorTests {
                 if let event = hand.processMotion(sample(time, 1 + acceleration / 9.80665), calibration: nil,
                                                   allowInertialFallback: true) { results.append(event) }
             }
-            check(results.count == 1 && abs(results[0].1 - 1.2) < 0.15,
-                  "Supported still-to-still lift has an approximate fallback at several speeds")
+            check(results.count == 1 && abs(results[0].1 - 1.2) < 0.15 &&
+                  results[0].0.endSeconds >= duration + 0.95,
+                  "Supported lift duration \(duration)s: expected one ~1.2m result, got \(results.map { $0.1 })")
         }
         var noFallback = HandSimulationDetector()
         check(ridingTrace.compactMap { noFallback.processMotion($0, calibration: nil, allowInertialFallback: false) }.isEmpty,
