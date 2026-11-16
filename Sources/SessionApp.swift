@@ -43,7 +43,7 @@ private struct Tabs: View {
             .tabItem { Label("История", systemImage: "clock.arrow.circlepath") }
             .tag(Tab.history)
         }
-        .tint(Color(red: 0.02, green: 0.45, blue: 0.45))
+        .tint(RiderTheme.accent)
         .alert("Запись сессии", isPresented: Binding(
             get: { recorder.errorMessage != nil },
             set: { if !$0 { recorder.errorMessage = nil } }
@@ -70,22 +70,23 @@ private struct RecordingView: View {
                         LabeledContent("Точек GPS", value: session.locationCount.formatted())
                         MetricsRows(session: session)
                     }
-                    .padding(.horizontal, 4)
+                    .lagoonCard()
 
-                    Button(role: .destructive, action: onStop) {
+                    Button(action: onStop) {
                         Label("Завершить запись", systemImage: "stop.fill")
                             .frame(maxWidth: .infinity)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.red)
+                    .buttonStyle(.bordered)
                     .controlSize(.large)
                 } else {
                     locationControls
+                        .lagoonCard()
                     Button(action: recorder.start) {
                         Label("Начать запись", systemImage: "record.circle")
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.borderedProminent)
+                    .tint(RiderTheme.action)
                     .controlSize(.large)
                     .disabled(!recorder.motionAvailable)
 
@@ -98,6 +99,9 @@ private struct RecordingView: View {
             }
             .padding(20)
         }
+        .background(RiderTheme.canvas.ignoresSafeArea())
+        .toolbarBackground(RiderTheme.canvas, for: .navigationBar, .tabBar)
+        .toolbarBackground(.visible, for: .navigationBar, .tabBar)
         .navigationTitle("Сессия")
     }
 
@@ -106,6 +110,7 @@ private struct RecordingView: View {
             if let session = recorder.live {
                 Label("Идёт запись", systemImage: "record.circle.fill")
                     .font(.headline)
+                    .foregroundStyle(RiderTheme.foam)
                 Text(durationText(session.durationSeconds))
                     .font(.system(.largeTitle, design: .monospaced, weight: .semibold))
                     .monospacedDigit()
@@ -113,16 +118,17 @@ private struct RecordingView: View {
                     .accessibilityValue(durationText(session.durationSeconds))
                 Text(recorder.motionIsRecent ? "Данные движения поступают" : "Ожидание данных движения")
                     .font(.subheadline)
-                    .foregroundStyle(.white.opacity(0.85))
+                    .foregroundStyle(RiderTheme.foam)
             } else {
                 Image(systemName: "water.waves")
                     .font(.title2)
+                    .foregroundStyle(RiderTheme.foam)
                     .accessibilityHidden(true)
                 Text("Новая сессия")
                     .font(.largeTitle.bold())
                 Text("Перед стартом закрепите iPhone на теле в гермочехле.")
                     .font(.subheadline)
-                    .foregroundStyle(.white.opacity(0.85))
+                    .foregroundStyle(RiderTheme.foam)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -130,10 +136,7 @@ private struct RecordingView: View {
         .foregroundStyle(.white)
         .background {
             RoundedRectangle(cornerRadius: 24)
-                .fill(LinearGradient(
-                    colors: [Color(red: 0.03, green: 0.16, blue: 0.22), Color(red: 0.02, green: 0.36, blue: 0.36)],
-                    startPoint: .topLeading, endPoint: .bottomTrailing
-                ))
+                .fill(RiderTheme.lagoon)
         }
     }
 
@@ -141,10 +144,12 @@ private struct RecordingView: View {
         if recorder.locationAuthorized {
             Label("GPS доступен", systemImage: "location.fill")
                 .font(.subheadline)
+                .foregroundStyle(RiderTheme.accent)
         } else {
             VStack(alignment: .leading, spacing: 8) {
                 Label("Запись без GPS", systemImage: "location.slash")
                     .font(.headline)
+                    .foregroundStyle(RiderTheme.accent)
                 Text("Разрешите геопозицию для записи маршрута, скорости и проверки записи при блокировке экрана.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
@@ -165,8 +170,16 @@ private struct HistoryView: View {
     var body: some View {
         Group {
             if recorder.history.isEmpty {
-                ContentUnavailableView("Сессий пока нет", systemImage: "clock",
-                                       description: Text("Завершите запись, чтобы увидеть сводку и выгрузить лог."))
+                ContentUnavailableView {
+                    Label {
+                        Text("Сессий пока нет")
+                    } icon: {
+                        Image(systemName: "clock")
+                            .foregroundStyle(RiderTheme.accent)
+                    }
+                } description: {
+                    Text("Завершите запись, чтобы увидеть сводку и выгрузить лог.")
+                }
             } else {
                 List(recorder.history) { session in
                     NavigationLink {
@@ -182,7 +195,7 @@ private struct HistoryView: View {
                             }
                             Text(durationText(session.durationSeconds))
                                 .font(.subheadline.monospacedDigit())
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(RiderTheme.accent)
                         }
                         .padding(.vertical, 4)
                     }
@@ -193,9 +206,15 @@ private struct HistoryView: View {
                             Label("Удалить", systemImage: "trash")
                         }
                     }
+                    .listRowBackground(RiderTheme.surface)
                 }
+                .listStyle(.insetGrouped)
+                .scrollContentBackground(.hidden)
             }
         }
+        .background(RiderTheme.canvas.ignoresSafeArea())
+        .toolbarBackground(RiderTheme.canvas, for: .navigationBar, .tabBar)
+        .toolbarBackground(.visible, for: .navigationBar, .tabBar)
         .navigationTitle("История")
         .confirmationDialog("Удалить сессию и её лог?", isPresented: Binding(
             get: { pendingDeletion != nil },
@@ -221,6 +240,7 @@ private struct SessionDetail: View {
                 LabeledContent("Длительность", value: durationText(session.durationSeconds))
                 MetricsRows(session: session)
             }
+            .listRowBackground(RiderTheme.surface)
             Section("Диагностика") {
                 LabeledContent("Измерений движения", value: session.motion.count.formatted())
                 LabeledContent("Точек GPS", value: session.locationCount.formatted())
@@ -231,16 +251,66 @@ private struct SessionDetail: View {
                     LabeledContent("Заряд", value: "\(start)% → \(end)%")
                 }
             }
+            .listRowBackground(RiderTheme.surface)
             Section {
                 ShareLink(item: SessionExport(url: logURL), preview: SharePreview(logURL.lastPathComponent)) {
                     Label("Экспортировать лог", systemImage: "square.and.arrow.up")
+                        .foregroundStyle(RiderTheme.accent)
                 }
             } footer: {
                 Text("Если во время сессии был доступен GPS, файл содержит координаты.")
             }
+            .listRowBackground(RiderTheme.surface)
         }
+        .listStyle(.insetGrouped)
+        .scrollContentBackground(.hidden)
+        .background(RiderTheme.canvas.ignoresSafeArea())
+        .toolbarBackground(RiderTheme.canvas, for: .navigationBar, .tabBar)
+        .toolbarBackground(.visible, for: .navigationBar, .tabBar)
         .navigationTitle("Сводка")
         .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private enum RiderTheme {
+    static let canvas = adaptive(light: 0xE1F7F4, dark: 0x092626)
+    static let surface = adaptive(light: 0xF6FFFD, dark: 0x113837)
+    static let border = adaptive(light: 0xB5E4DE, dark: 0x285554)
+    static let accent = adaptive(light: 0x006F70, dark: 0x6CE5CE)
+    static let action = Color(uiColor: rgb(0x006F70))
+    static let foam = Color(uiColor: rgb(0xDDFCF6))
+    static let lagoon = LinearGradient(
+        colors: [Color(uiColor: rgb(0x005C87)), Color(uiColor: rgb(0x006F73))],
+        startPoint: .topLeading,
+        endPoint: .bottomTrailing
+    )
+
+    private static func adaptive(light: UInt32, dark: UInt32) -> Color {
+        Color(uiColor: UIColor { traits in
+            rgb(traits.userInterfaceStyle == .dark ? dark : light)
+        })
+    }
+
+    private static func rgb(_ hex: UInt32) -> UIColor {
+        UIColor(
+            red: CGFloat((hex >> 16) & 255) / 255,
+            green: CGFloat((hex >> 8) & 255) / 255,
+            blue: CGFloat(hex & 255) / 255,
+            alpha: 1
+        )
+    }
+}
+
+private extension View {
+    func lagoonCard() -> some View {
+        frame(maxWidth: .infinity, alignment: .leading)
+            .padding(16)
+            .background(RiderTheme.surface, in: RoundedRectangle(cornerRadius: 18))
+            .overlay {
+                RoundedRectangle(cornerRadius: 18)
+                    .strokeBorder(RiderTheme.border, lineWidth: 1)
+                    .allowsHitTesting(false)
+            }
     }
 }
 
