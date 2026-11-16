@@ -10,6 +10,7 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
     @Published private(set) var authorization: CLAuthorizationStatus = .notDetermined
     @Published private(set) var motionIsRecent = false
     @Published var errorMessage: String?
+    @Published private(set) var analyzingSessionID: UUID?
 
     private let store = SessionStore()
     private let motion = CMMotionManager()
@@ -24,6 +25,7 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
     private var motionTimeOrigin: TimeInterval?
     private var lastLocationTimestamp: Date?
     private var distanceAnchor: CLLocation?
+    private var jumpDetector = JumpDetector()
 
     var motionAvailable: Bool { motion.isDeviceMotionAvailable }
     var locationAuthorized: Bool { authorization == .authorizedWhenInUse || authorization == .authorizedAlways }
@@ -45,12 +47,13 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
     }
 
     func start() {
-        guard summary == nil, motionAvailable else { return }
+        guard summary == nil, analyzingSessionID == nil, motionAvailable else { return }
         UIDevice.current.isBatteryMonitoringEnabled = true
         let session = SessionSummary(
             startedAt: Date(),
             gpsEnabledAtStart: locationAuthorized,
-            batteryAtStartPercent: batteryPercent
+            batteryAtStartPercent: batteryPercent,
+            jumpAnalysis: JumpAnalysis()
         )
         do {
             let newLog = try store.makeLog(for: session)
@@ -76,6 +79,7 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
         motionTimeOrigin = nil
         lastLocationTimestamp = nil
         distanceAnchor = nil
+        jumpDetector = JumpDetector()
         motionIsRecent = false
 
         if session.gpsEnabledAtStart {
@@ -120,12 +124,29 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
     }
 
     func delete(_ id: UUID) {
-        guard summary?.id != id else { return }
+        guard summary?.id != id, analyzingSessionID != id else { return }
         do {
             try store.delete(id)
             history.removeAll { $0.id == id }
         } catch {
             errorMessage = "Не удалось удалить сессию. \(error.localizedDescription)"
+        }
+    }
+
+    @MainActor
+    func analyze(_ id: UUID) async {
+        guard summary == nil, analyzingSessionID == nil else { return }
+        analyzingSessionID = id
+        defer { analyzingSessionID = nil }
+        let url = store.logURL(for: id)
+        do {
+            let analysis = try await Task.detached(priority: .userInitiated) {
+                try JumpReplay.analyze(url: url)
+            }.value
+            try store.saveAnalysis(analysis, for: id)
+            reloadHistory()
+        } catch {
+            errorMessage = "Не удалось разобрать запись. \(error.localizedDescription)"
         }
     }
 
@@ -178,6 +199,11 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
         do {
             try log.append("motion", sample)
             session.motion.add(elapsed)
+            if let candidate = jumpDetector.process(sample) {
+                try log.append("jumpCandidate", candidate)
+                session.jumpAnalysis?.candidates.append(candidate)
+            }
+            session.jumpAnalysis?.discontinuities = jumpDetector.discontinuities
             summary = session
             motionTimeOrigin = origin
             lastMotionReceivedAt = clock.now

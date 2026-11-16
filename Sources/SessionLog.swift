@@ -38,6 +38,8 @@ struct SessionSummary: Codable, Identifiable {
     var distanceMeters: Double?
     var maxSpeedMetersPerSecond: Double?
     var batteryAtCheckpointPercent: Int?
+    // Optional for backwards-compatible decoding of existing session summaries.
+    var jumpAnalysis: JumpAnalysis?
 }
 
 struct Vector3: Codable {
@@ -114,6 +116,17 @@ final class SessionStore {
 
     func logURL(for id: UUID) -> URL {
         directory(for: id).appendingPathComponent("session-\(id.uuidString).jsonl")
+    }
+
+    func saveAnalysis(_ analysis: JumpAnalysis, for id: UUID) throws {
+        let url = directory(for: id).appendingPathComponent("summary.json")
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .millisecondsSince1970
+        var summary = try decoder.decode(SessionSummary.self, from: Data(contentsOf: url))
+        summary.jumpAnalysis = analysis
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .millisecondsSince1970
+        try encoder.encode(summary).write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
     }
 
     func delete(_ id: UUID) throws {

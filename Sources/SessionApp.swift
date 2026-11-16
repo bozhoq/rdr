@@ -72,6 +72,18 @@ private struct RecordingView: View {
                     }
                     .lagoonCard()
 
+                    VStack(alignment: .leading, spacing: 10) {
+                        Label("Возможные прыжки", systemImage: "figure.jumprope")
+                            .font(.headline)
+                        Text("\(session.jumpAnalysis?.candidates.count ?? 0)")
+                            .font(.largeTitle.bold())
+                            .foregroundStyle(RiderTheme.accent)
+                        Text("Экспериментальный детектор. Движение чехла и подбрасывание телефона тоже могут дать событие.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                    .lagoonCard()
+
                     Button(action: onStop) {
                         Label("Завершить запись", systemImage: "stop.fill")
                             .frame(maxWidth: .infinity)
@@ -88,7 +100,13 @@ private struct RecordingView: View {
                     .buttonStyle(.borderedProminent)
                     .tint(RiderTheme.action)
                     .controlSize(.large)
-                    .disabled(!recorder.motionAvailable)
+                    .disabled(!recorder.motionAvailable || recorder.analyzingSessionID != nil)
+
+                    if recorder.analyzingSessionID != nil {
+                        Text("Разбираем сохранённую сессию…")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
 
                     if !recorder.motionAvailable {
                         Label("Для записи движения нужен iPhone с доступными датчиками.", systemImage: "iphone")
@@ -183,7 +201,7 @@ private struct HistoryView: View {
             } else {
                 List(recorder.history) { session in
                     NavigationLink {
-                        SessionDetail(session: session, logURL: recorder.exportURL(for: session.id))
+                        SessionDetail(recorder: recorder, originalSession: session)
                     } label: {
                         VStack(alignment: .leading, spacing: 6) {
                             Text(session.startedAt, format: .dateTime.day().month(.wide).year().hour().minute())
@@ -227,8 +245,13 @@ private struct HistoryView: View {
 }
 
 private struct SessionDetail: View {
-    let session: SessionSummary
-    let logURL: URL
+    @ObservedObject var recorder: SessionRecorder
+    let originalSession: SessionSummary
+
+    private var session: SessionSummary {
+        recorder.history.first { $0.id == originalSession.id } ?? originalSession
+    }
+    private var logURL: URL { recorder.exportURL(for: session.id) }
 
     var body: some View {
         List {
@@ -239,6 +262,53 @@ private struct SessionDetail: View {
                 }
                 LabeledContent("Длительность", value: durationText(session.durationSeconds))
                 MetricsRows(session: session)
+            }
+            .listRowBackground(RiderTheme.surface)
+            Section {
+                if let analysis = session.jumpAnalysis {
+                    LabeledContent("Найдено событий", value: analysis.candidates.count.formatted())
+                    if analysis.candidates.isEmpty {
+                        Text("Подходящих эпизодов не найдено. Это не доказывает, что прыжков не было.")
+                            .foregroundStyle(.secondary)
+                    }
+                    ForEach(Array(analysis.candidates.enumerated()), id: \.element.id) { index, candidate in
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Событие \(index + 1) · \(durationText(candidate.startSeconds))")
+                                .font(.headline)
+                                .foregroundStyle(RiderTheme.accent)
+                            Text("Разгрузка: \(metric(candidate.unloadingSeconds, unit: "с", digits: 2))")
+                            if candidate.fastRotation {
+                                Label("Сильное вращение телефона", systemImage: "arrow.triangle.2.circlepath")
+                                    .font(.footnote)
+                            }
+                            if candidate.strongImpact {
+                                Label("Резкий удар или ловля телефона", systemImage: "exclamationmark.circle")
+                                    .font(.footnote)
+                            }
+                        }
+                        .padding(.vertical, 4)
+                    }
+                    if analysis.discontinuities > 0 {
+                        Text("Разрывов данных: \(analysis.discontinuities). События через разрывы не объединяются.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    Text("Эта сессия записана до появления детектора. Её можно разобрать сейчас.")
+                        .foregroundStyle(.secondary)
+                }
+                if recorder.analyzingSessionID == session.id {
+                    ProgressView("Разбираем запись…")
+                } else {
+                    Button(session.jumpAnalysis == nil ? "Найти возможные прыжки" : "Повторить разбор") {
+                        Task { await recorder.analyze(session.id) }
+                    }
+                    .disabled(recorder.live != nil || recorder.analyzingSessionID != nil)
+                }
+            } header: {
+                Text("Возможные прыжки · эксперимент")
+            } footer: {
+                Text("Разгрузка — участок со сниженной нагрузкой на телефон, а не измеренное время полёта. Высота пока не рассчитывается. Время события отсчитывается от первого измерения движения. Разбор выполняется на iPhone.")
             }
             .listRowBackground(RiderTheme.surface)
             Section("Диагностика") {
