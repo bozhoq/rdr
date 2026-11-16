@@ -384,7 +384,7 @@ private struct SpotGallery: View {
     let spotID: UUID
     @State private var chosen: [PhotosPickerItem] = []
     @State private var items: [URL] = []
-    @State private var error = false
+    @State private var photoError = false
     @State private var importing = false
     @State private var zoom: URL?
     @State private var removingPicture = false
@@ -420,7 +420,7 @@ private struct SpotGallery: View {
                 }.disabled(importing)
             }
             if importing { ProgressView("Сохраняем фото") }
-            if error { Text("Некоторые фото не удалось сохранить.").foregroundStyle(.secondary).font(.footnote) }
+            if photoError { Text("Не удалось сохранить или убрать фото.").foregroundStyle(.secondary).font(.footnote) }
         }
         .lagoonCard()
         .onAppear(perform: reload)
@@ -457,12 +457,13 @@ private struct SpotGallery: View {
     }
 
     private func remove(_ picture: URL) {
+        photoError = false
         do {
             try FileManager.default.removeItem(at: picture)
             zoom = nil
             reload()
         } catch {
-            error = true
+            photoError = true
             zoom = nil
         }
     }
@@ -473,7 +474,7 @@ private struct SpotGallery: View {
             chosen = []
             importing = false
         }
-        error = false
+        photoError = false
         for pick in picks.prefix(max(0, cap - items.count)) {
             do {
                 guard let data = try await pick.loadTransferable(type: Data.self), data.count <= 35_000_000,
@@ -484,14 +485,14 @@ private struct SpotGallery: View {
                           kCGImageSourceThumbnailMaxPixelSize: 1400
                       ] as CFDictionary),
                       let jpeg = UIImage(cgImage: image).jpegData(compressionQuality: 0.83) else {
-                    error = true
+                    photoError = true
                     continue
                 }
                 try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
                 let prefix = Int(Date().timeIntervalSince1970 * 1000)
                 let file = directory.appendingPathComponent("\(prefix)-\(UUID()).jpg")
                 try jpeg.write(to: file, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
-            } catch { error = true }
+            } catch { photoError = true }
         }
     }
 }
