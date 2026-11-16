@@ -55,9 +55,9 @@ import FoundationXML
         check(preset.usable(at: origin.addingTimeInterval(600), systemVersion: "26.2") == nil &&
               preset.usable(at: origin.addingTimeInterval(31 * 86_400), systemVersion: "26.1") == nil,
               "Stale calibrations and calibrations from another iOS version do not carry over")
-        check(KiteCatalog.brands.first(where: { $0.name == "CORE" })?.matches("core") == true &&
+        check(KiteCatalog.brands.first(where: { $0.name == "CORE" })?.matches("кор") == true &&
               KiteCatalog.brands.first(where: { $0.name == "Duotone" })?.models.contains("Evo D/LAB") == true,
-              "Catalogue preserves model variants and case-insensitive official names")
+              "Catalogue preserves model variants and Russian aliases")
         check(SessionSetup(sport: .windsurf, kiteStyle: .bigAir).cleaned.kiteStyle == nil &&
               SessionSetup(sport: .kite, kiteStyle: .wakestyle).activityTitle.contains("Вейкстайл"),
               "Kite style is scoped to compatible activities")
