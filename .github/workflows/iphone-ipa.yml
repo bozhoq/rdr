@@ -13,6 +13,12 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+      - name: Test detector and replay
+        run: |
+          mkdir -p build
+          python3 replay_detector.py --synthetic-fixtures build/parity.json
+          swiftc Sources/SessionLog.swift Sources/JumpDetector.swift detector_tests.swift -o build/detector-tests
+          build/detector-tests build/parity.json
       - name: Build for a physical iPhone
         run: |
           xcodebuild -version
