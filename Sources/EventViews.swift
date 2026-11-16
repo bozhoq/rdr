@@ -4,6 +4,103 @@ import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 
+struct JumpHistoryTable<Destination: View>: View {
+    let session: SessionSummary
+    let analysis: JumpAnalysis
+    @ViewBuilder let destination: (Int) -> Destination
+    @State private var sort = Column.time
+    @State private var ascending = true
+
+    private enum Column: String, CaseIterable {
+        case height = "Высота", airtime = "Завис.", distance = "Дистанция", time = "Время"
+
+        var accessibilityName: String { self == .airtime ? "Зависание" : rawValue }
+    }
+
+    private struct Row: Identifiable {
+        let index: Int
+        let event: JumpCandidate
+        let height: Double?
+        let airtime: Double?
+        let distance: Double?
+        var id: UUID { event.id }
+
+        func value(for column: Column) -> Double? {
+            switch column {
+            case .height: return height
+            case .airtime: return airtime
+            case .distance: return distance
+            case .time: return event.startSeconds
+            }
+        }
+    }
+
+    private var rows: [Row] {
+        analysis.candidates.enumerated().map { index, event in
+            let label = session.review?.label(for: event, version: analysis.detectorVersion) ?? .unreviewed
+            let estimate = session.liveEstimate(for: event)
+            return Row(index: index, event: event, height: estimate?.heightMeters ?? event.approximateTossHeightMeters(label: label),
+                       airtime: estimate?.airtimeSeconds, distance: estimate?.distanceMeters)
+        }.sorted { first, second in
+            switch (first.value(for: sort), second.value(for: sort)) {
+            case let (a?, b?) where a != b: return ascending ? a < b : a > b
+            case (_?, nil): return true
+            case (nil, _?): return false
+            default: return first.index < second.index
+            }
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Text("№").frame(width: 22)
+            ForEach(Column.allCases, id: \.self) { column in
+                Button {
+                    if sort == column { ascending.toggle() }
+                    else { sort = column; ascending = column == .time }
+                } label: {
+                    Text(column.rawValue + (sort == column ? (ascending ? " ↑" : " ↓") : ""))
+                        .lineLimit(1).minimumScaleFactor(0.60)
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(sort == column ? RiderTheme.accent : .secondary)
+                .accessibilityLabel("Сортировать: \(column.accessibilityName)")
+                .accessibilityValue(sort == column ? (ascending ? "По возрастанию" : "По убыванию") : "")
+            }
+        }
+        .font(.caption.weight(.semibold))
+        .listRowInsets(EdgeInsets(top: 0, leading: 8, bottom: 0, trailing: 8))
+
+        ForEach(rows) { row in
+            NavigationLink { destination(row.index) } label: {
+                HStack(spacing: 4) {
+                    Text((row.index + 1).formatted()).foregroundStyle(RiderTheme.accent).frame(width: 22)
+                    tableCell(row.height, unit: "м")
+                    tableCell(row.airtime, unit: "с")
+                    tableCell(row.distance, unit: "м")
+                    Text(eventTimeText(row.event.startSeconds)).foregroundStyle(.secondary).frame(maxWidth: .infinity)
+                }
+                .font(.caption.monospacedDigit())
+                .lineLimit(1).minimumScaleFactor(0.65)
+                .frame(minHeight: 44)
+            }
+            .accessibilityLabel("Событие \(row.index + 1), \(eventTimeText(row.event.startSeconds))")
+            .accessibilityValue("Высота \(tableValue(row.height, unit: "м")), зависание \(tableValue(row.airtime, unit: "с")), дистанция \(tableValue(row.distance, unit: "м"))")
+            .listRowInsets(EdgeInsets(top: 0, leading: 8, bottom: 0, trailing: 8))
+        }
+    }
+
+    private func tableValue(_ value: Double?, unit: String) -> String {
+        value.map { "≈\(metric($0, unit: unit))" } ?? "—"
+    }
+
+    private func tableCell(_ value: Double?, unit: String) -> some View {
+        Text(tableValue(value, unit: unit))
+            .frame(maxWidth: .infinity)
+    }
+}
+
 struct EventDetailView: View {
     @ObservedObject var recorder: SessionRecorder
     let originalSession: SessionSummary
@@ -14,6 +111,13 @@ struct EventDetailView: View {
     @State private var signal: Signal = .load
     @State private var retry = 0
     @State private var showingDetails = false
+
+    init(recorder: SessionRecorder, originalSession: SessionSummary, index: Int, openDetails: Bool = false) {
+        self.recorder = recorder
+        self.originalSession = originalSession
+        _index = State(initialValue: index)
+        _showingDetails = State(initialValue: openDetails)
+    }
 
     private enum Signal: Hashable {
         case load, rotation, vertical
@@ -57,7 +161,14 @@ struct EventDetailView: View {
                         )) {
                             ForEach(JumpLabel.allCases, id: \.self) { Text($0.title).tag($0) }
                         }.disabled(recorder.analyzingSessionID == session.id)
-                        TossHeightReadout(candidate: candidate, label: label(for: candidate))
+                        if let estimate = session.liveEstimate(for: candidate) {
+                            LabeledContent("Высота", value: "≈ \(metric(estimate.heightMeters, unit: "м"))")
+                            LabeledContent("Зависание", value: "≈ \(metric(estimate.airtimeSeconds, unit: "с"))")
+                            LabeledContent("Дистанция", value: metric(estimate.distanceMeters, unit: "м"))
+                            Text("Экспериментальная оценка по движению и барометру.").font(.footnote).foregroundStyle(.secondary)
+                        } else {
+                            TossHeightReadout(candidate: candidate, label: label(for: candidate))
+                        }
                     }.lagoonCard()
 
                     DisclosureGroup("Подробнее", isExpanded: $showingDetails) {

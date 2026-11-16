@@ -63,186 +63,330 @@ private struct RecordingView: View {
     @Environment(\.openURL) private var openURL
     @ObservedObject var recorder: SessionRecorder
     let onStop: () -> Void
-    @State private var markerKind = MarkerKind.walking
+    @State private var device = RecordingDevice.phone
+    @State private var gear: GearField?
+    @State private var showingTools = false
     @State private var confirmingStop = false
+    @State private var markerKind = MarkerKind.walking
+
+    private enum RecordingDevice: Hashable { case phone, watch }
+    private enum GearField: String, Identifiable {
+        case spot = "Спот"
+        case kite = "Снаряжение"
+        case board = "Доска"
+        var id: Self { self }
+
+        var key: WritableKeyPath<SessionSetup, String> {
+            switch self {
+            case .spot: return \.spot
+            case .kite: return \.kite
+            case .board: return \.board
+            }
+        }
+
+        func choices(_ suggestions: SetupSuggestions) -> [String] {
+            switch self {
+            case .spot: return suggestions.spots
+            case .kite: return suggestions.kites
+            case .board: return suggestions.boards
+            }
+        }
+    }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                recordingPanel
-                if let session = recorder.live {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("Калибровка телефона").font(.headline)
-                        if let calibration = session.motionCalibration {
-                            Label("Калибровка готова", systemImage: "checkmark.circle")
-                            DisclosureGroup("Подробнее") { CalibrationRows(calibration: calibration) }
-                        } else if recorder.isCalibrating {
-                            ProgressView("Замрите на 5 секунд")
-                        } else {
-                            Text("Закрепите телефон как для катания и замрите. Rider проверит датчики и снимет нулевой уровень вертикального ускорения.")
-                                .font(.footnote).foregroundStyle(.secondary)
-                            Button("Калибровать телефон", action: recorder.calibrateMotion)
-                                .disabled(!recorder.motionIsRecent)
-                            if let message = recorder.calibrationMessage {
-                                Text(message).font(.footnote).foregroundStyle(.secondary)
-                            }
-                        }
-                    }.lagoonCard()
-
-                    VStack(alignment: .leading, spacing: 10) {
-                        Label("Возможные прыжки", systemImage: "figure.jumprope")
-                            .font(.headline)
-                        Text("\(session.jumpAnalysis?.candidates.count ?? 0)")
-                            .font(.largeTitle.bold())
-                            .foregroundStyle(RiderTheme.accent)
-                        Text("Экспериментальный детектор. Движение чехла и подбрасывание телефона тоже могут дать событие.")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-                    .lagoonCard()
-
-                    DisclosureGroup("Подробнее") {
-                        VStack(spacing: 12) {
-                            LabeledContent("Измерений движения", value: session.motion.count.formatted())
-                            LabeledContent("Точек GPS", value: session.locationCount.formatted())
-                            MetricsRows(session: session)
-                            if let altitude = session.altitude {
-                                AltitudeRows(metrics: altitude, isRecording: true)
-                            }
-                        }.padding(.top, 10)
-                    }.lagoonCard()
-
-                    VStack(alignment: .leading, spacing: 12) {
-                        Picker("Упражнение", selection: $markerKind) {
-                            ForEach(MarkerKind.allCases, id: \.self) { kind in
-                                Text(kind.title).tag(kind)
-                            }
-                        }
-                        Button {
-                            recorder.addMarker(markerKind)
-                        } label: {
-                            Label("Поставить метку", systemImage: "flag.fill")
-                                .frame(maxWidth: .infinity)
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .tint(RiderTheme.action)
-                        .controlSize(.large)
-                        .disabled(!recorder.motionIsRecent)
-                        if let last = session.markers?.last {
-                            Text("Метка \(session.markers?.count ?? 0): \(last.kind.title) · \(eventTimeText(last.elapsedSeconds))")
-                                .font(.footnote.monospacedDigit())
-                                .foregroundStyle(RiderTheme.accent)
-                        }
-                        Text("Нажмите перед упражнением. Метка отмечает момент, но не подтверждает прыжок.")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-                    .lagoonCard()
-
-                    Button { confirmingStop = true } label: {
-                        Label("Завершить запись", systemImage: "stop.fill")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.large)
-                } else {
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text("Занятие и снаряжение").font(.headline)
-                        SetupFields(setup: $recorder.draftSetup, recent: recorder.history)
-                        Text("Настройки запомнятся для следующего старта. Тесты на земле не входят в статистику катания.")
-                            .font(.footnote).foregroundStyle(.secondary)
-                    }.lagoonCard()
-                    locationControls
-                        .lagoonCard()
-                    Button(action: recorder.start) {
-                        Label("Начать запись", systemImage: "record.circle")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(RiderTheme.action)
-                    .controlSize(.large)
-                    .disabled(!recorder.motionAvailable || recorder.analyzingSessionID != nil)
-
-                    if recorder.analyzingSessionID != nil {
-                        Text("Разбираем сохранённую сессию…")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    if !recorder.motionAvailable {
-                        Label("Для записи движения нужен iPhone с доступными датчиками.", systemImage: "iphone")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-                }
+        Group {
+            if let session = recorder.live {
+                recording(session)
+                    .toolbar(.hidden, for: .navigationBar, .tabBar)
+            } else {
+                preparation
+                    .toolbar(.visible, for: .tabBar)
+                    .toolbar(.hidden, for: .navigationBar)
             }
-            .padding(20)
         }
-        .background(RiderTheme.canvas.ignoresSafeArea())
-        .toolbarBackground(RiderTheme.canvas, for: .navigationBar, .tabBar)
-        .toolbarBackground(.visible, for: .navigationBar, .tabBar)
-        .navigationTitle("Сессия")
+        .sheet(item: $gear) { field in
+            GearChoice(title: field.rawValue, initial: recorder.draftSetup[keyPath: field.key],
+                       options: field.choices(SetupSuggestions(history: recorder.history))) { value in
+                recorder.draftSetup[keyPath: field.key] = value
+            }
+        }
+        .sheet(isPresented: $showingTools) {
+            if let session = recorder.live { tools(session) }
+        }
         .confirmationDialog("Завершить запись?", isPresented: $confirmingStop, titleVisibility: .visible) {
             Button("Завершить и сохранить", action: onStop)
             Button("Продолжить запись", role: .cancel) {}
         }
     }
 
-    private var recordingPanel: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            if let session = recorder.live {
-                Label("Идёт запись", systemImage: "record.circle.fill")
-                    .font(.headline)
-                    .foregroundStyle(RiderTheme.foam)
-                Text(durationText(session.durationSeconds))
-                    .font(.system(.largeTitle, design: .monospaced, weight: .semibold))
-                    .monospacedDigit()
-                    .accessibilityLabel("Длительность записи")
-                    .accessibilityValue(durationText(session.durationSeconds))
-                Text(recorder.motionIsRecent ? "Данные движения поступают" : "Ожидание данных движения")
-                    .font(.subheadline)
-                    .foregroundStyle(RiderTheme.foam)
-            } else {
-                Image(systemName: "water.waves")
-                    .font(.title2)
-                    .foregroundStyle(RiderTheme.foam)
-                    .accessibilityHidden(true)
-                Text("Новая сессия")
-                    .font(.largeTitle.bold())
-                Text("Перед стартом закрепите iPhone на теле в гермочехле.")
-                    .font(.subheadline)
-                    .foregroundStyle(RiderTheme.foam)
+    private var preparation: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                RDRWordmark().frame(maxWidth: .infinity)
+                Text("Новая сессия").font(.largeTitle.bold())
+
+                VStack(spacing: 0) {
+                    gearRow(.spot)
+                    Divider()
+                    gearRow(.kite)
+                    Divider()
+                    gearRow(.board)
+                }.lagoonCard()
+
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Устройство").font(.headline)
+                    Picker("Устройство", selection: $device) {
+                        Text("Телефон").tag(RecordingDevice.phone)
+                        Text("Часы").tag(RecordingDevice.watch)
+                    }.pickerStyle(.segmented)
+                    if device == .watch {
+                        Text("Для записи с часов нужна версия Rider для Apple Watch.")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    }
+                }.lagoonCard()
+
+                Button(action: recorder.start) {
+                    Text("Начать запись").font(.headline)
+                        .frame(maxWidth: .infinity).padding(.vertical, 10)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(RiderTheme.action)
+                .controlSize(.large)
+                .disabled(device == .watch || !recorder.motionAvailable || recorder.analyzingSessionID != nil)
+
+                DisclosureGroup("Настройки записи") {
+                    VStack(spacing: 15) {
+                        Picker("Занятие", selection: $recorder.draftSetup.sport) {
+                            ForEach(SessionSport.allCases, id: \.self) { Text($0.title).tag($0) }
+                        }
+                        Picker("Где телефон", selection: $recorder.draftSetup.placement) {
+                            ForEach(PhonePlacement.allCases, id: \.self) { Text($0.title).tag($0) }
+                        }
+                        locationControls
+                    }.padding(.top, 12)
+                }.lagoonCard()
+                if !recorder.motionAvailable { Text("Датчики движения iPhone недоступны.").foregroundStyle(.secondary) }
+                if recorder.analyzingSessionID != nil { ProgressView("Разбираем сохранённую сессию…") }
+            }.padding(20)
+        }.background(RiderTheme.canvas.ignoresSafeArea())
+    }
+
+    private func gearRow(_ field: GearField) -> some View {
+        let value = recorder.draftSetup[keyPath: field.key]
+        return Button { gear = field } label: {
+            HStack(spacing: 10) {
+                Text(field.rawValue).font(.body.weight(.medium)).foregroundStyle(.primary)
+                Spacer(minLength: 8)
+                Text(value.isEmpty ? "Выбрать" : value).foregroundStyle(.secondary).lineLimit(2)
+                Image(systemName: "chevron.right").font(.caption.weight(.semibold)).accessibilityHidden(true)
+            }
+            .padding(.vertical, 13)
+            .contentShape(Rectangle())
+        }.buttonStyle(.plain)
+    }
+
+    private func recording(_ session: SessionSummary) -> some View {
+        let minutes = Int(session.durationSeconds / 60)
+        return VStack(spacing: 0) {
+            Spacer(minLength: 10)
+            Text(String(format: "%02d:%02d", minutes / 60, minutes % 60))
+                .font(.system(size: 66, weight: .light, design: .monospaced))
+                .minimumScaleFactor(0.5)
+                .accessibilityLabel("Длительность записи")
+                .accessibilityValue(durationText(session.durationSeconds))
+                .accessibilityAddTraits(.updatesFrequently)
+            Spacer(minLength: 22)
+            recordingMetrics(session)
+            Spacer(minLength: 24)
+            HStack(spacing: 12) {
+                Button(recorder.voiceEnabled ? "Голос" : "Тишина", action: recorder.toggleVoice)
+                    .font(.body.weight(.semibold))
+                    .accessibilityValue(recorder.voiceEnabled ? "Включён" : "Выключен")
+                Button { showingTools = true } label: {
+                    Image(systemName: "ellipsis").accessibilityLabel("Калибровка и метки")
+                }
+            }
+            .buttonStyle(.bordered)
+            .tint(.white)
+            .padding(.bottom, 16)
+            StopRecordingSlider(onStop: onStop, accessibleStop: { confirmingStop = true })
+            HStack(spacing: 7) {
+                Circle().fill(.red).frame(width: 8, height: 8)
+                Text("REC").font(.caption.weight(.bold)).tracking(2)
+            }
+            .foregroundStyle(RiderTheme.foam)
+            .accessibilityLabel("Идёт запись")
+            .padding(.top, 14)
+        }
+        .padding(.horizontal, 22)
+        .padding(.bottom, 14)
+        .foregroundStyle(.white)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(RiderTheme.lagoon.ignoresSafeArea())
+    }
+
+    private func recordingMetrics(_ session: SessionSummary) -> some View {
+        let estimates = (session.liveJumpEstimates ?? [:]).values
+        let height = estimates.map(\.heightMeters).max()
+        let airtime = estimates.map(\.airtimeSeconds).max()
+        let distance = estimates.compactMap(\.distanceMeters).max()
+        return VStack(spacing: 0) {
+            HStack(spacing: 0) {
+                recordingMetric("Топ высота", value: height, unit: "м")
+                Rectangle().fill(.white.opacity(0.25)).frame(width: 1, height: 56)
+                recordingMetric("Топ зависание", value: airtime, unit: "с")
+            }
+            Rectangle().fill(.white.opacity(0.25)).frame(height: 1)
+            HStack(spacing: 0) {
+                recordingMetric("Топ дистанция", value: distance, unit: "м")
+                Rectangle().fill(.white.opacity(0.25)).frame(width: 1, height: 56)
+                recordingMetric("Топ скорость", value: session.maxSpeedMetersPerSecond.map { $0 * 3.6 }, unit: "км/ч", approximate: false)
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(24)
-        .foregroundStyle(.white)
-        .background {
-            RoundedRectangle(cornerRadius: 24)
-                .fill(RiderTheme.lagoon)
+    }
+
+    private func recordingMetric(_ title: String, value: Double?, unit: String, approximate: Bool = true) -> some View {
+        VStack(spacing: 6) {
+            Text((approximate && value != nil ? "≈" : "") + metric(value, unit: unit))
+                .font(.system(.title, design: .rounded, weight: .bold))
+                .monospacedDigit().lineLimit(1).minimumScaleFactor(0.55)
+            Text(title).font(.subheadline).foregroundStyle(RiderTheme.foam)
+        }
+        .accessibilityElement(children: .combine)
+        .frame(maxWidth: .infinity).padding(.vertical, 22).padding(.horizontal, 5)
+    }
+
+    private func tools(_ session: SessionSummary) -> some View {
+        NavigationStack {
+            Form {
+                Section("Калибровка телефона") {
+                    if let calibration = session.motionCalibration {
+                        CalibrationRows(calibration: calibration)
+                    } else if recorder.isCalibrating {
+                        ProgressView("Замрите на 5 секунд")
+                    } else {
+                        Button("Калибровать телефон", action: recorder.calibrateMotion)
+                            .disabled(!recorder.motionIsRecent)
+                        if let message = recorder.calibrationMessage { Text(message).foregroundStyle(.secondary) }
+                    }
+                }
+                Section("Метки") {
+                    Picker("Упражнение", selection: $markerKind) {
+                        ForEach(MarkerKind.allCases, id: \.self) { Text($0.title).tag($0) }
+                    }
+                    Button("Поставить метку") { recorder.addMarker(markerKind) }
+                        .disabled(!recorder.motionIsRecent)
+                    if let last = session.markers?.last {
+                        LabeledContent(last.kind.title, value: eventTimeText(last.elapsedSeconds))
+                    }
+                }
+                if let altitude = session.altitude {
+                    Section("Барометр") { AltitudeRows(metrics: altitude, isRecording: true) }
+                }
+            }
+            .navigationTitle("Запись")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Готово") { showingTools = false } } }
         }
     }
 
     @ViewBuilder private var locationControls: some View {
         if recorder.locationAuthorized {
-            Label("GPS доступен", systemImage: "location.fill")
-                .font(.subheadline)
-                .foregroundStyle(RiderTheme.accent)
-        } else {
-            VStack(alignment: .leading, spacing: 8) {
-                Label("Запись без GPS", systemImage: "location.slash")
-                    .font(.headline)
-                    .foregroundStyle(RiderTheme.accent)
-                Text("Разрешите геопозицию для записи маршрута, скорости и проверки записи при блокировке экрана.")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                if recorder.authorization == .notDetermined {
-                    Button("Разрешить геопозицию", action: recorder.requestLocation)
-                } else if let settings = URL(string: UIApplication.openSettingsURLString) {
-                    Button("Открыть настройки") { openURL(settings) }
+            LabeledContent("GPS", value: "Доступен")
+        } else if recorder.authorization == .notDetermined {
+            Button("Разрешить геопозицию", action: recorder.requestLocation)
+        } else if let settings = URL(string: UIApplication.openSettingsURLString) {
+            Button("Открыть настройки GPS") { openURL(settings) }
+        }
+    }
+}
+
+struct RDRWordmark: View {
+    var body: some View {
+        Text("RDR")
+            .font(.system(size: 27, weight: .black, design: .rounded))
+            .tracking(2)
+            .foregroundStyle(RiderTheme.accent)
+            .accessibilityLabel("Rider")
+    }
+}
+
+private struct GearChoice: View {
+    @Environment(\.dismiss) private var dismiss
+    let title: String
+    @State private var draft: String
+    let options: [String]
+    let onSave: (String) -> Void
+
+    init(title: String, initial: String, options: [String], onSave: @escaping (String) -> Void) {
+        self.title = title
+        _draft = State(initialValue: initial)
+        self.options = options
+        self.onSave = onSave
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                TextField("Введите название", text: $draft)
+                    .onChange(of: draft) { _, value in if value.count > 100 { draft = String(value.prefix(100)) } }
+                if !options.isEmpty {
+                    Section("Недавние") {
+                        ForEach(options, id: \.self) { value in
+                            Button(value) { onSave(value); dismiss() }
+                        }
+                    }
+                }
+            }
+            .scrollContentBackground(.hidden)
+            .background(RiderTheme.canvas.ignoresSafeArea())
+            .navigationTitle(title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Отмена") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Готово") { onSave(draft.trimmingCharacters(in: .whitespacesAndNewlines)); dismiss() }
                 }
             }
         }
+    }
+}
+
+private struct StopRecordingSlider: View {
+    let onStop: () -> Void
+    let accessibleStop: () -> Void
+    @GestureState private var dragOffset: CGFloat = 0
+
+    var body: some View {
+        GeometryReader { proxy in
+            let travel = max(1, proxy.size.width - 66)
+            ZStack(alignment: .leading) {
+                Capsule().fill(.black.opacity(0.18))
+                Capsule().strokeBorder(.white.opacity(0.35))
+                Text("Сдвинь для завершения")
+                    .font(.subheadline.weight(.semibold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.leading, 48).padding(.trailing, 12)
+                    .opacity(Double(max(0.12, 1 - dragOffset / travel)))
+                Circle()
+                    .fill(RiderTheme.foam)
+                    .frame(width: 50, height: 50)
+                    .overlay {
+                        Image(systemName: "chevron.right").font(.headline).foregroundStyle(RiderTheme.action)
+                    }
+                    .contentShape(Circle())
+                    .offset(x: min(travel, max(0, dragOffset)))
+                    .gesture(DragGesture(minimumDistance: 8)
+                        .updating($dragOffset) { value, state, _ in state = max(0, value.translation.width) }
+                        .onEnded { value in if value.translation.width >= travel * 0.92 { onStop() } })
+                    .padding(.leading, 8)
+            }
+        }
+        .frame(height: 66)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Завершить запись")
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction { accessibleStop() }
     }
 }
 
@@ -271,31 +415,30 @@ private struct HistoryView: View {
                     NavigationLink {
                         SessionDetail(recorder: recorder, originalSession: session)
                     } label: {
-                        VStack(alignment: .leading, spacing: 6) {
+                        VStack(alignment: .leading, spacing: 10) {
                             if let title = session.review?.title, !title.isEmpty {
                                 Text(title).font(.headline).lineLimit(2)
                             }
-                            Text(session.startedAt, format: .dateTime.day().month(.wide).year().hour().minute())
+                            Text(session.startedAt, format: .dateTime.day().month(.wide).hour().minute())
                                 .font(.headline)
                             if session.status == .interrupted {
                                 Label("Запись прервана", systemImage: "exclamationmark.circle")
                                     .font(.subheadline)
                                     .foregroundStyle(.secondary)
                             }
-                            Text(durationText(session.durationSeconds))
-                                .font(.subheadline.monospacedDigit())
-                                .foregroundStyle(RiderTheme.accent)
                             if let setup = session.setup {
                                 Text([setup.sport.title, setup.spot].filter { !$0.isEmpty }.joined(separator: " · "))
-                                    .font(.caption).foregroundStyle(RiderTheme.accent).lineLimit(2)
+                                    .font(.subheadline).foregroundStyle(RiderTheme.foam).lineLimit(2)
                             }
-                            if let analysis = session.jumpAnalysis {
-                                Text("Событий: \(analysis.candidates.count)")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
+                            HStack(spacing: 16) {
+                                Text(durationText(session.durationSeconds)).monospacedDigit()
+                                if let analysis = session.jumpAnalysis { Text("Событий: \(analysis.candidates.count)") }
+                            }.font(.subheadline.weight(.semibold)).foregroundStyle(RiderTheme.foam)
                         }
-                        .padding(.vertical, 4)
+                        .foregroundStyle(.white)
+                        .padding(17)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(RiderTheme.lagoon, in: RoundedRectangle(cornerRadius: 18))
                     }
                     .swipeActions {
                         Button(role: .destructive) {
@@ -305,7 +448,9 @@ private struct HistoryView: View {
                         }
                         .disabled(recorder.analyzingSessionID == session.id)
                     }
-                    .listRowBackground(RiderTheme.surface)
+                    .listRowInsets(EdgeInsets(top: 6, leading: 10, bottom: 6, trailing: 10))
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(Color.clear)
                 }
                 .listStyle(.insetGrouped)
                 .scrollContentBackground(.hidden)
@@ -343,7 +488,6 @@ struct SessionDetail: View {
 
     var body: some View {
         List {
-            sessionCard
             eventsSection
             Section {
                 NavigationLink { RouteView(recorder: recorder, session: session) } label: {
@@ -371,50 +515,27 @@ struct SessionDetail: View {
         }
     }
 
-    private var sessionCard: some View {
-        Section {
-            VStack(alignment: .leading, spacing: 10) {
-                if let title = session.review?.title, !title.isEmpty {
-                    Text(title).font(.title2.bold())
-                }
-                Text(session.startedAt, format: .dateTime.day().month(.wide).hour().minute())
-                    .font(.headline)
-                Label(durationText(session.durationSeconds), systemImage: "clock")
-                    .font(.subheadline.monospacedDigit())
-                if let analysis = session.jumpAnalysis {
-                    Label("Событий: \(analysis.candidates.count)", systemImage: "waveform")
-                        .font(.subheadline)
-                }
-                if session.status == .interrupted {
-                    Label("Запись прервана", systemImage: "exclamationmark.circle")
-                        .font(.footnote)
-                }
-            }
-            .foregroundStyle(.white)
-            .padding(18)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(RiderTheme.lagoon, in: RoundedRectangle(cornerRadius: 18))
-        }
-        .listRowInsets(EdgeInsets())
-        .listRowBackground(Color.clear)
-    }
-
     private var eventsSection: some View {
-        Section("События") {
+        Section {
             if recorder.analyzingSessionID == session.id {
                 ProgressView("Разбираем запись…")
             } else if let analysis = session.jumpAnalysis {
                 if analysis.candidates.isEmpty {
                     Text("Событий не найдено").foregroundStyle(.secondary)
-                }
-                ForEach(Array(analysis.candidates.enumerated()), id: \.element.id) { index, _ in
-                    NavigationLink("Событие \(index + 1)") {
-                        EventDetailView(recorder: recorder, originalSession: session, index: index)
+                } else {
+                    JumpHistoryTable(session: session, analysis: analysis) { index in
+                        EventDetailView(recorder: recorder, originalSession: session, index: index, openDetails: true)
                     }
                 }
             } else {
                 analyzeButton("Найти события")
             }
+        } header: {
+            VStack(alignment: .leading, spacing: 13) {
+                RDRWordmark().frame(maxWidth: .infinity)
+                Text("История прыжков").font(.largeTitle.bold())
+                    .textCase(nil).foregroundStyle(.primary)
+            }.padding(.bottom, 5)
         }
         .listRowBackground(RiderTheme.surface)
     }
@@ -425,6 +546,7 @@ struct SessionDetail: View {
     }
 
     @ViewBuilder private var sessionDetails: some View {
+        LabeledContent("Длительность", value: durationText(session.durationSeconds))
         MetricsRows(session: session)
         if let notes = session.review?.notes, !notes.isEmpty {
             Text(notes).textSelection(.enabled)

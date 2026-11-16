@@ -85,6 +85,14 @@ struct SessionSummary: Codable, Identifiable {
     var gpsMetrics: RouteMetrics?
     var altitude: AltitudeMetrics?
     var motionCalibration: MotionCalibration?
+    var liveJumpEstimates: [String: LiveJumpEstimate]?
+
+    func liveEstimate(for event: JumpCandidate) -> LiveJumpEstimate? {
+        guard let version = jumpAnalysis?.detectorVersion, version == JumpDetector.version else { return nil }
+        let label = review?.label(for: event, version: version)
+        guard label != .phoneToss, label != .otherMovement else { return nil }
+        return liveJumpEstimates?[SessionReview.key(for: event, version: version)]
+    }
 
     func matches(_ query: String) -> Bool {
         let query = query.trimmingCharacters(in: .whitespacesAndNewlines)

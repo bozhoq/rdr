@@ -61,6 +61,73 @@ struct RoutePoint: Identifiable, Sendable {
     let speed: Double?
 }
 
+struct LiveJumpEstimate: Codable {
+    let heightMeters: Double
+    let airtimeSeconds: Double
+    let distanceMeters: Double?
+
+    static func measure(_ event: JumpCandidate, altitude: [AltitudeSample], gps: [RoutePoint],
+                        motionClock: Date?) -> Self? {
+        let start = event.startSeconds, end = event.endSeconds
+        let time = \AltitudeSample.elapsedSinceFirstSampleSeconds
+        let meters = \AltitudeSample.relativeAltitudeMeters
+        // Sparse pressure samples can only support a coarse estimate for a
+        // well-bracketed peak. A hill or sustained elevation is not a jump.
+        let before = altitude.filter { (start - 3...start).contains($0[keyPath: time]) }.suffix(2)
+        let during = altitude.filter { $0[keyPath: time] > start && $0[keyPath: time] < end }
+        guard before.count == 2, let first = before.first, let last = before.last,
+              start - last[keyPath: time] <= 1.3, last[keyPath: time] - first[keyPath: time] <= 1.35,
+              abs(first[keyPath: meters] - last[keyPath: meters]) <= 0.30,
+              during.count >= 2, let peak = during.map(meters).max() else { return nil }
+        let baseline = before.map(meters).reduce(0, +) / 2
+        let height = peak - baseline
+        guard (0.6...35).contains(height), during.filter({ $0[keyPath: meters] - baseline >= 0.50 }).count >= 2,
+              let returned = altitude.first(where: {
+                  (end...end + 2.5).contains($0[keyPath: time]) && abs($0[keyPath: meters] - baseline) <= 0.40
+              }) else { return nil }
+        let window = altitude.filter { (first[keyPath: time]...returned[keyPath: time]).contains($0[keyPath: time]) }
+        guard zip(window, window.dropFirst()).allSatisfy({ previous, next in
+            let interval = next[keyPath: time] - previous[keyPath: time]
+            return interval > 0 && interval <= 1.35
+        }) else { return nil }
+
+        var distance: Double?
+        if let motionClock {
+            let fixes = gps.filter { $0.sample.horizontalAccuracyMeters <= 5 }
+            let entry = motionClock.addingTimeInterval(start), exit = motionClock.addingTimeInterval(end)
+            if let a = fixes.min(by: { abs($0.sample.timestamp.timeIntervalSince(entry)) < abs($1.sample.timestamp.timeIntervalSince(entry)) }),
+               let b = fixes.min(by: { abs($0.sample.timestamp.timeIntervalSince(exit)) < abs($1.sample.timestamp.timeIntervalSince(exit)) }),
+               a.segment == b.segment, a.sample.timestamp < b.sample.timestamp,
+               abs(a.sample.timestamp.timeIntervalSince(entry)) <= 0.75,
+               abs(b.sample.timestamp.timeIntervalSince(exit)) <= 0.75 {
+                let separation = RouteFilter.distance(a.sample, b.sample)
+                if separation >= a.sample.horizontalAccuracyMeters + b.sample.horizontalAccuracyMeters {
+                    distance = separation
+                }
+            }
+        }
+        return Self(heightMeters: height, airtimeSeconds: event.unloadingSeconds, distanceMeters: distance)
+    }
+
+    static func spokenHeight(_ height: Double) -> String? {
+        guard height.isFinite, (0...100).contains(height) else { return nil }
+        let tenths = Int((height * 10).rounded()), whole = tenths / 10, digit = tenths % 10
+        let formatter = NumberFormatter()
+        formatter.locale = Locale(identifier: "ru_RU")
+        formatter.numberStyle = .spellOut
+        let cardinal = formatter.string(from: NSNumber(value: whole)) ?? String(whole)
+        let endsInOne = whole % 10 == 1 && whole % 100 != 11
+        if digit == 0 {
+            let few = (2...4).contains(whole % 10) && !(12...14).contains(whole % 100)
+            return "\(cardinal) \(endsInOne ? "метр" : few ? "метра" : "метров")"
+        }
+        let feminine = whole % 100 != 11 && whole % 10 == 1 ? "одна" : whole % 100 != 12 && whole % 10 == 2 ? "две" : nil
+        let spokenWhole = feminine.map { whole < 10 ? $0 : cardinal.split(separator: " ").dropLast().joined(separator: " ") + " " + $0 } ?? cardinal
+        let fractions = ["", "одна десятая", "две десятых", "три десятых", "четыре десятых", "пять десятых", "шесть десятых", "семь десятых", "восемь десятых", "девять десятых"]
+        return "\(spokenWhole) \(endsInOne ? "целая" : "целых") \(fractions[digit]) метра"
+    }
+}
+
 /// The same quality filter is used live, during replay and for GPX export.
 /// Thresholds remove obvious GPS failures; they are not a claim of GPS accuracy.
 struct RouteFilter {

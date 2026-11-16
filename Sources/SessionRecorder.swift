@@ -1,3 +1,4 @@
+import AVFoundation
 import CoreLocation
 import CoreMotion
 import Foundation
@@ -14,10 +15,12 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
     @Published var draftSetup = SessionSetup(sport: .groundTest)
     @Published private(set) var isCalibrating = false
     @Published private(set) var calibrationMessage: String?
+    @Published private(set) var voiceEnabled = (UserDefaults.standard.object(forKey: "rider.jumpVoice") as? Bool) ?? true
 
     private let store = SessionStore()
     private let motion = CMMotionManager()
     private let altimeter = CMAltimeter()
+    private let speech = AVSpeechSynthesizer()
     private let location = CLLocationManager()
     private var log: SessionLog?
     private var summary: SessionSummary?
@@ -33,12 +36,17 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
     private var lastMarkerAt: ContinuousClock.Instant?
     private var calibrationStartedAt: ContinuousClock.Instant?
     private var calibrationSamples: [MotionSample] = []
+    private var recentAltitude: [AltitudeSample] = []
+    private var recentFixes: [RoutePoint] = []
+    private var pendingJumps: [JumpCandidate] = []
+    private var motionClock: Date?
 
     var motionAvailable: Bool { motion.isDeviceMotionAvailable }
     var locationAuthorized: Bool { authorization == .authorizedWhenInUse || authorization == .authorizedAlways }
 
     override init() {
         super.init()
+        speech.usesApplicationAudioSession = false
         authorization = location.authorizationStatus
         location.delegate = self
         location.activityType = .fitness
@@ -72,7 +80,8 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
             markers: [],
             setup: draftSetup.cleaned,
             gpsMetrics: RouteMetrics(),
-            altitude: AltitudeMetrics(supported: CMAltimeter.isRelativeAltitudeAvailable())
+            altitude: AltitudeMetrics(supported: CMAltimeter.isRelativeAltitudeAvailable()),
+            liveJumpEstimates: [:]
         )
         do {
             let newLog = try store.makeLog(for: session)
@@ -103,6 +112,10 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
         lastMarkerAt = nil
         motionIsRecent = false
         resetCalibration()
+        recentAltitude.removeAll()
+        recentFixes.removeAll()
+        pendingJumps.removeAll()
+        motionClock = nil
 
         if session.gpsEnabledAtStart {
             location.allowsBackgroundLocationUpdates = true
@@ -128,6 +141,12 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
 
     func stop() {
         finish(.finished)
+    }
+
+    func toggleVoice() {
+        voiceEnabled.toggle()
+        UserDefaults.standard.set(voiceEnabled, forKey: "rider.jumpVoice")
+        if !voiceEnabled { speech.stopSpeaking(at: .immediate) }
     }
 
     func calibrateMotion() {
@@ -298,10 +317,14 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
             if let candidate = jumpDetector.process(sample) {
                 try log.append("jumpCandidate", candidate)
                 session.jumpAnalysis?.candidates.append(candidate)
+                if session.altitude?.supported == true, session.altitude?.stoppedWithError == false {
+                    pendingJumps.append(candidate)
+                }
             }
             session.jumpAnalysis?.discontinuities = jumpDetector.discontinuities
             summary = session
             motionTimeOrigin = origin
+            if firstSample { motionClock = Date().addingTimeInterval(origin - ProcessInfo.processInfo.systemUptime) }
             lastMotionReceivedAt = clock.now
             if firstSample, session.altitude?.supported == true {
                 startAltitude(sessionID: session.id, origin: origin)
@@ -348,6 +371,9 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
                                                 relativeAltitudeMeters: data.relativeAltitude.doubleValue)
                     guard altitude.add(sample) else { return }
                     try log.append("altitude", sample)
+                    self.recentAltitude.append(sample)
+                    self.recentAltitude.removeAll { sample.elapsedSinceFirstSampleSeconds - $0.elapsedSinceFirstSampleSeconds > 12 }
+                    if self.recentAltitude.count > 128 { self.recentAltitude.removeFirst() }
                 } else { return }
                 session.altitude = altitude
                 self.summary = session
@@ -376,7 +402,11 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
             try log.append("location", sample)
             lastLocationTimestamp = point.timestamp
             session.locationCount += 1
-            _ = routeFilter.accept(sample, notBefore: session.startedAt)
+            if let accepted = routeFilter.accept(sample, notBefore: session.startedAt) {
+                recentFixes.append(accepted)
+                recentFixes.removeAll { sample.timestamp.timeIntervalSince($0.sample.timestamp) > 12 }
+                if recentFixes.count > 128 { recentFixes.removeFirst() }
+            }
             session.gpsMetrics = routeFilter.metrics
             session.distanceMeters = routeFilter.metrics.accepted > 0 ? routeFilter.metrics.distanceMeters : nil
             session.maxSpeedMetersPerSecond = routeFilter.metrics.maxSpeedMetersPerSecond
@@ -384,6 +414,30 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
             checkpointIfDue()
         } catch {
             failStorage(error)
+        }
+    }
+
+    private struct JumpEstimateEntry: Encodable {
+        let startSeconds: Double
+        let endSeconds: Double
+        let estimate: LiveJumpEstimate
+    }
+
+    private func resolveJumps(_ session: inout SessionSummary, log: SessionLog, finishing: Bool = false) throws {
+        guard !pendingJumps.isEmpty else { return }
+        let elapsed = session.motion.lastElapsedSeconds ?? 0
+        while let event = pendingJumps.first,
+              finishing || elapsed >= event.endSeconds + 2.5 {
+            pendingJumps.removeFirst()
+            guard let estimate = LiveJumpEstimate.measure(event, altitude: recentAltitude, gps: recentFixes, motionClock: motionClock) else { continue }
+            let key = SessionReview.key(for: event, version: JumpDetector.version)
+            try log.append("liveJumpEstimate", JumpEstimateEntry(startSeconds: event.startSeconds, endSeconds: event.endSeconds, estimate: estimate))
+            session.liveJumpEstimates?[key] = estimate
+            if !finishing, voiceEnabled, let phrase = LiveJumpEstimate.spokenHeight(estimate.heightMeters) {
+                let utterance = AVSpeechUtterance(string: phrase)
+                utterance.voice = AVSpeechSynthesisVoice(language: "ru-RU")
+                speech.speak(utterance)
+            }
         }
     }
 
@@ -410,6 +464,7 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
         guard force || lastCheckpoint.duration(to: now) >= .seconds(1) else { return }
         updateCheckpoint(&session, at: now)
         do {
+            try resolveJumps(&session, log: log)
             try log.checkpoint(session)
             self.lastCheckpoint = now
             summary = session
@@ -433,6 +488,7 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
         session.status = status
         updateCheckpoint(&session, at: clock.now)
         do {
+            try resolveJumps(&session, log: log, finishing: true)
             try log.append("end", session)
             try log.checkpoint(session)
             stopSensors()
@@ -444,6 +500,7 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
 
     private func stopSensors() {
         summary = nil
+        speech.stopSpeaking(at: .immediate)
         motion.stopDeviceMotionUpdates()
         altimeter.stopRelativeAltitudeUpdates()
         location.stopUpdatingLocation()
