@@ -9,6 +9,7 @@
         C00100000000000000000001 /* SessionApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00200000000000000000001 /* SessionApp.swift */; };
         C00100000000000000000002 /* SessionRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00200000000000000000002 /* SessionRecorder.swift */; };
         C00100000000000000000003 /* SessionLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00200000000000000000003 /* SessionLog.swift */; };
+        C00100000000000000000004 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = C00200000000000000000006 /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -17,6 +18,7 @@
         C00200000000000000000003 /* SessionLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionLog.swift; sourceTree = "<group>"; };
         C00200000000000000000004 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
         C00200000000000000000005 /* KiteSessions.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = KiteSessions.app; sourceTree = BUILT_PRODUCTS_DIR; };
+        C00200000000000000000006 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -33,6 +35,7 @@
             isa = PBXGroup;
             children = (
                 C00400000000000000000002 /* Sources */,
+                C00200000000000000000006 /* Assets.xcassets */,
                 C00200000000000000000004 /* Info.plist */,
                 C00400000000000000000003 /* Products */,
             );
@@ -104,7 +107,7 @@
         C00700000000000000000001 /* Resources */ = {
             isa = PBXResourcesBuildPhase;
             buildActionMask = 2147483647;
-            files = ();
+            files = (C00100000000000000000004 /* Assets.xcassets in Resources */,);
             runOnlyForDeploymentPostprocessing = 0;
         };
 /* End PBXResourcesBuildPhase section */
@@ -152,11 +155,12 @@
         C00900000000000000000003 /* Debug */ = {
             isa = XCBuildConfiguration;
             buildSettings = {
+                ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
                 CODE_SIGN_STYLE = Automatic;
-                CURRENT_PROJECT_VERSION = 1;
+                CURRENT_PROJECT_VERSION = 3;
                 GENERATE_INFOPLIST_FILE = NO;
                 INFOPLIST_FILE = Info.plist;
-                MARKETING_VERSION = 0.1.0;
+                MARKETING_VERSION = 0.1.2;
                 PRODUCT_BUNDLE_IDENTIFIER = local.kitesessions.prototype;
                 PRODUCT_NAME = "$(TARGET_NAME)";
                 SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -167,11 +171,12 @@
         C00900000000000000000004 /* Release */ = {
             isa = XCBuildConfiguration;
             buildSettings = {
+                ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
                 CODE_SIGN_STYLE = Automatic;
-                CURRENT_PROJECT_VERSION = 1;
+                CURRENT_PROJECT_VERSION = 3;
                 GENERATE_INFOPLIST_FILE = NO;
                 INFOPLIST_FILE = Info.plist;
-                MARKETING_VERSION = 0.1.0;
+                MARKETING_VERSION = 0.1.2;
                 PRODUCT_BUNDLE_IDENTIFIER = local.kitesessions.prototype;
                 PRODUCT_NAME = "$(TARGET_NAME)";
                 SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
