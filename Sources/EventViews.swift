@@ -165,9 +165,9 @@ struct EventDetailView: View {
                             }.disabled(recorder.analyzingSessionID == session.id)
                         }
                         if let estimate = session.liveEstimate(for: candidate) {
-                            LabeledContent(estimate.isPhoneToss == true ? "Высота подброса" : "Высота",
+                            LabeledContent(estimate.isHandLift == true ? "Подъём телефона" : estimate.isPhoneToss == true ? "Высота подброса" : "Высота",
                                            value: estimate.heightMeters.map { "≈ \(metric($0, unit: "м"))" } ?? "—")
-                            LabeledContent(session.handSimulationTest == true ? "Время выше исходного уровня" : estimate.isPhoneToss == true ? "Полёт телефона" : "Зависание",
+                            LabeledContent(session.handSimulationTest == true || estimate.isHandLift == true ? "Время выше исходного уровня" : estimate.isPhoneToss == true ? "Полёт телефона" : "Зависание",
                                            value: "≈ \(metric(estimate.airtimeSeconds, unit: "с"))")
                             LabeledContent("Дистанция", value: metric(estimate.distanceMeters, unit: "м"))
                             Text(estimateExplanation(estimate)).font(.footnote).foregroundStyle(.secondary)
@@ -194,7 +194,8 @@ struct EventDetailView: View {
     }
 
     private func estimateExplanation(_ estimate: LiveJumpEstimate) -> String {
-        if session.handSimulationTest == true { return "Имитация рукой. Барометр замеряет подъём телефона и время выше исходного уровня." }
+        if estimate.inertialLift == true { return "Приблизительная высота по движению телефона. Барометр не подтвердил пик." }
+        if session.handSimulationTest == true || estimate.isHandLift == true { return "Барометр замеряет подъём телефона и время выше исходного уровня." }
         if estimate.isPhoneToss == true { return "Оценка по времени полёта, если телефон отпустили и поймали примерно на одном уровне." }
         if estimate.heightMeters == nil { return "Приземление зафиксировано. Данных для оценки высоты недостаточно." }
         return "Экспериментальная оценка по движению и барометру."

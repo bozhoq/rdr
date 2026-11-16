@@ -6,13 +6,15 @@ import UniformTypeIdentifiers
 
 struct ActivityFields: View {
     @Binding var setup: SessionSetup
+    var ridingOnly = false
 
     var body: some View {
         Picker("Активность", selection: $setup.sport) {
-            ForEach(SessionSport.allCases, id: \.self) { Text($0.title).tag($0) }
+            ForEach(SessionSport.allCases.filter { !ridingOnly || $0.isRiding }, id: \.self) { Text($0.title).tag($0) }
         }
         .onChange(of: setup.sport) { _, activity in
             if !activity.supportsKiteStyle { setup.kiteStyle = nil }
+            if activity == .wing || activity == .windsurf { setup.kiteAreaSquareMeters = nil }
         }
         if setup.sport.supportsKiteStyle {
             Picker("Стиль", selection: $setup.kiteStyle) {
@@ -25,7 +27,7 @@ struct ActivityFields: View {
 
 struct KitePicker: View {
     @Environment(\.dismiss) private var dismiss
-    @Binding var selection: String
+    @Binding var setup: SessionSetup
     let recent: [String]
     @State private var brandSearch = ""
 
@@ -34,8 +36,13 @@ struct KitePicker: View {
             List {
                 if brandSearch.isEmpty, !recent.isEmpty {
                     Section("Недавние") {
-                        ForEach(recent, id: \.self) { kite in Button(kite) { choose(kite) } }
+                        ForEach(recent, id: \.self) { kite in
+                            NavigationLink(kite) { sizeChoice(kite) }
+                        }
                     }
+                }
+                if brandSearch.isEmpty, !setup.kite.isEmpty {
+                    NavigationLink("Изменить размер текущего кайта") { sizeChoice(setup.kite) }
                 }
                 Section("Бренды") {
                     ForEach(KiteCatalog.brands.filter { $0.matches(brandSearch) }) { brand in
@@ -44,7 +51,8 @@ struct KitePicker: View {
                         }
                     }
                 }
-                NavigationLink("Ввести кайт вручную") { KiteManualEntry(value: selection, choose: choose) }
+                NavigationLink("Ввести кайт вручную") { KiteManualEntry(value: setup.kite, choose: choose) }
+                if !setup.kite.isEmpty { Button("Убрать выбранный кайт") { choose("", nil) } }
             }
             .searchable(text: $brandSearch, prompt: "Поиск бренда")
             .navigationTitle("Кайт")
@@ -53,22 +61,28 @@ struct KitePicker: View {
         .tint(RiderTheme.accent)
     }
 
-    private func choose(_ value: String) {
-        selection = String(value.trimmingCharacters(in: .whitespacesAndNewlines).prefix(100))
+    private func choose(_ value: String, _ area: Double?) {
+        setup.selectKite(String(value.trimmingCharacters(in: .whitespacesAndNewlines).prefix(100)), area: area)
         dismiss()
+    }
+
+    private func sizeChoice(_ kite: String) -> KiteSizeChoice {
+        KiteSizeChoice(name: kite, current: kite == setup.kite ? setup.kiteAreaSquareMeters : nil, choose: choose)
     }
 }
 
 private struct KiteModels: View {
     let brand: KiteCatalog.Brand
-    let choose: (String) -> Void
+    let choose: (String, Double?) -> Void
     @State private var search = ""
 
     var body: some View {
         List {
             let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
             ForEach(brand.models.filter { query.isEmpty || $0.localizedStandardContains(query) }, id: \.self) { model in
-                Button(model) { choose("\(brand.name) \(model)") }
+                NavigationLink(model) {
+                    KiteSizeChoice(name: "\(brand.name) \(model)", choose: choose)
+                }
             }
             NavigationLink("Другой вариант \(brand.name)") {
                 KiteManualEntry(value: brand.name + " ", choose: choose)
@@ -81,14 +95,153 @@ private struct KiteModels: View {
 
 private struct KiteManualEntry: View {
     @State var value: String
-    let choose: (String) -> Void
+    let choose: (String, Double?) -> Void
 
     var body: some View {
         Form {
-            TextField("Бренд, модель и размер", text: $value)
+            TextField("Бренд и модель", text: $value)
                 .onChange(of: value) { _, text in if text.count > 100 { value = String(text.prefix(100)) } }
-            Button("Сохранить кайт") { choose(value) }
+            NavigationLink("Далее · размер кайта") { KiteSizeChoice(name: value, choose: choose) }
+                .disabled(value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         }.navigationTitle("Указать вручную")
+    }
+}
+
+private struct KiteSizeChoice: View {
+    let name: String
+    var current: Double?
+    let choose: (String, Double?) -> Void
+
+    var body: some View {
+        List {
+            Section(name) {
+                ForEach(SessionSetup.kiteAreas, id: \.self) { area in
+                    Button {
+                        choose(name, area)
+                    } label: {
+                        HStack {
+                            Text(SessionSetup.kiteAreaTitle(area))
+                            Spacer()
+                            if current == area { Image(systemName: "checkmark") }
+                        }
+                    }
+                }
+            }
+            Button("Без размера") { choose(name, nil) }
+        }.navigationTitle("Размер кайта")
+    }
+}
+
+struct BoardPicker: View {
+    @Environment(\.dismiss) private var dismiss
+    @Binding var setup: SessionSetup
+    let recent: [SessionSummary]
+    @State private var search = ""
+
+    private var recentBoards: [BoardSelection] {
+        var seen: Set<BoardSelection> = []
+        let entries = recent.compactMap { session -> BoardSelection? in
+            guard let previous = session.setup else { return nil }
+            return previous.boardDetails ?? BoardSelection(brand: "", model: previous.board)
+        }
+        return Array(entries.filter { seen.insert($0).inserted }.prefix(8))
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if search.isEmpty, !recentBoards.isEmpty {
+                    Section("Недавние") {
+                        ForEach(recentBoards, id: \.self) { board in Button(board.title) { choose(board) } }
+                    }
+                }
+                Section("Бренды") {
+                    ForEach(BoardCatalog.brands.filter { $0.matches(search) }) { brand in
+                        NavigationLink(brand.name) { BoardModels(brand: brand, choose: choose) }
+                    }
+                }
+                NavigationLink("Указать доску или лыжи вручную") {
+                    BoardManualEntry(brand: setup.boardDetails?.brand ?? "",
+                                     model: setup.boardDetails?.model ?? setup.board,
+                                     size: setup.boardDetails?.size ?? "", choose: choose)
+                }
+                if !setup.boardTitle.isEmpty {
+                    Button("Убрать выбранную доску") {
+                        setup.board = ""
+                        setup.boardDetails = nil
+                        dismiss()
+                    }
+                }
+            }
+            .searchable(text: $search, prompt: "Поиск бренда доски")
+            .navigationTitle("Доска / лыжи")
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Закрыть") { dismiss() } } }
+        }.tint(RiderTheme.accent)
+    }
+
+    private func choose(_ board: BoardSelection) {
+        setup.selectBoard(board)
+        dismiss()
+    }
+}
+
+private struct BoardModels: View {
+    let brand: BoardCatalog.Brand
+    let choose: (BoardSelection) -> Void
+    @State private var search = ""
+
+    var body: some View {
+        List {
+            ForEach(brand.models.filter { search.isEmpty || $0.name.localizedStandardContains(search) }) { model in
+                NavigationLink(model.name) { BoardSizes(brand: brand.name, model: model, choose: choose) }
+            }
+            NavigationLink("Другая модель") { BoardManualEntry(brand: brand.name, choose: choose) }
+        }
+        .searchable(text: $search, prompt: "Поиск модели доски")
+        .navigationTitle(brand.name)
+    }
+}
+
+private struct BoardSizes: View {
+    let brand: String
+    let model: BoardCatalog.Model
+    let choose: (BoardSelection) -> Void
+
+    var body: some View {
+        List {
+            Section("\(brand) \(model.name)") {
+                ForEach(model.sizes, id: \.self) { size in Button(size) { select(size) } }
+            }
+            NavigationLink("Другой размер") {
+                BoardManualEntry(brand: brand, model: model.name, sizeOnly: true, choose: choose)
+            }
+            Button("Без размера") { select(nil) }
+        }.navigationTitle("Размер доски")
+    }
+
+    private func select(_ size: String?) {
+        if let board = BoardSelection(brand: brand, model: model.name, size: size) { choose(board) }
+    }
+}
+
+private struct BoardManualEntry: View {
+    @State var brand = ""
+    @State var model = ""
+    @State var size = ""
+    var sizeOnly = false
+    let choose: (BoardSelection) -> Void
+
+    var body: some View {
+        let board = BoardSelection(brand: brand, model: model, size: size)
+        Form {
+            if !sizeOnly {
+                TextField("Бренд", text: $brand)
+                TextField("Модель", text: $model)
+            }
+            TextField("Размер, например 136 × 41 см", text: $size)
+            Button("Сохранить") { if let board { choose(board) } }
+                .disabled(board == nil)
+        }.navigationTitle(sizeOnly ? "Другой размер" : "Указать вручную")
     }
 }
 
@@ -98,6 +251,7 @@ struct SetupFields: View {
     var spots: [RiderSpot] = []
     @State private var showingKitePicker = false
     @State private var showingSpotPicker = false
+    @State private var showingBoardPicker = false
     var body: some View {
         let suggestions = SetupSuggestions(history: recent)
         ActivityFields(setup: $setup)
@@ -111,29 +265,18 @@ struct SetupFields: View {
                 .onChange(of: setup.kite) { _, value in setup.kite = String(value.prefix(100)) }
         } else {
             Button { showingKitePicker = true } label: {
-                LabeledContent("Кайт", value: setup.kite.isEmpty ? "Выбрать" : setup.kite)
+                LabeledContent("Кайт", value: setup.kite.isEmpty ? "Выбрать" : setup.kiteTitle)
             }.sheet(isPresented: $showingKitePicker) {
-                KitePicker(selection: $setup.kite, recent: suggestions.kites)
+                KitePicker(setup: $setup, recent: suggestions.kites)
             }
         }
-        TextField("Доска / лыжи", text: $setup.board)
-            .onChange(of: setup.board) { _, value in setup.board = String(value.prefix(100)) }
-        RecentChoice(title: "Мои доски / лыжи", values: suggestions.boards, selection: $setup.board)
+        Button { showingBoardPicker = true } label: {
+            LabeledContent("Доска / лыжи", value: setup.boardTitle.isEmpty ? "Выбрать" : setup.boardTitle)
+        }.sheet(isPresented: $showingBoardPicker) {
+            BoardPicker(setup: $setup, recent: recent)
+        }
         Picker("Где телефон", selection: $setup.placement) {
             ForEach(PhonePlacement.allCases, id: \.self) { Text($0.title).tag($0) }
-        }
-    }
-}
-
-private struct RecentChoice: View {
-    let title: String
-    let values: [String]
-    @Binding var selection: String
-    var body: some View {
-        if !values.isEmpty {
-            Menu {
-                ForEach(values, id: \.self) { value in Button(value) { selection = value } }
-            } label: { Label(title, systemImage: "clock.arrow.circlepath").font(.subheadline) }
         }
     }
 }

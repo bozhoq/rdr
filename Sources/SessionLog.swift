@@ -89,6 +89,8 @@ struct SessionSummary: Codable, Identifiable {
     var phoneTossTest: Bool?
     var handSimulationTest: Bool?
     var reusedMotionCalibration: Bool?
+    var recordingMode: RecordingMode?
+    var sensors: RecordingSensors?
 
     var canReplayGroundEvents: Bool {
         handSimulationTest != true && (jumpAnalysis?.detectorVersion ?? JumpDetector.version) == JumpDetector.version
@@ -106,9 +108,19 @@ struct SessionSummary: Codable, Identifiable {
 
     func matches(_ query: String) -> Bool {
         let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        return query.isEmpty || [review?.title ?? "", review?.notes ?? "", setup?.spot ?? "", setup?.kite ?? "", setup?.board ?? "", setup?.activityTitle ?? ""]
+        return query.isEmpty || [review?.title ?? "", review?.notes ?? "", setup?.spot ?? "", setup?.kiteTitle ?? "", setup?.boardTitle ?? "", setup?.activityTitle ?? ""]
             .contains { $0.localizedStandardContains(query) }
     }
+}
+
+struct RecordingSensors: Codable {
+    let accelerometer: Bool
+    let gyroscope: Bool
+    let deviceMotion: Bool
+    let barometer: Bool
+    let locationAllowed: Bool
+    var motionResponded: Bool?
+    var pressureResponded: Bool?
 }
 
 enum JumpLabel: String, Codable, CaseIterable {

@@ -24,14 +24,13 @@ enum KiteStyle: String, Codable, CaseIterable {
     var title: String { self == .bigAir ? "Биг-эйр" : "Вейкстайл" }
 }
 
-enum GroundTestMode: String, CaseIterable {
-    case normal, phoneToss, handSimulation
+enum RecordingMode: String, CaseIterable, Codable {
+    case test, battle
 
     var title: String {
         switch self {
-        case .normal: return "Обычный"
-        case .phoneToss: return "Подброс телефона"
-        case .handSimulation: return "Имитация рукой"
+        case .test: return "Тест режим"
+        case .battle: return "Боевой режим"
         }
     }
 }
@@ -59,6 +58,31 @@ struct SessionSetup: Codable {
     var placement: PhonePlacement = .unspecified
     var kiteStyle: KiteStyle?
     var spotID: UUID?
+    var kiteAreaSquareMeters: Double?
+    var boardDetails: BoardSelection?
+
+    var kiteTitle: String {
+        guard !kite.isEmpty, let area = kiteAreaSquareMeters else { return kite }
+        return "\(kite) · \(Self.kiteAreaTitle(area))"
+    }
+
+    var boardTitle: String { boardDetails?.title ?? board }
+
+    static let kiteAreas = (6...34).map { Double($0) / 2 }
+
+    static func kiteAreaTitle(_ area: Double) -> String {
+        "\(area.formatted(.number.precision(.fractionLength(0...1)))) м²"
+    }
+
+    mutating func selectKite(_ name: String, area: Double?) {
+        kite = name
+        kiteAreaSquareMeters = area
+    }
+
+    mutating func selectBoard(_ selection: BoardSelection) {
+        board = selection.title
+        boardDetails = selection
+    }
 
     mutating func selectSpot(_ selected: RiderSpot) {
         spot = selected.name
@@ -79,8 +103,29 @@ struct SessionSetup: Codable {
         copy.spot = String(spot.trimmingCharacters(in: .whitespacesAndNewlines).prefix(100))
         copy.kite = String(kite.trimmingCharacters(in: .whitespacesAndNewlines).prefix(100))
         copy.board = String(board.trimmingCharacters(in: .whitespacesAndNewlines).prefix(100))
+        if copy.kite.isEmpty || sport == .wing || sport == .windsurf ||
+            !Self.kiteAreas.contains(kiteAreaSquareMeters ?? 0) { copy.kiteAreaSquareMeters = nil }
         if !sport.supportsKiteStyle { copy.kiteStyle = nil }
         return copy
+    }
+}
+
+struct BoardSelection: Codable, Hashable {
+    let brand: String
+    let model: String
+    let size: String?
+
+    init?(brand: String, model: String, size: String? = nil) {
+        self.brand = String(brand.trimmingCharacters(in: .whitespacesAndNewlines).prefix(40))
+        self.model = String(model.trimmingCharacters(in: .whitespacesAndNewlines).prefix(100))
+        let dimensions = size?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        self.size = dimensions.isEmpty ? nil : String(dimensions.prefix(40))
+        guard !self.brand.isEmpty || !self.model.isEmpty else { return nil }
+    }
+
+    var title: String {
+        let name = [brand, model].filter { !$0.isEmpty }.joined(separator: " ")
+        return [name, size].compactMap { $0 }.joined(separator: " · ")
     }
 }
 
@@ -91,8 +136,9 @@ struct RiderSpot: Codable, Identifiable, Hashable {
     let longitude: Double
     let notes: String?
     let windyLink: URL?
+    var mapLink: URL?
 
-    init?(id: UUID = UUID(), name: String, latitude: String, longitude: String, notes: String = "", windyLink: String = "") {
+    init?(id: UUID = UUID(), name: String, latitude: String, longitude: String, notes: String = "", windyLink: String = "", mapLink: URL? = nil) {
         let cleaned = String(name.trimmingCharacters(in: .whitespacesAndNewlines).prefix(100))
         func coordinate(_ text: String) -> Double? {
             Double(text.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: ",", with: "."))
@@ -106,6 +152,7 @@ struct RiderSpot: Codable, Identifiable, Hashable {
         self.notes = String(notes.trimmingCharacters(in: .whitespacesAndNewlines).prefix(1000))
         let link = URL(string: windyLink.trimmingCharacters(in: .whitespacesAndNewlines))
         self.windyLink = link?.scheme == "https" && link?.host == "windy.app" ? link : nil
+        self.mapLink = mapLink
     }
 
     func matches(_ setup: SessionSetup?) -> Bool {
@@ -115,6 +162,10 @@ struct RiderSpot: Codable, Identifiable, Hashable {
     }
 
     var yandexURL: URL? {
+        if let mapLink, mapLink.scheme == "https", mapLink.host == "yandex.ru",
+           mapLink.path == "/maps" || mapLink.path.hasPrefix("/maps/") {
+            return mapLink
+        }
         var url = URLComponents()
         url.scheme = "https"
         url.host = "yandex.ru"
@@ -123,6 +174,65 @@ struct RiderSpot: Codable, Identifiable, Hashable {
                           URLQueryItem(name: "text", value: "\(latitude), \(longitude)"),
                           URLQueryItem(name: "z", value: "15")]
         return url.url
+    }
+
+    var routeAppURL: URL? {
+        var url = URLComponents()
+        url.scheme = "yandexmaps"
+        url.host = "build_route_on_map"
+        url.path = "/"
+        url.queryItems = [URLQueryItem(name: "lat_to", value: String(latitude)),
+                          URLQueryItem(name: "lon_to", value: String(longitude))]
+        return url.url
+    }
+
+    var routeWebURL: URL? {
+        var url = URLComponents()
+        url.scheme = "https"
+        url.host = "yandex.ru"
+        url.path = "/maps/"
+        url.queryItems = [URLQueryItem(name: "mode", value: "routes"),
+                          URLQueryItem(name: "rtext", value: "~\(latitude),\(longitude)"),
+                          URLQueryItem(name: "rtt", value: "auto")]
+        return url.url
+    }
+}
+
+enum StarterSpots {
+    static let infoKey = "RiderStarterSpots"
+
+    private struct Entry: Decodable {
+        let id: UUID
+        let name: String
+        let latitude: Double
+        let longitude: Double
+        let notes: String?
+        let mapLink: String?
+    }
+
+    static func load(from bundle: Bundle = .main) -> [RiderSpot] {
+        guard let list = bundle.object(forInfoDictionaryKey: infoKey) else { return [] }
+        return decode(list)
+    }
+
+    static func decode(_ list: Any) -> [RiderSpot] {
+        guard let data = try? PropertyListSerialization.data(fromPropertyList: list, format: .binary, options: 0),
+              let entries = try? PropertyListDecoder().decode([Entry].self, from: data) else { return [] }
+        return entries.compactMap { entry in
+            RiderSpot(id: entry.id, name: entry.name, latitude: String(entry.latitude), longitude: String(entry.longitude),
+                      notes: entry.notes ?? "", mapLink: entry.mapLink.flatMap { URL(string: $0) })
+        }
+    }
+
+    static func merge(saved: [RiderSpot], catalogue: [RiderSpot]) -> [RiderSpot] {
+        var result = saved
+        for entry in catalogue where !result.contains(where: { spot in
+            spot.id == entry.id || spot.name.caseInsensitiveCompare(entry.name) == .orderedSame ||
+                (abs(spot.latitude - entry.latitude) < 0.0001 && abs(spot.longitude - entry.longitude) < 0.0001)
+        }) {
+            result.append(entry)
+        }
+        return result.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
     }
 }
 
@@ -243,6 +353,77 @@ enum KiteCatalog {
     ].sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
 }
 
+enum BoardCatalog {
+    struct Model: Identifiable {
+        let name: String
+        let sizes: [String]
+        var id: String { name }
+
+        init(_ name: String, _ sizes: [String], unit: String = "см") {
+            self.name = name
+            self.sizes = sizes.map { $0.replacingOccurrences(of: ".", with: ",") + " " + unit }
+        }
+    }
+
+    struct Brand: Identifiable {
+        let name: String
+        let models: [Model]
+        let alias: String
+        var id: String { name }
+
+        init(_ name: String, _ alias: String, _ models: [Model]) {
+            self.name = name
+            self.alias = alias
+            self.models = models.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        }
+
+        func matches(_ query: String) -> Bool {
+            query.isEmpty || name.localizedStandardContains(query) || alias.localizedStandardContains(query)
+        }
+    }
+
+    private static let jaime = ["133 × 40", "136 × 41", "139 × 42", "142 × 43"]
+    private static let teamSeries = ["136 × 40", "140 × 41.5", "144 × 43"]
+    private static let select = ["135 × 39", "138 × 40", "141 × 41", "144 × 42"]
+    private static let atmos = ["136 × 40", "138 × 41", "141 × 42", "144 × 43"]
+    private static let trax = ["135 × 39", "136 × 40.5", "137 × 42", "139 × 43", "140 × 45"]
+
+    static let brands = [
+        Brand("Cabrinha", "Кабрина Кабринья", [
+            Model("Ace (2025)", ["120 × 35", "126 × 36.5", "133 × 38.5", "135 × 40", "138 × 41.5", "141 × 43", "145 × 44.5"]),
+            Model("Spectrum (2026)", ["136 × 41", "140 × 42", "144 × 43", "148 × 44", "152 × 44"]),
+            Model("Xcal (2026)", ["135 × 41", "138 × 42", "141 × 43"])
+        ]),
+        Brand("CORE", "Кор Коре", [
+            Model("Choice 3", ["133 × 40", "135 × 41", "137 × 41.5", "139 × 42", "141 × 42.5", "144 × 43.5", "147 × 45"]),
+            Model("Choice 5", ["133 × 40", "135 × 41", "137 × 41.5", "139 × 42", "141 × 42.5", "144 × 43.5"]),
+            Model("Era", ["134 × 40", "136 × 40.5", "138 × 41", "142 × 42", "146 × 44", "152 × 48"]),
+            Model("Era LW", ["154 × 46", "159 × 47"]),
+            Model("Fusion 7", ["133 × 39.5", "135 × 40.5", "137 × 41.5", "139 × 42", "141 × 42.5", "144 × 43.5"])
+        ]),
+        Brand("Duotone", "Дуотон Дюотон", [
+            Model("Jaime", jaime), Model("Jaime SLS", jaime),
+            Model("Gambler (2024)", ["151 × 43"]),
+            Model("Select Concept Blue (2024)", select), Model("Select SLS (2024)", select),
+            Model("Team Series", teamSeries), Model("Team Series SLS", teamSeries),
+            Model("Team Series Big Air SLS (2026)", ["136 × 40", "139 × 41"])
+        ]),
+        Brand("F-ONE", "Фон Ф-Уан", [
+            Model("TRAX", ["132 × 37", "133 × 38", "136 × 40.5", "137 × 42"]),
+            Model("TRAX Carbon", trax), Model("TRAX Lite Tech", trax),
+            Model("WTF?!", ["127 × 37", "130 × 39", "136 × 41.5", "138 × 42", "140 × 42.5"]),
+            Model("ONE", ["138 × 40", "140 × 42", "148 × 45", "150 × 48"]),
+            Model("BIG ONE", ["160 × 45", "164 × 48"])
+        ]),
+        Brand("North", "Норт", [
+            Model("Atmos (2026)", atmos), Model("Atmos Pro (2026)", atmos), Model("Atmos Ultra (2026)", atmos),
+            Model("Prime (2022)", ["133 × 39", "136 × 40", "138 × 41", "141 × 42", "144 × 43", "148 × 44", "152 × 45"]),
+            Model("Trace (2025)", ["145 × 45", "155 × 46"])
+        ]),
+        Brand("Slingshot", "Слингшот", [Model("Misfit V11 Carbon", ["137", "143", "147"])]),
+    ]
+}
+
 struct RouteMetrics: Codable, Sendable {
     var version = "gps-1"
     var accepted = 0
@@ -265,6 +446,8 @@ struct LiveJumpEstimate: Codable {
     let airtimeSeconds: Double
     let distanceMeters: Double?
     var isPhoneToss: Bool?
+    var isHandLift: Bool?
+    var inertialLift: Bool?
 
     static func phoneToss(_ event: JumpCandidate) -> Self? {
         guard event.minimumLoadG.isFinite, (0...0.2).contains(event.minimumLoadG),
@@ -282,6 +465,11 @@ struct LiveJumpEstimate: Codable {
 
     private static func ridingHeight(_ flight: RidingJumpDetector.Flight, altitude: [AltitudeSample]) -> Double? {
         let start = flight.event.startSeconds, end = flight.event.endSeconds
+        guard start.isFinite, end.isFinite, end > start,
+              flight.settledHeight.isFinite, flight.residualVelocity.isFinite,
+              flight.trajectory.allSatisfy({ $0.time.isFinite && $0.height.isFinite }),
+              altitude.allSatisfy({ $0.elapsedSinceFirstSampleSeconds.isFinite && $0.relativeAltitudeMeters.isFinite }),
+              zip(altitude, altitude.dropFirst()).allSatisfy({ pair in pair.0.elapsedSinceFirstSampleSeconds < pair.1.elapsedSinceFirstSampleSeconds }) else { return nil }
         let before = altitude.filter { (start - 3...start).contains($0.elapsedSinceFirstSampleSeconds) }.suffix(2)
         let after = altitude.filter { (end + 0.15...end + 3).contains($0.elapsedSinceFirstSampleSeconds) }.prefix(2)
         guard before.count == 2, after.count == 2, let beforeLast = before.last, let afterFirst = after.first,
@@ -378,14 +566,19 @@ struct LiveJumpEstimate: Codable {
     }
 }
 
-/// A supported lift of the phone is a barometric exercise, not a free-fall event.
+/// Pressure measures supported hand lifts. Motion only rejects free fall and
+/// supplies a conservative still-to-still fallback when pressure is unavailable.
 struct HandSimulationDetector {
-    static let version = "hand-practice-2"
+    static let version = "hand-practice-4"
     private var quiet: [Double] = []
     private var baseline: Double?
     private var returnTolerance = 0.28
     private var previousTime: Double?
     private var lift: Lift?
+    private var unsupportedUntil = -Double.infinity
+    private var previousMotion: (time: Double, acceleration: Double)?
+    private var stillSince: Double?
+    private var inertial: InertialLift?
 
     private struct Lift {
         let start: Double
@@ -393,36 +586,133 @@ struct HandSimulationDetector {
         var returnTime: Double?
         var returnAltitude: Double?
     }
+    private struct InertialLift {
+        let start: Double
+        var velocity = 0.0
+        var height = 0.0
+        var peak = 0.0
+        var minimumLoad = 1.0
+        var maximumLoad = 1.0
+        var maximumSpin = 0.0
+        var descended = false
+        var settledSince: Double?
+    }
+
+    /// Call alongside pressure, so a tossed phone cannot become a supported lift.
+    /// Gravity-projected acceleration survives orientation changes. The gyro
+    /// rejects unstable endpoints.
+    mutating func processMotion(_ sample: MotionSample, calibration: MotionCalibration?,
+                                allowInertialFallback: Bool) -> (JumpCandidate, Double)? {
+        let time = sample.elapsedSinceFirstSampleSeconds
+        let a = sample.accelerationG, g = sample.gravityG, r = sample.rotationRadiansPerSecond
+        let load = sqrt(pow(a.x + g.x, 2) + pow(a.y + g.y, 2) + pow(a.z + g.z, 2))
+        let spin = sqrt(r.x * r.x + r.y * r.y + r.z * r.z)
+        let magnitude = sqrt(a.x * a.x + a.y * a.y + a.z * a.z) * 9.80665
+        let vertical = calibration?.correctedVertical(sample.verticalAccelerationMetersPerSecondSquared, at: time)
+            ?? sample.verticalAccelerationMetersPerSecondSquared
+        guard time.isFinite, time >= 0, vertical.isFinite, load.isFinite, spin.isFinite, magnitude.isFinite else {
+            previousMotion = nil; inertial = nil; stillSince = nil; lift = nil
+            return nil
+        }
+        if load < 0.35 {
+            unsupportedUntil = time + 2
+            lift = nil; inertial = nil; baseline = nil; quiet.removeAll()
+        }
+        let prior = previousMotion
+        previousMotion = (time, vertical)
+        guard let prior, time > prior.time, time - prior.time <= 0.05 else {
+            inertial = nil; stillSince = nil
+            return nil
+        }
+        let still = magnitude <= 0.28 && abs(vertical) <= 0.22 && spin <= 0.35
+        guard allowInertialFallback, time > unsupportedUntil else {
+            inertial = nil; stillSince = nil
+            return nil
+        }
+        if var track = inertial {
+            let dt = time - prior.time
+            let oldVelocity = track.velocity
+            track.velocity += (prior.acceleration + vertical) * 0.5 * dt
+            track.height += (oldVelocity + track.velocity) * 0.5 * dt
+            track.peak = max(track.peak, track.height)
+            track.minimumLoad = min(track.minimumLoad, load)
+            track.maximumLoad = max(track.maximumLoad, load)
+            track.maximumSpin = max(track.maximumSpin, spin)
+            if track.peak >= 0.4 && track.velocity < -0.15 { track.descended = true }
+            guard time - track.start <= 10, abs(track.velocity) < 5, track.height > -0.4, track.peak < 4 else {
+                inertial = nil; stillSince = nil
+                return nil
+            }
+            if still && track.descended {
+                if track.settledSince == nil { track.settledSince = time }
+                if time - (track.settledSince ?? time) >= 0.45 {
+                    inertial = nil; stillSince = time
+                    // Endpoint constraints bound drift; they cannot certify an
+                    // absolute height. This remains an approximate indoor test.
+                    guard abs(track.velocity) <= 0.18,
+                          abs(track.height) <= min(0.25, max(0.10, track.peak * 0.12)),
+                          (0.4...3.5).contains(track.peak), track.minimumLoad >= 0.35 else { return nil }
+                    return (JumpCandidate(startSeconds: track.start, endSeconds: track.settledSince ?? time,
+                                          minimumLoadG: track.minimumLoad, returnPeakG: track.maximumLoad,
+                                          maximumRotationRadiansPerSecond: track.maximumSpin), track.peak)
+                }
+            } else { track.settledSince = nil }
+            inertial = track
+        } else if still {
+            if stillSince == nil { stillSince = time }
+        } else {
+            if vertical > 0.35, time - (stillSince ?? time) >= 0.35 {
+                let dt = time - prior.time
+                var track = InertialLift(start: prior.time)
+                track.velocity = (prior.acceleration + vertical) * 0.5 * dt
+                track.height = track.velocity * 0.5 * dt
+                inertial = track
+            }
+            stillSince = nil
+        }
+        return nil
+    }
 
     mutating func consume(_ sample: AltitudeSample) -> (JumpCandidate, Double)? {
         let time = sample.elapsedSinceFirstSampleSeconds, altitude = sample.relativeAltitudeMeters
-        guard time.isFinite, altitude.isFinite else { return nil }
-        if let previousTime, time <= previousTime || time - previousTime > 2.6 {
-            self = Self()
+        guard time.isFinite, time >= 0, altitude.isFinite, sample.pressureKilopascals.isFinite,
+              sample.pressureKilopascals > 0 else {
+            lift = nil; baseline = nil; quiet.removeAll(); previousTime = nil
+            return nil
+        }
+        if let previousTime, time <= previousTime || time - previousTime > 3.2 {
+            lift = nil; baseline = nil; quiet.removeAll()
         }
         previousTime = time
+        guard time > unsupportedUntil else { return nil }
         if var lift, let baseline {
-            if time - lift.start > 60 {
-                self.lift = nil
+            if time - lift.start > 75 || abs(altitude - baseline) > 5 {
+                self.lift = nil; self.baseline = nil; quiet.removeAll()
                 return nil
             }
             let relative = altitude - baseline
             lift.peak = max(lift.peak, relative)
-            if relative <= returnTolerance, lift.peak - relative >= 0.25 {
+            let tolerance = max(returnTolerance, min(0.60, lift.peak * 0.24))
+            if relative <= tolerance, lift.peak - relative >= 0.25 {
+                let nearBaseline = relative <= returnTolerance
+                let settlingTime = nearBaseline ? 0.5 : 2.0
+                let variation = nearBaseline ? 0.16 : 0.10
                 if let returned = lift.returnTime, let prior = lift.returnAltitude,
-                   abs(prior - altitude) <= 0.18 {
+                   !nearBaseline || prior - baseline <= returnTolerance,
+                   abs(prior - altitude) <= variation, time - returned >= settlingTime {
                     self.lift = nil
                     quiet = [prior, altitude]
                     self.baseline = nil
-                    guard lift.peak >= 0.40, returned - lift.start >= 0.65 else { return nil }
+                    guard (0.40...4).contains(lift.peak), returned - lift.start >= 0.65,
+                          relative >= -max(0.40, lift.peak * 0.2) else { return nil }
                     return (JumpCandidate(startSeconds: lift.start, endSeconds: returned,
                                           minimumLoadG: 0, returnPeakG: 0, maximumRotationRadiansPerSecond: 0), lift.peak)
                 }
-                lift.returnTime = time
-                lift.returnAltitude = altitude
-            } else if relative < returnTolerance {
-                self.lift = nil
-                return nil
+                if lift.returnAltitude.map({ abs($0 - altitude) > variation ||
+                    (nearBaseline && $0 - baseline > returnTolerance) }) ?? true {
+                    lift.returnTime = time
+                    lift.returnAltitude = altitude
+                }
             } else {
                 lift.returnTime = nil
                 lift.returnAltitude = nil
@@ -437,10 +727,14 @@ struct HandSimulationDetector {
         }
         quiet.append(altitude)
         if quiet.count > 3 { quiet.removeFirst() }
-        if quiet.count == 3, let low = quiet.min(), let high = quiet.max(), high - low <= 0.16,
-           baseline == nil || high < (baseline ?? high) - 0.3 {
-            baseline = quiet.reduce(0, +) / 3
-            returnTolerance = 0.26 + high - low
+        if quiet.count == 3, let low = quiet.min(), let high = quiet.max(), high - low <= 0.30 {
+            // Re-anchor after walking or lowering the phone. Keep the original
+            // baseline through a gradual rise so slow lifts are not erased.
+            let center = quiet.reduce(0, +) / 3
+            if baseline == nil || center <= (baseline ?? center) + 0.025 {
+                baseline = center
+                returnTolerance = min(0.38, 0.26 + high - low)
+            }
         }
         return nil
     }

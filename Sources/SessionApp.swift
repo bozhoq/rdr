@@ -70,6 +70,7 @@ private struct RecordingView: View {
     @State private var gear: GearField?
     @State private var showingTools = false
     @State private var confirmingStop = false
+    @State private var showingSensorCheck = false
     @State private var markerKind = MarkerKind.walking
 
     private enum RecordingDevice: Hashable { case phone, watch }
@@ -112,7 +113,9 @@ private struct RecordingView: View {
             if field == .spot {
                 SpotChoice(setup: $recorder.draftSetup, spots: recorder.spots, recent: suggestions.spots)
             } else if field == .kite, usesKitePicker {
-                KitePicker(selection: $recorder.draftSetup.kite, recent: suggestions.kites)
+                KitePicker(setup: $recorder.draftSetup, recent: suggestions.kites)
+            } else if field == .board {
+                BoardPicker(setup: $recorder.draftSetup, recent: recorder.history)
             } else {
                 GearChoice(title: gearTitle(field), initial: recorder.draftSetup[keyPath: field.key],
                            options: field.choices(suggestions)) { value in
@@ -122,6 +125,9 @@ private struct RecordingView: View {
         }
         .sheet(isPresented: $showingTools) {
             if let session = recorder.live { tools(session) }
+        }
+        .sheet(isPresented: $showingSensorCheck, onDismiss: recorder.cancelSensorCheck) {
+            sensorCheck
         }
         .confirmationDialog("Завершить запись?", isPresented: $confirmingStop, titleVisibility: .visible) {
             Button("Завершить и сохранить", action: onStop)
@@ -137,23 +143,21 @@ private struct RecordingView: View {
 
                 VStack(spacing: 0) {
                     VStack(spacing: 11) {
-                        ActivityFields(setup: $recorder.draftSetup)
-                        if recorder.draftSetup.sport == .groundTest {
-                            Picker("Режим теста", selection: $recorder.groundTestMode) {
-                                ForEach(GroundTestMode.allCases, id: \.self) { Text($0.title).tag($0) }
-                            }
-                            if recorder.groundTestMode == .handSimulation {
-                                Text("Подержите телефон внизу около трёх секунд. Плавно поднимите, ненадолго задержите наверху, затем опустите и подождите внизу.")
-                                    .font(.footnote).foregroundStyle(.secondary)
-                            }
+                        Picker("Режим записи", selection: $recorder.recordingMode) {
+                            ForEach(RecordingMode.allCases, id: \.self) { Text($0.title).tag($0) }
+                        }.pickerStyle(.segmented)
+                        if recorder.recordingMode == .battle {
+                            ActivityFields(setup: $recorder.draftSetup, ridingOnly: true)
                         }
                     }.padding(.vertical, 12)
-                    Divider()
-                    gearRow(.spot)
-                    Divider()
-                    gearRow(.kite)
-                    Divider()
-                    gearRow(.board)
+                    if recorder.recordingMode == .battle {
+                        Divider()
+                        gearRow(.spot)
+                        Divider()
+                        gearRow(.kite)
+                        Divider()
+                        gearRow(.board)
+                    }
                 }.lagoonCard()
 
                 VStack(alignment: .leading, spacing: 12) {
@@ -168,34 +172,86 @@ private struct RecordingView: View {
                     }
                 }.lagoonCard()
 
-                Button(action: recorder.start) {
+                Button(action: requestRecording) {
                     Text("Начать запись").font(.headline)
                         .frame(maxWidth: .infinity).padding(.vertical, 10)
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(RiderTheme.action)
                 .controlSize(.large)
-                .disabled(device == .watch || !recorder.motionAvailable || recorder.analyzingSessionID != nil)
+                .disabled(device == .watch || !recorder.hasRecordingSensors || recorder.analyzingSessionID != nil)
 
                 DisclosureGroup("Настройки записи") {
                     VStack(spacing: 15) {
-                        Picker("Где телефон", selection: $recorder.draftSetup.placement) {
-                            ForEach(PhonePlacement.allCases, id: \.self) { Text($0.title).tag($0) }
+                        if recorder.recordingMode == .battle {
+                            Picker("Где телефон", selection: $recorder.draftSetup.placement) {
+                                ForEach(PhonePlacement.allCases, id: \.self) { Text($0.title).tag($0) }
+                            }
                         }
-                        if recorder.savedCalibration != nil {
-                            Toggle("Калибровать заново при следующей записи", isOn: $recorder.recalibrateNextSession)
-                        }
+                        Toggle("Проверить датчики перед записью", isOn: $recorder.recalibrateNextSession)
                         locationControls
                     }.padding(.top, 12)
                 }.lagoonCard()
-                if !recorder.motionAvailable { Text("Датчики движения iPhone недоступны.").foregroundStyle(.secondary) }
+                if !recorder.hasRecordingSensors { Text("Датчики записи пока недоступны.").foregroundStyle(.secondary) }
                 if recorder.analyzingSessionID != nil { ProgressView("Разбираем сохранённую сессию…") }
             }.padding(20)
-        }.background(RiderTheme.canvas.ignoresSafeArea())
+        }
+        .background(RiderTheme.canvas.ignoresSafeArea())
+        .onChange(of: recorder.recordingMode, initial: true) { _, mode in
+            if mode == .battle, !recorder.draftSetup.sport.isRiding { recorder.draftSetup.sport = .kite }
+        }
+    }
+
+    private func requestRecording() {
+        if recorder.needsSensorCheck { showingSensorCheck = true }
+        else { recorder.start() }
+    }
+
+    private var sensorCheck: some View {
+        NavigationStack {
+            Form {
+                Section("Калибровка") {
+                    if recorder.sensorCheckRunning {
+                        ProgressView("Не двигайте телефон 5 секунд")
+                    } else if recorder.checkedCalibration != nil {
+                        Label("Калибровка готова", systemImage: "checkmark.circle")
+                    } else if let message = recorder.sensorCheckMessage {
+                        Text(message).foregroundStyle(.secondary)
+                    }
+                    Button("Проверить снова", action: recorder.checkSensors).disabled(recorder.sensorCheckRunning)
+                }
+                if let sensors = recorder.checkedSensors {
+                    Section("Датчики iPhone") {
+                        LabeledContent("Акселерометр", value: sensors.accelerometer ? "Есть" : "Недоступен")
+                        LabeledContent("Гироскоп", value: sensors.gyroscope ? "Есть" : "Недоступен")
+                        LabeledContent("Движение", value: sensorStatus(sensors.deviceMotion, response: sensors.motionResponded))
+                        LabeledContent("Барометр", value: sensorStatus(sensors.barometer, response: sensors.pressureResponded))
+                        locationControls
+                    }
+                }
+                Button("Начать запись") {
+                    recorder.start()
+                    showingSensorCheck = false
+                }
+                .disabled(recorder.sensorCheckRunning || recorder.checkedSensors == nil || !recorder.hasRecordingSensors)
+            }
+            .navigationTitle("Проверка датчиков")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Отмена") { showingSensorCheck = false } } }
+        }
+        .tint(RiderTheme.accent)
+        .onAppear(perform: recorder.checkSensors)
+    }
+
+    private func sensorStatus(_ available: Bool, response: Bool?) -> String {
+        guard available else { return "Недоступен" }
+        guard let response else { return "Проверяется" }
+        return response ? "Есть данные" : "Нет ответа"
     }
 
     private func gearRow(_ field: GearField) -> some View {
-        let value = recorder.draftSetup[keyPath: field.key]
+        let setup = recorder.draftSetup
+        let value = field == .kite ? setup.kiteTitle : field == .board ? setup.boardTitle : setup.spot
         return Button { gear = field } label: {
             HStack(spacing: 10) {
                 Text(gearTitle(field)).font(.body.weight(.medium)).foregroundStyle(.primary)
@@ -269,7 +325,7 @@ private struct RecordingView: View {
             HStack(spacing: 0) {
                 recordingMetric("Топ высота", value: height, unit: "м")
                 Rectangle().fill(.white.opacity(0.25)).frame(width: 1, height: 56)
-                recordingMetric("Топ зависание", value: airtime, unit: "с")
+                        recordingMetric(session.recordingMode == .test ? "Время подъёма" : "Топ зависание", value: airtime, unit: "с")
             }
             Rectangle().fill(.white.opacity(0.25)).frame(height: 1)
             HStack(spacing: 0) {
@@ -635,9 +691,9 @@ struct SessionDetail: View {
         if let setup = session.setup {
             if !setup.spot.isEmpty { LabeledContent("Спот", value: setup.spot) }
             if !setup.kite.isEmpty {
-                LabeledContent(setup.sport == .wing ? "Винг" : setup.sport == .windsurf ? "Парус" : "Кайт", value: setup.kite)
+                LabeledContent(setup.sport == .wing ? "Винг" : setup.sport == .windsurf ? "Парус" : "Кайт", value: setup.kiteTitle)
             }
-            if !setup.board.isEmpty { LabeledContent("Доска / лыжи", value: setup.board) }
+            if !setup.boardTitle.isEmpty { LabeledContent("Доска / лыжи", value: setup.boardTitle) }
             LabeledContent("Где телефон", value: setup.placement.title)
         }
         Button("Изменить занятие и снаряжение") { editingSetup = true }
@@ -645,6 +701,7 @@ struct SessionDetail: View {
         if let setup = session.setup {
             Button("Использовать настройки для следующей сессии") {
                 recorder.reuseSetup(setup)
+                recorder.recordingMode = setup.sport.isRiding ? .battle : .test
                 setupCopied = true
             }.disabled(recorder.live != nil)
             if setupCopied { Text("Настройки выбраны. Откройте вкладку «Запись».").font(.footnote).foregroundStyle(.secondary) }

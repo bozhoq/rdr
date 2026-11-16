@@ -9,12 +9,10 @@ struct SpotsView: View {
     @ObservedObject var recorder: SessionRecorder
     let goToRecording: () -> Void
     @State private var adding = false
-    @State private var showingMap = false
 
     var body: some View {
         List {
             Section {
-                Button { showingMap = true } label: { Label("Яндекс Карты", systemImage: "map") }
                 Button { adding = true } label: { Label("Добавить спот", systemImage: "plus") }
             }.listRowBackground(RiderTheme.surface)
             Section("Мои споты") {
@@ -38,9 +36,6 @@ struct SpotsView: View {
         .background(RiderTheme.canvas.ignoresSafeArea())
         .navigationTitle("Спот")
         .sheet(isPresented: $adding) { SpotEditor(original: nil, save: recorder.saveSpot) }
-        .sheet(isPresented: $showingMap) {
-            if let url = URL(string: "https://yandex.ru/maps/") { SpotBrowser(url: url).ignoresSafeArea() }
-        }
     }
 }
 
@@ -111,7 +106,12 @@ private struct SpotEditor: View {
     }
 
     private var candidate: RiderSpot? {
-        RiderSpot(id: original?.id ?? UUID(), name: name, latitude: latitude, longitude: longitude, notes: notes, windyLink: windyLink)
+        guard var candidate = RiderSpot(id: original?.id ?? UUID(), name: name, latitude: latitude,
+                                        longitude: longitude, notes: notes, windyLink: windyLink) else { return nil }
+        if let original, candidate.latitude == original.latitude, candidate.longitude == original.longitude {
+            candidate.mapLink = original.mapLink
+        }
+        return candidate
     }
 
     var body: some View {
@@ -162,11 +162,12 @@ private struct SpotBrowser: UIViewControllerRepresentable {
 }
 
 private struct SpotDetailView: View {
+    @Environment(\.openURL) private var openURL
     @ObservedObject var recorder: SessionRecorder
     let original: RiderSpot
     let goToRecording: () -> Void
     @State private var editing = false
-    @State private var showingMap = false
+    @State private var routeUnavailable = false
 
     private var spot: RiderSpot { recorder.spots.first(where: { $0.id == original.id }) ?? original }
     private var sessions: [SessionSummary] { recorder.history.filter { spot.matches($0.setup) } }
@@ -192,22 +193,33 @@ private struct SpotDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Изменить") { editing = true } } }
         .sheet(isPresented: $editing) { SpotEditor(original: spot, save: recorder.saveSpot) }
-        .sheet(isPresented: $showingMap) {
-            if let url = spot.yandexURL { SpotBrowser(url: url).ignoresSafeArea() }
+        .alert("Маршрут не открылся", isPresented: $routeUnavailable) {
+            Button("ОК", role: .cancel) {}
         }
     }
 
     private var titleCard: some View {
         VStack(alignment: .leading, spacing: 13) {
             Text(spot.name).font(.largeTitle.bold())
-            Button { showingMap = true } label: { Label("Яндекс Карты", systemImage: "map") }
+            Button(action: openRoute) {
+                Label("Маршрут к споту", systemImage: "location.fill")
+                    .font(.headline).frame(maxWidth: .infinity, minHeight: 42)
+            }.buttonStyle(.borderedProminent).tint(RiderTheme.action)
             Button {
                 recorder.chooseSpot(spot)
+                recorder.recordingMode = .battle
                 goToRecording()
             } label: {
                 Text("Выбрать для записи").frame(maxWidth: .infinity)
-            }.buttonStyle(.borderedProminent).tint(RiderTheme.action).disabled(recorder.live != nil)
+            }.buttonStyle(.bordered).tint(RiderTheme.accent).disabled(recorder.live != nil)
         }.lagoonCard()
+    }
+
+    private func openRoute() {
+        guard let app = spot.routeAppURL, let web = spot.routeWebURL else { return }
+        openURL(app) { opened in
+            if !opened { openURL(web) { routeUnavailable = !$0 } }
+        }
     }
 
     private var sessionActivity: some View {
@@ -251,7 +263,8 @@ private struct SpotRecords: View {
         let rides = sessions.filter { $0.status == .finished && $0.setup?.sport.isRiding == true }
         let jumps = rides.flatMap { session in
             (session.jumpAnalysis?.candidates ?? []).compactMap { candidate -> (SessionSummary, LiveJumpEstimate)? in
-                guard let estimate = session.liveEstimate(for: candidate), estimate.isPhoneToss != true else { return nil }
+                guard let estimate = session.liveEstimate(for: candidate),
+                      estimate.isPhoneToss != true, estimate.isHandLift != true else { return nil }
                 return (session, estimate)
             }
         }

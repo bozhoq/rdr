@@ -32,7 +32,7 @@ struct JumpAnalysis: Codable, Sendable {
 /// no inference about kite airtime or height is made from these events.
 struct JumpDetector {
     static let version = "ground-1"
-    static let phoneTossVersion = "phone-toss-2"
+    static let phoneTossVersion = "phone-toss-3"
     private let confirmsPhoneCatch: Bool
     private(set) var discontinuities = 0
     private var previousTime: Double?
@@ -45,11 +45,14 @@ struct JumpDetector {
         let start: Double
         var minimumLoad: Double
         var maximumRotation: Double
+        var nearFreeFallSeconds = 0.0
     }
     private struct Landing {
         let flight: Flight
         let end: Double
         var peak: Double
+        var supportedSeconds = 0.0
+        var lowSince: Double?
     }
 
     init(confirmsPhoneCatch: Bool = false) {
@@ -85,21 +88,35 @@ struct JumpDetector {
         if let previousTime, time <= previousTime || time - previousTime > 0.05 {
             breakContinuity()
         }
+        let interval = previousTime.map { time - $0 } ?? 0
         previousTime = time
 
         // Observe the return for 200 ms. This also prevents counting the
         // immediate rebound after catching a tossed phone as a separate jump.
         if var pending = landing {
-            if confirmsPhoneCatch && load < 0.65 {
-                guard time - pending.flight.start <= 3 else { clearEpisode(); return nil }
-                flight = pending.flight
-                landing = nil
-                return nil
+            if confirmsPhoneCatch {
+                if load >= 0.50 {
+                    pending.supportedSeconds += interval
+                    pending.lowSince = nil
+                } else {
+                    if pending.lowSince == nil { pending.lowSince = time }
+                    if let lowSince = pending.lowSince, time - lowSince >= 0.04, pending.supportedSeconds < 0.10 {
+                        guard time - pending.flight.start <= 3 else { clearEpisode(); return nil }
+                        flight = pending.flight
+                        landing = nil
+                        return nil
+                    }
+                }
             }
             if time - pending.end <= 0.20 { pending.peak = max(pending.peak, load) }
             if time - pending.end >= 0.20 {
                 clearEpisode()
                 guard pending.peak >= (confirmsPhoneCatch ? 1.25 : 1.5) else { return nil }
+                if confirmsPhoneCatch {
+                    let duration = pending.end - pending.flight.start
+                    guard pending.supportedSeconds >= 0.11,
+                          pending.flight.nearFreeFallSeconds >= duration * 0.60 else { return nil }
+                }
                 return JumpCandidate(
                     startSeconds: pending.flight.start,
                     endSeconds: pending.end,
@@ -115,14 +132,15 @@ struct JumpDetector {
         if var current = flight {
             let duration = time - current.start
             guard duration <= 3 else { clearEpisode(); return nil }
-            if load < 0.65 {
+            if load < (confirmsPhoneCatch ? 0.50 : 0.65) {
                 current.minimumLoad = min(current.minimumLoad, load)
                 current.maximumRotation = max(current.maximumRotation, spin)
+                if load < 0.30 { current.nearFreeFallSeconds += interval }
                 flight = current
             } else {
                 clearEpisode()
                 if duration >= 0.22 {
-                    landing = Landing(flight: current, end: time, peak: load)
+                    landing = Landing(flight: current, end: time, peak: load, supportedSeconds: interval)
                 }
             }
             return nil
@@ -147,7 +165,7 @@ struct JumpDetector {
 /// Detects a push, ascent, descent and braking as separate phases. A kite jump
 /// can stay loaded in the air, so it never needs a free-fall interval.
 struct RidingJumpDetector {
-    static let version = "ride-1"
+    static let version = "ride-2"
 
     struct Point {
         let time: Double
@@ -187,6 +205,8 @@ struct RidingJumpDetector {
     private(set) var discontinuities = 0
     private var previous: Motion?
     private var settledSince: Double?
+    private var preparation: [Motion] = []
+    private var preparedUntil = -Double.infinity
     private var arc: Arc?
 
     mutating func process(_ sample: MotionSample, calibration: MotionCalibration?, moving: Bool) -> Flight? {
@@ -201,7 +221,11 @@ struct RidingJumpDetector {
             return nil
         }
         let interval = previous.map { time - $0.time } ?? 0.01
-        if interval <= 0 || interval > 0.05 { breakContinuity() }
+        if interval <= 0 || interval > 0.05 {
+            breakContinuity()
+            previous = Motion(time: time, vertical: raw, load: load, spin: spin)
+            return nil
+        }
         let alpha = interval > 0 ? interval / (0.04 + interval) : 1
         let filtered = previous.map { $0.vertical + alpha * (raw - $0.vertical) } ?? raw
         let motion = Motion(time: time, vertical: filtered, load: load, spin: spin)
@@ -212,9 +236,21 @@ struct RidingJumpDetector {
             arc = nil
             return advance(current, from: last, to: motion)
         }
+        // A rider may be edging through chop, not standing still. A bounded
+        // one-second window with near-zero mean vertical acceleration supplies
+        // context without GPS. It never supplies height or proves takeoff.
+        preparation.append(motion)
+        preparation.removeAll { time - $0.time > 1.0 }
+        if let first = preparation.first, time - first.time >= 0.6 {
+            let mean = preparation.reduce(0.0) { $0 + $1.vertical } / Double(preparation.count)
+            let supported = preparation.filter { $0.load >= 0.5 && $0.load <= 2.5 }.count
+            if abs(mean) < 0.7, Double(supported) / Double(preparation.count) >= 0.85 {
+                preparedUntil = time + 0.35
+            }
+        }
         if abs(filtered) <= 1.0 {
             if settledSince == nil { settledSince = time }
-        } else if filtered >= 1.7, time - (settledSince ?? time) >= 0.25 {
+        } else if filtered >= 1.7, (time - (settledSince ?? time) >= 0.25 || time <= preparedUntil) {
             arc = Arc(began: last.time, launchSpeed: moving ? 1.15 : 1.35, minimumLoad: load, maximumRotation: spin)
             settledSince = nil
         } else if filtered < -1.0 {
@@ -228,6 +264,8 @@ struct RidingJumpDetector {
         previous = nil
         settledSince = nil
         arc = nil
+        preparation.removeAll()
+        preparedUntil = -Double.infinity
     }
 
     private mutating func advance(_ current: Arc, from last: Motion, to now: Motion) -> Flight? {
