@@ -42,10 +42,12 @@ struct SessionSummary: Codable, Identifiable {
     var jumpAnalysis: JumpAnalysis?
     var review: SessionReview?
     var markers: [SessionMarker]?
+    var setup: SessionSetup?
+    var gpsMetrics: RouteMetrics?
 
     func matches(_ query: String) -> Bool {
         let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        return query.isEmpty || [review?.title ?? "", review?.notes ?? ""]
+        return query.isEmpty || [review?.title ?? "", review?.notes ?? "", setup?.spot ?? "", setup?.kite ?? "", setup?.board ?? "", setup?.sport.title ?? ""]
             .contains { $0.localizedStandardContains(query) }
     }
 }
@@ -154,7 +156,7 @@ struct MotionSample: Codable {
     let verticalAccelerationMetersPerSecondSquared: Double
 }
 
-struct LocationSample: Encodable {
+struct LocationSample: Codable, Sendable {
     let timestamp: Date
     let latitude: Double
     let longitude: Double
@@ -214,6 +216,14 @@ final class SessionStore {
 
     func saveAnalysis(_ analysis: JumpAnalysis, for id: UUID) throws {
         try updateSummary(id) { $0.jumpAnalysis = analysis }
+    }
+
+    func saveSetup(_ setup: SessionSetup, for id: UUID) throws {
+        try updateSummary(id) { $0.setup = setup.cleaned }
+    }
+
+    func saveGPSMetrics(_ metrics: RouteMetrics, for id: UUID) throws {
+        try updateSummary(id) { $0.gpsMetrics = metrics }
     }
 
     func saveNotes(title: String, notes: String, for id: UUID) throws {

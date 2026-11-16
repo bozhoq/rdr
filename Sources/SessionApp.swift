@@ -23,7 +23,7 @@ private struct Tabs: View {
     @State private var selectedTab = Tab.record
 
     private enum Tab: Hashable {
-        case record, history
+        case record, history, progress
     }
 
     var body: some View {
@@ -42,6 +42,10 @@ private struct Tabs: View {
             }
             .tabItem { Label("История", systemImage: "clock.arrow.circlepath") }
             .tag(Tab.history)
+
+            NavigationStack { ProgressViewRider(recorder: recorder) }
+                .tabItem { Label("Прогресс", systemImage: "chart.bar.fill") }
+                .tag(Tab.progress)
         }
         .tint(RiderTheme.accent)
         .alert("Rider", isPresented: Binding(
@@ -120,6 +124,12 @@ private struct RecordingView: View {
                     .buttonStyle(.bordered)
                     .controlSize(.large)
                 } else {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Занятие и снаряжение").font(.headline)
+                        SetupFields(setup: $recorder.draftSetup)
+                        Text("Настройки запомнятся для следующего старта. Тесты на земле не входят в статистику катания.")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    }.lagoonCard()
                     locationControls
                         .lagoonCard()
                     Button(action: recorder.start) {
@@ -293,10 +303,11 @@ private struct HistoryView: View {
     }
 }
 
-private struct SessionDetail: View {
+struct SessionDetail: View {
     @ObservedObject var recorder: SessionRecorder
     let originalSession: SessionSummary
     @State private var editingNotes = false
+    @State private var editingSetup = false
 
     private var session: SessionSummary {
         recorder.history.first { $0.id == originalSession.id } ?? originalSession
@@ -322,6 +333,20 @@ private struct SessionDetail: View {
                     .disabled(recorder.analyzingSessionID == session.id)
             }
             .listRowBackground(RiderTheme.surface)
+            Section("Маршрут и условия") {
+                NavigationLink { RouteView(recorder: recorder, session: session) } label: {
+                    Label("Карта, скорость и GPX", systemImage: "map")
+                }
+                LabeledContent("Занятие", value: session.setup?.sport.title ?? "Не указано")
+                if let setup = session.setup {
+                    if !setup.spot.isEmpty { LabeledContent("Спот", value: setup.spot) }
+                    if !setup.kite.isEmpty { LabeledContent("Кайт / винг", value: setup.kite) }
+                    if !setup.board.isEmpty { LabeledContent("Доска / лыжи", value: setup.board) }
+                    LabeledContent("Где телефон", value: setup.placement.title)
+                }
+                Button("Изменить занятие и снаряжение") { editingSetup = true }
+                    .disabled(recorder.analyzingSessionID == session.id)
+            }.listRowBackground(RiderTheme.surface)
             Section {
                 if let analysis = session.jumpAnalysis {
                     LabeledContent("Найдено событий", value: analysis.candidates.count.formatted())
@@ -411,6 +436,9 @@ private struct SessionDetail: View {
                 recorder.saveNotes(title: title, notes: notes, for: session.id)
             }
         }
+        .sheet(isPresented: $editingSetup) {
+            SetupEditor(setup: session.setup ?? SessionSetup()) { recorder.saveSetup($0, for: session.id) }
+        }
     }
 }
 
@@ -490,7 +518,7 @@ private func reviewedCount(_ session: SessionSummary) -> Int {
     return analysis.candidates.filter { review.label(for: $0, version: analysis.detectorVersion) != .unreviewed }.count
 }
 
-private enum RiderTheme {
+enum RiderTheme {
     static let canvas = adaptive(light: 0xE1F7F4, dark: 0x092626)
     static let surface = adaptive(light: 0xF6FFFD, dark: 0x113837)
     static let border = adaptive(light: 0xB5E4DE, dark: 0x285554)
@@ -519,7 +547,7 @@ private enum RiderTheme {
     }
 }
 
-private extension View {
+extension View {
     func lagoonCard() -> some View {
         frame(maxWidth: .infinity, alignment: .leading)
             .padding(16)
@@ -536,8 +564,8 @@ private struct MetricsRows: View {
     let session: SessionSummary
 
     var body: some View {
-        LabeledContent("Дистанция по GPS", value: metric(session.distanceMeters.map { $0 / 1_000 }, unit: "км", digits: 2))
-        LabeledContent("Макс. скорость по GPS", value: metric(session.maxSpeedMetersPerSecond.map { $0 * 3.6 }, unit: "км/ч"))
+        LabeledContent("Дистанция по GPS", value: metric((session.gpsMetrics.map { $0.accepted > 0 ? $0.distanceMeters : nil } ?? session.distanceMeters).map { $0 / 1_000 }, unit: "км", digits: 2))
+        LabeledContent("Макс. скорость по GPS", value: metric((session.gpsMetrics != nil ? session.gpsMetrics?.maxSpeedMetersPerSecond : session.maxSpeedMetersPerSecond).map { $0 * 3.6 }, unit: "км/ч"))
     }
 }
 
@@ -566,12 +594,12 @@ private func eventTimeText(_ seconds: Double) -> String {
     return String(format: "%02d:%02d,%d", tenths / 600, tenths / 10 % 60, tenths % 10)
 }
 
-private func durationText(_ seconds: Double) -> String {
+func durationText(_ seconds: Double) -> String {
     let total = Int(seconds)
     return String(format: "%02d:%02d:%02d", total / 3600, total / 60 % 60, total % 60)
 }
 
-private func metric(_ value: Double?, unit: String, digits: Int = 1) -> String {
+func metric(_ value: Double?, unit: String, digits: Int = 1) -> String {
     guard let value else { return "—" }
     let number = value.formatted(.number.precision(.fractionLength(digits)).locale(Locale(identifier: "ru_RU")))
     return "\(number) \(unit)"

@@ -1,0 +1,257 @@
+import Charts
+import CoreTransferable
+import MapKit
+import SwiftUI
+import UniformTypeIdentifiers
+
+struct SetupFields: View {
+    @Binding var setup: SessionSetup
+    var body: some View {
+        Picker("Занятие", selection: $setup.sport) {
+            ForEach(SessionSport.allCases, id: \.self) { Text($0.title).tag($0) }
+        }
+        TextField("Спот или место", text: $setup.spot)
+            .onChange(of: setup.spot) { _, value in setup.spot = String(value.prefix(100)) }
+        TextField("Кайт / винг и размер, например 9 м²", text: $setup.kite)
+            .onChange(of: setup.kite) { _, value in setup.kite = String(value.prefix(100)) }
+        TextField("Доска / лыжи", text: $setup.board)
+            .onChange(of: setup.board) { _, value in setup.board = String(value.prefix(100)) }
+        Picker("Где телефон", selection: $setup.placement) {
+            ForEach(PhonePlacement.allCases, id: \.self) { Text($0.title).tag($0) }
+        }
+    }
+}
+
+struct SetupEditor: View {
+    @Environment(\.dismiss) private var dismiss
+    @State var setup: SessionSetup
+    @State private var failed = false
+    let onSave: (SessionSetup) -> Bool
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section { SetupFields(setup: $setup) }
+                footer: { Text("Тесты на земле и сессии без указанного занятия не входят в статистику катания. Положение телефона помогает разбирать реальные движения чехла.") }
+                .listRowBackground(RiderTheme.surface)
+                if failed { Text("Не удалось сохранить. Попробуйте ещё раз.").foregroundStyle(.red) }
+            }
+            .scrollContentBackground(.hidden)
+            .background(RiderTheme.canvas.ignoresSafeArea())
+            .navigationTitle("Занятие и снаряжение")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Отмена") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Сохранить") { if onSave(setup) { dismiss() } else { failed = true } }
+                }
+            }
+        }
+        .tint(RiderTheme.accent)
+        .interactiveDismissDisabled()
+    }
+}
+
+struct RouteView: View {
+    @ObservedObject var recorder: SessionRecorder
+    let session: SessionSummary
+    @State private var route: RouteAnalysis?
+    @State private var gpx: URL?
+    @State private var error: String?
+    @State private var selectedTime: Date?
+    @State private var retry = 0
+    @State private var mapSegments: [[RoutePoint]] = []
+    @State private var speedPoints: [RoutePoint] = []
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                if let route {
+                    if route.points.isEmpty {
+                        ContentUnavailableView("Маршрут не записан", systemImage: "location.slash", description: Text("В этой сессии нет точек GPS с достаточной точностью. Данные движения и события сохранены отдельно."))
+                    } else {
+                        routeMap(route)
+                        VStack(spacing: 12) {
+                            LabeledContent("Дистанция GPS", value: metric(route.metrics.distanceMeters / 1000, unit: "км", digits: 2))
+                            LabeledContent("Макс. скорость GPS", value: metric(route.metrics.maxSpeedMetersPerSecond.map { $0 * 3.6 }, unit: "км/ч"))
+                            LabeledContent("Точек принято / отброшено", value: "\(route.metrics.accepted) / \(route.metrics.rejected)")
+                            LabeledContent("Участков маршрута", value: route.metrics.segments.formatted())
+                        }.lagoonCard()
+                        speedChart(route)
+                        if let gpx {
+                            ShareLink(item: GPXFile(url: gpx), preview: SharePreview("Маршрут Rider")) {
+                                Label("Экспортировать GPX", systemImage: "square.and.arrow.up")
+                                    .frame(maxWidth: .infinity)
+                            }
+                            .buttonStyle(.borderedProminent).tint(RiderTheme.action).controlSize(.large)
+                            Text("GPX содержит координаты и время маршрута. В нём нет сырых данных движения и ваших заметок.")
+                                .font(.footnote).foregroundStyle(.secondary)
+                        }
+                    }
+                    Text("GPS даёт приблизительные значения. Неточные точки и очевидные скачки отбрасываются; разрывы не соединяются. Длинные маршруты и графики отображаются упрощённо; GPX сохраняет все принятые точки. Подложка карты может требовать интернет. Запись и разбор работают локально.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                    if route.malformedLines > 0 {
+                        Text("Повреждённых строк в логе: \(route.malformedLines). Данные по разные стороны разрыва не объединены.")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    }
+                } else if let error {
+                    ContentUnavailableView("Не удалось открыть маршрут", systemImage: "exclamationmark.circle", description: Text(error))
+                    Button("Повторить") { retry += 1 }.buttonStyle(.bordered)
+                } else {
+                    ProgressView("Читаем маршрут из записи…").frame(maxWidth: .infinity).padding(.top, 50)
+                }
+            }.padding(20)
+        }
+        .background(RiderTheme.canvas.ignoresSafeArea())
+        .navigationTitle("Маршрут и скорость")
+        .navigationBarTitleDisplayMode(.inline)
+        .task(id: retry) { await load() }
+    }
+
+    private func routeMap(_ route: RouteAnalysis) -> some View {
+        let segments = mapSegments
+        return Map {
+            ForEach(segments.indices, id: \.self) { index in
+                MapPolyline(coordinates: segments[index].map { CLLocationCoordinate2D(latitude: $0.sample.latitude, longitude: $0.sample.longitude) })
+                    .stroke(RiderTheme.action, lineWidth: 4)
+            }
+            if let first = route.points.first {
+                Marker("Старт", systemImage: "play.fill", coordinate: CLLocationCoordinate2D(latitude: first.sample.latitude, longitude: first.sample.longitude))
+                    .tint(RiderTheme.action)
+            }
+            if let last = route.points.last, route.points.count > 1 {
+                Marker("Финиш", systemImage: "flag.checkered", coordinate: CLLocationCoordinate2D(latitude: last.sample.latitude, longitude: last.sample.longitude))
+                    .tint(.indigo)
+            }
+        }
+        .mapStyle(.standard(elevation: .flat))
+        .mapControls { MapCompass(); MapScaleView() }
+        .frame(height: 300)
+        .clipShape(RoundedRectangle(cornerRadius: 20))
+        .accessibilityLabel("Маршрут сессии, старт и финиш")
+    }
+
+    private func speedChart(_ route: RouteAnalysis) -> some View {
+        let points = speedPoints
+        let selected = selectedTime.flatMap { time in
+            points.min { abs($0.sample.timestamp.timeIntervalSince(time)) < abs($1.sample.timestamp.timeIntervalSince(time)) }
+        }
+        return VStack(alignment: .leading, spacing: 12) {
+            Text("Скорость · км/ч").font(.headline)
+            if points.isEmpty {
+                Text("Нет надёжных измерений скорости.").foregroundStyle(.secondary)
+            } else {
+                Chart {
+                    ForEach(points) { point in
+                        LineMark(x: .value("Время", point.sample.timestamp), y: .value("км/ч", (point.speed ?? 0) * 3.6), series: .value("Участок", point.speedSegment))
+                            .foregroundStyle(RiderTheme.accent)
+                        PointMark(x: .value("Время", point.sample.timestamp), y: .value("км/ч", (point.speed ?? 0) * 3.6))
+                            .foregroundStyle(RiderTheme.accent).symbolSize(6)
+                    }
+                    if let selected {
+                        RuleMark(x: .value("Выбрано", selected.sample.timestamp)).foregroundStyle(.secondary)
+                    }
+                }
+                .chartXSelection(value: $selectedTime)
+                .chartYAxisLabel("км/ч")
+                .frame(height: 190)
+                if let selected {
+                    Text("\(selected.sample.timestamp.formatted(date: .omitted, time: .standard)) · \(metric(selected.speed.map { $0 * 3.6 }, unit: "км/ч"))")
+                        .font(.subheadline.monospacedDigit())
+                } else {
+                    Text("Проведите по графику, чтобы выбрать ближайшее измерение.").font(.footnote).foregroundStyle(.secondary)
+                }
+            }
+        }.lagoonCard()
+    }
+
+    @MainActor private func load() async {
+        error = nil
+        let url = recorder.exportURL(for: session.id)
+        let start = session.startedAt
+        let task = Task.detached(priority: .userInitiated) {
+            let result = try RouteReplay.analyze(url: url, startedAt: start)
+            try Task.checkCancellation()
+            let file = result.points.isEmpty ? nil : try GPXExport.write(result, name: "Rider \(start.formatted(date: .numeric, time: .shortened))")
+            return (result, file, result.displaySegments, result.displaySpeedPoints)
+        }
+        do {
+            let result = try await withTaskCancellationHandler(operation: { try await task.value }, onCancel: { task.cancel() })
+            try Task.checkCancellation()
+            route = result.0
+            gpx = result.1
+            mapSegments = result.2
+            speedPoints = result.3
+            recorder.saveGPSMetrics(result.0.metrics, for: session.id)
+        } catch is CancellationError { }
+        catch { self.error = error.localizedDescription }
+    }
+}
+
+private struct GPXFile: Transferable {
+    let url: URL
+    static var transferRepresentation: some TransferRepresentation {
+        FileRepresentation(exportedContentType: UTType(filenameExtension: "gpx") ?? .xml) { value in
+            SentTransferredFile(value.url)
+        }
+    }
+}
+
+struct ProgressViewRider: View {
+    @ObservedObject var recorder: SessionRecorder
+    @State private var recent = true
+    private var progress: RiderProgress {
+        RiderProgress(history: recorder.history, since: recent ? Calendar.current.date(byAdding: .day, value: -30, to: Date()) : nil)
+    }
+
+    var body: some View {
+        let data = progress
+        List {
+            Section {
+                Picker("Период", selection: $recent) {
+                    Text("30 дней").tag(true)
+                    Text("Всё время").tag(false)
+                }.pickerStyle(.segmented)
+            }.listRowBackground(RiderTheme.surface)
+            Section("Катание") {
+                LabeledContent("Сессий", value: data.sessions.count.formatted())
+                LabeledContent("Время", value: durationText(data.duration))
+                LabeledContent("Дистанция GPS", value: metric(data.distance / 1000, unit: "км", digits: 2))
+                LabeledContent("Макс. скорость GPS", value: metric(data.maximumSpeed.map { $0 * 3.6 }, unit: "км/ч"))
+                LabeledContent("Прыжков отмечено вами", value: data.confirmedJumps.formatted())
+            }.listRowBackground(RiderTheme.surface)
+            if data.sessions.isEmpty {
+                Section {
+                    Text("Здесь появится статистика кайтсёрфинга, сноукайтинга и винга. Укажите занятие перед записью или в сводке старой сессии.")
+                }.listRowBackground(RiderTheme.surface)
+            } else {
+                Section("Снаряжение · время") {
+                    let groups = Dictionary(grouping: data.sessions, by: { session in
+                        let kite = session.setup?.kite ?? ""
+                        return kite.isEmpty ? "Без указанного кайта / винга" : kite
+                    })
+                    ForEach(groups.keys.sorted(), id: \.self) { gear in
+                        LabeledContent(gear, value: durationText(groups[gear, default: []].reduce(0) { $0 + $1.durationSeconds }))
+                    }
+                }.listRowBackground(RiderTheme.surface)
+                Section("Последние сессии катания") {
+                    ForEach(Array(data.sessions.prefix(10))) { session in
+                        NavigationLink { SessionDetail(recorder: recorder, originalSession: session) } label: {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(session.setup?.spot.isEmpty == false ? session.setup!.spot : session.setup?.sport.title ?? "Сессия")
+                                Text(session.startedAt, format: .dateTime.day().month().year()).font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }.listRowBackground(RiderTheme.surface)
+            }
+            Section {
+                Text("Тесты на земле и записи без указанного занятия исключены. Прерванные сессии учитываются по сохранённой части. Прыжки здесь — ваши отметки, а не подтверждение точности детектора. Старые GPS-итоги уточняются после открытия маршрута.")
+                    .font(.footnote).foregroundStyle(.secondary)
+            }.listRowBackground(RiderTheme.surface)
+        }
+        .scrollContentBackground(.hidden)
+        .background(RiderTheme.canvas.ignoresSafeArea())
+        .navigationTitle("Прогресс")
+    }
+}

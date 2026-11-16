@@ -11,6 +11,7 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
     @Published private(set) var motionIsRecent = false
     @Published var errorMessage: String?
     @Published private(set) var analyzingSessionID: UUID?
+    @Published var draftSetup = SessionSetup(sport: .groundTest)
 
     private let store = SessionStore()
     private let motion = CMMotionManager()
@@ -24,7 +25,7 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
     private var lastMotionReceivedAt: ContinuousClock.Instant?
     private var motionTimeOrigin: TimeInterval?
     private var lastLocationTimestamp: Date?
-    private var distanceAnchor: CLLocation?
+    private var routeFilter = RouteFilter()
     private var jumpDetector = JumpDetector()
     private var lastMarkerAt: ContinuousClock.Instant?
 
@@ -40,6 +41,8 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
         location.distanceFilter = kCLDistanceFilterNone
         location.pausesLocationUpdatesAutomatically = false
         location.showsBackgroundLocationIndicator = true
+        if let data = UserDefaults.standard.data(forKey: "rider.sessionSetup"),
+           let setup = try? JSONDecoder().decode(SessionSetup.self, from: data) { draftSetup = setup }
         reloadHistory()
     }
 
@@ -55,7 +58,9 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
             gpsEnabledAtStart: locationAuthorized,
             batteryAtStartPercent: batteryPercent,
             jumpAnalysis: JumpAnalysis(),
-            markers: []
+            markers: [],
+            setup: draftSetup.cleaned,
+            gpsMetrics: RouteMetrics()
         )
         do {
             let newLog = try store.makeLog(for: session)
@@ -80,7 +85,8 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
         lastMotionReceivedAt = nil
         motionTimeOrigin = nil
         lastLocationTimestamp = nil
-        distanceAnchor = nil
+        routeFilter = RouteFilter()
+        if let data = try? JSONEncoder().encode(draftSetup.cleaned) { UserDefaults.standard.set(data, forKey: "rider.sessionSetup") }
         jumpDetector = JumpDetector()
         lastMarkerAt = nil
         motionIsRecent = false
@@ -169,6 +175,18 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
         store.logURL(for: id)
     }
 
+    func saveSetup(_ setup: SessionSetup, for id: UUID) -> Bool {
+        guard summary?.id != id, analyzingSessionID != id else { return false }
+        do { try store.saveSetup(setup, for: id); reloadHistory(); return true }
+        catch { errorMessage = "Не удалось сохранить снаряжение. \(error.localizedDescription)"; return false }
+    }
+
+    func saveGPSMetrics(_ metrics: RouteMetrics, for id: UUID) {
+        guard summary?.id != id else { return }
+        do { try store.saveGPSMetrics(metrics, for: id); reloadHistory() }
+        catch { errorMessage = "Маршрут открыт, но GPS-итоги не сохранены. \(error.localizedDescription)" }
+    }
+
     func delete(_ id: UUID) {
         guard summary?.id != id, analyzingSessionID != id else { return }
         do {
@@ -201,7 +219,7 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
         if summary?.gpsEnabledAtStart == true && !locationAuthorized {
             manager.stopUpdatingLocation()
             manager.allowsBackgroundLocationUpdates = false
-            distanceAnchor = nil
+            routeFilter.breakContinuity()
             recordEvent("locationPermissionLost")
         }
     }
@@ -277,33 +295,15 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
             try log.append("location", sample)
             lastLocationTimestamp = point.timestamp
             session.locationCount += 1
-            if point.horizontalAccuracy <= 30 {
-                if let speed = sample.speedMetersPerSecond,
-                   let accuracy = sample.speedAccuracyMetersPerSecond, accuracy <= 3 {
-                    session.maxSpeedMetersPerSecond = max(session.maxSpeedMetersPerSecond ?? 0, speed)
-                }
-                updateDistance(&session, with: point)
-            } else {
-                distanceAnchor = nil
-            }
+            _ = routeFilter.accept(sample, notBefore: session.startedAt)
+            session.gpsMetrics = routeFilter.metrics
+            session.distanceMeters = routeFilter.metrics.accepted > 0 ? routeFilter.metrics.distanceMeters : nil
+            session.maxSpeedMetersPerSecond = routeFilter.metrics.maxSpeedMetersPerSecond
             summary = session
             checkpointIfDue()
         } catch {
             failStorage(error)
         }
-    }
-
-    private func updateDistance(_ session: inout SessionSummary, with point: CLLocation) {
-        guard let anchor = distanceAnchor, point.timestamp.timeIntervalSince(anchor.timestamp) <= 15 else {
-            distanceAnchor = point
-            return
-        }
-        let meters = point.distance(from: anchor)
-        guard meters.isFinite else { return }
-        if session.distanceMeters == nil { session.distanceMeters = 0 }
-        guard meters >= 5 else { return }
-        session.distanceMeters = (session.distanceMeters ?? 0) + meters
-        distanceAnchor = point
     }
 
     private func recordEvent(_ name: String, detail: String? = nil) {
@@ -314,6 +314,7 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
                 batteryPercent: batteryPercent,
                 detail: detail
             ))
+            routeFilter.breakContinuity()
         } catch {
             failStorage(error)
         }
