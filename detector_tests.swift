@@ -93,6 +93,28 @@ enum DetectorTests {
         check(afterCatch.count == 1 && abs(afterCatch[0].unloadingSeconds - 1.28) < 1e-9 &&
               abs((LiveJumpEstimate.phoneToss(afterCatch[0])?.heightMeters ?? 0) - 2.0084) < 0.001,
               "Use release to first real catch sample, excluding confirmation latency")
+        var distortedToss = JumpDetector(confirmsPhoneCatch: true)
+        let partialUnloading = (0..<330).compactMap { i -> JumpCandidate? in
+            let load: Double
+            switch i {
+            case 100..<190: load = 0.1
+            case 190..<281: load = 0.45
+            case 281: load = 3
+            default: load = 1
+            }
+            return distortedToss.process(sample(Double(i) / 100, load))
+        }
+        check(partialUnloading.isEmpty, "A short toss followed by a long partial unloading must not be reported as a four-meter toss")
+        var heldCatch = JumpDetector(confirmsPhoneCatch: true)
+        let briefCatchDip = (0..<240).compactMap { i -> JumpCandidate? in
+            let load: Double
+            if (60..<150).contains(i) || i == 158 { load = 0.1 }
+            else if i == 150 { load = 2 }
+            else { load = 1 }
+            return heldCatch.process(sample(Double(i) / 100, load))
+        }
+        check(briefCatchDip.count == 1 && abs(briefCatchDip[0].endSeconds - 1.50) < 1e-9,
+              "One noisy sample during a catch does not reopen a finished toss")
 
         let ridingTrace = (0..<480).map { i -> MotionSample in
             let vertical: Double
@@ -110,6 +132,35 @@ enum DetectorTests {
         let ridingJumps = ridingTrace.dropFirst(342).compactMap { riding.process($0, calibration: nil, moving: false) }
         check(ridingJumps.count == 1 && ridingJumps[0].event.minimumLoadG > 0.65 &&
               (1.5...2.3).contains(ridingJumps[0].event.unloadingSeconds), "Detect a supported riding jump without GPS or free fall")
+        // A smooth supported indoor lift has no free-fall interval. Analytic
+        // position H*sin²(pi*t/T) returns to its initial height and velocity.
+        for duration in [2.0, 4.0, 6.0] {
+            var hand = HandSimulationDetector()
+            var results: [(JumpCandidate, Double)] = []
+            for i in 0...Int((duration + 2) * 100) {
+                let time = Double(i) / 100
+                let phase = time - 1
+                let acceleration = phase >= 0 && phase < duration
+                    ? 2 * 1.2 * Double.pi * Double.pi / (duration * duration) * cos(2 * Double.pi * phase / duration) : 0
+                if let event = hand.processMotion(sample(time, 1 + acceleration / 9.80665), calibration: nil,
+                                                  allowInertialFallback: true) { results.append(event) }
+            }
+            check(results.count == 1 && abs(results[0].1 - 1.2) < 0.15,
+                  "Supported still-to-still lift has an approximate fallback at several speeds")
+        }
+        var noFallback = HandSimulationDetector()
+        check(ridingTrace.compactMap { noFallback.processMotion($0, calibration: nil, allowInertialFallback: false) }.isEmpty,
+              "Pressure mode never silently substitutes an inertial height")
+        var rejectHandToss = HandSimulationDetector()
+        check(standard.compactMap { rejectHandToss.processMotion($0, calibration: nil, allowInertialFallback: true) }.isEmpty,
+              "Free flight is not a supported hand lift")
+        var choppyRide = RidingJumpDetector()
+        let chop = ridingTrace.enumerated().map { index, original in
+            index < 100 ? sample(Double(index) / 100, 1 + 2.8 * sin(Double(index) * 0.19) / 9.80665) : original
+        }
+        check(chop.compactMap { choppyRide.process($0, calibration: nil, moving: false) }.count == 1,
+              "Supported chop provides preparation context without GPS")
+
         var ridingGap = RidingJumpDetector()
         let brokenRide = ridingTrace.enumerated().filter { !(230..<250).contains($0.offset) }.compactMap {
             ridingGap.process($0.element, calibration: nil, moving: true)

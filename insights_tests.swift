@@ -59,6 +59,32 @@ import FoundationXML
         check(slowSimulation.consume(altitude(firstNearFloor, 0.20)) == nil, "First reading near floor does not end the test")
         let slowResult = slowSimulation.consume(altitude(firstNearFloor + 1, 0.23))
         check(abs((slowResult?.1 ?? 0) - 2.49) < 1e-9, "A slow ceiling test preserves the original baseline and its peak")
+        var offsetSimulation = HandSimulationDetector()
+        let offsetReturn = [0.0, 0.01, 0.0, 0.5, 1.4, 2.5, 2.39, 1.5, 0.8, 0.47, 0.44, 0.42]
+        let offsetLifts = offsetReturn.enumerated().compactMap { index, meters in
+            offsetSimulation.consume(altitude(Double(index), meters))
+        }
+        check(offsetLifts.count == 1 && abs(offsetLifts[0].1 - 2.497) < 0.01,
+              "A long lift with a stable shifted return can still be measured")
+
+        var walkingSimulation = HandSimulationDetector()
+        let walkingLift = [0.0, 0.12, -0.08, 0.05, 0.45, 1.3, 2.5, 2.4, 1.2, 0.10, 0.16]
+        let walkingResults = walkingLift.enumerated().compactMap { index, height in
+            walkingSimulation.consume(altitude(Double(index), height))
+        }
+        check(walkingResults.count == 1 && abs(walkingResults[0].1 - 2.5) < 0.15,
+              "Walking baseline noise still permits a ceiling lift and settled return")
+        var incompleteLift = HandSimulationDetector()
+        check([0.0, 0.0, 0.0, 0.5, 1.5, 2.5, 2.5, 2.5].enumerated().compactMap { index, height in
+            incompleteLift.consume(altitude(Double(index), height))
+        }.isEmpty, "A high hold is not a completed lift before descent")
+        var loweredBaseline = HandSimulationDetector()
+        let twoLevels = [1.0, 1.0, 1.0, 0.2, 0.0, 0.0, 0.0, 0.6, 2.5, 1.2, 0.0, 0.0]
+        let floorResults = twoLevels.enumerated().compactMap { index, height in
+            loweredBaseline.consume(altitude(Double(index), height))
+        }
+        check(floorResults.count == 1 && abs(floorResults[0].1 - 2.5) < 0.05,
+              "Putting the phone on the floor reacquires its baseline before a lift")
 
         let airborne = JumpCandidate(startSeconds: 3, endSeconds: 5, minimumLoadG: 0.7,
                                      returnPeakG: 2.1, maximumRotationRadiansPerSecond: 0.5)
@@ -88,6 +114,18 @@ import FoundationXML
         check(SessionSetup(sport: .windsurf, kiteStyle: .bigAir).cleaned.kiteStyle == nil &&
               SessionSetup(sport: .kite, kiteStyle: .wakestyle).activityTitle.contains("Вейкстайл"),
               "Kite style is scoped to compatible activities")
+        check(SessionSetup.kiteAreas.count == 29 && SessionSetup.kiteAreas.first == 3 && SessionSetup.kiteAreas.last == 17,
+              "Kite size choices span 3 to 17 m², inclusive")
+        var equipment = SessionSetup(sport: .kite)
+        equipment.selectKite("CORE XR8", area: 9.5)
+        equipment.selectBoard(BoardSelection(brand: "Duotone", model: "Jaime SLS", size: "136 × 41 см")!)
+        let restoredGear = try JSONDecoder().decode(SessionSetup.self, from: JSONEncoder().encode(equipment.cleaned))
+        check(restoredGear.kite == "CORE XR8" && restoredGear.kiteAreaSquareMeters == 9.5 &&
+              restoredGear.boardDetails == equipment.boardDetails && restoredGear.boardTitle.contains("136 × 41 см"),
+              "Kite area and board brand, model, size survive saving")
+        let duotoneBoards = BoardCatalog.brands.first { $0.matches("дуотон") }?.models ?? []
+        let jaimeSLS = duotoneBoards.first { $0.name == "Jaime SLS" }
+        check(jaimeSLS?.sizes.contains("136 × 41 см") == true, "Search by Cyrillic and keep the board model's verified dimensions")
 
         let spot = RiderSpot(name: "  Тестовый спот  ", latitude: "55,75", longitude: "37.62")!
         check(spot.name == "Тестовый спот" && spot.latitude == 55.75 && spot.longitude == 37.62, "Parse decimal commas in spot coordinates")
@@ -101,6 +139,21 @@ import FoundationXML
         check(setupWithSpot.spotID == nil && spot.matches(setupWithSpot), "Legacy text labels and saved spots can match")
         let yandex = URLComponents(url: spot.yandexURL!, resolvingAgainstBaseURL: false)?.queryItems
         check(yandex?.first(where: { $0.name == "ll" })?.value == "37.62,55.75", "Yandex longitude and latitude are in the right order")
+        let fallback = URLComponents(url: spot.routeWebURL!, resolvingAgainstBaseURL: false)?.queryItems
+        check(fallback?.first(where: { $0.name == "rtext" })?.value == "~55.75,37.62", "Route leaves origin to current location")
+        let appRoute = URLComponents(url: spot.routeAppURL!, resolvingAgainstBaseURL: false)
+        check(appRoute?.scheme == "yandexmaps" && appRoute?.queryItems?.first(where: { $0.name == "lat_to" })?.value == "55.75",
+              "Pass coordinates to the native Maps route")
+        let nearby = RiderSpot(name: "Другой спот", latitude: "55.75004", longitude: "37.62001")!
+        check(StarterSpots.merge(saved: [nearby], catalogue: [spot]) == [nearby] &&
+              StarterSpots.merge(saved: [renamed], catalogue: [spot]) == [renamed],
+              "The starter catalogue preserves existing saved spots and IDs")
+        let entry: [[String: Any]] = [["id": spot.id.uuidString, "name": spot.name,
+                                      "latitude": spot.latitude, "longitude": spot.longitude,
+                                      "mapLink": "https://yandex.ru/maps/-/test"]]
+        let starter = StarterSpots.decode(entry).first
+        check(starter?.id == spot.id && starter?.yandexURL?.absoluteString == "https://yandex.ru/maps/-/test",
+              "Decode the bundled starter catalogue and original map link")
         let fixture = #"{"timezone":"Europe/Moscow","hourly":{"time":[1699980000,1700000000,1700003600,1700007200],"wind_speed_10m":[8,12,null,17],"wind_gusts_10m":[10,19,null],"wind_direction_10m":[0,90,null,225],"temperature_2m":[2,-3,null,0]}}"#
         let forecast = try JSONDecoder().decode(SpotForecast.self, from: Data(fixture.utf8))
         let hours = forecast.hours(near: origin)
