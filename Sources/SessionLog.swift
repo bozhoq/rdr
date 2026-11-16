@@ -22,6 +22,45 @@ struct MotionMetrics: Codable {
     }
 }
 
+struct AltitudeSample: Codable {
+    let elapsedSinceFirstSampleSeconds: Double
+    let pressureKilopascals: Double
+    let relativeAltitudeMeters: Double
+}
+
+struct AltitudeMetrics: Codable {
+    let supported: Bool
+    var stoppedWithError = false
+    private(set) var count = 0
+    private(set) var lastElapsedSeconds: Double?
+    private(set) var longestIntervalSeconds: Double?
+    private(set) var latestMeters: Double?
+    private(set) var lowestMeters: Double?
+    private(set) var highestMeters: Double?
+
+    init(supported: Bool) {
+        self.supported = supported
+    }
+
+    mutating func add(_ sample: AltitudeSample) -> Bool {
+        let time = sample.elapsedSinceFirstSampleSeconds
+        let meters = sample.relativeAltitudeMeters
+        guard supported, !stoppedWithError, time.isFinite, time >= 0,
+              sample.pressureKilopascals.isFinite, sample.pressureKilopascals > 0,
+              meters.isFinite else { return false }
+        if let lastElapsedSeconds {
+            guard time > lastElapsedSeconds else { return false }
+            longestIntervalSeconds = max(longestIntervalSeconds ?? 0, time - lastElapsedSeconds)
+        }
+        lastElapsedSeconds = time
+        latestMeters = meters
+        lowestMeters = min(lowestMeters ?? meters, meters)
+        highestMeters = max(highestMeters ?? meters, meters)
+        count += 1
+        return true
+    }
+}
+
 struct SessionSummary: Codable, Identifiable {
     enum Status: String, Codable {
         case recording, finished, interrupted
@@ -44,6 +83,7 @@ struct SessionSummary: Codable, Identifiable {
     var markers: [SessionMarker]?
     var setup: SessionSetup?
     var gpsMetrics: RouteMetrics?
+    var altitude: AltitudeMetrics?
 
     func matches(_ query: String) -> Bool {
         let query = query.trimmingCharacters(in: .whitespacesAndNewlines)

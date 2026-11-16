@@ -15,6 +15,7 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
 
     private let store = SessionStore()
     private let motion = CMMotionManager()
+    private let altimeter = CMAltimeter()
     private let location = CLLocationManager()
     private var log: SessionLog?
     private var summary: SessionSummary?
@@ -66,7 +67,8 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
             jumpAnalysis: JumpAnalysis(),
             markers: [],
             setup: draftSetup.cleaned,
-            gpsMetrics: RouteMetrics()
+            gpsMetrics: RouteMetrics(),
+            altitude: AltitudeMetrics(supported: CMAltimeter.isRelativeAltitudeAvailable())
         )
         do {
             let newLog = try store.makeLog(for: session)
@@ -249,6 +251,7 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
 
     private func recordMotion(_ motion: CMDeviceMotion) {
         guard var session = summary, let log, motion.timestamp.isFinite else { return }
+        let firstSample = motionTimeOrigin == nil
         let origin = motionTimeOrigin ?? motion.timestamp
         let elapsed = motion.timestamp - origin
         guard elapsed > (session.motion.lastElapsedSeconds ?? -.infinity) else { return }
@@ -277,9 +280,38 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
             summary = session
             motionTimeOrigin = origin
             lastMotionReceivedAt = clock.now
+            if firstSample, session.altitude?.supported == true {
+                startAltitude(sessionID: session.id, origin: origin)
+            }
             checkpointIfDue()
         } catch {
             failStorage(error)
+        }
+    }
+
+    private func startAltitude(sessionID: UUID, origin: TimeInterval) {
+        altimeter.startRelativeAltitudeUpdates(to: .main) { [weak self] data, error in
+            guard let self, var session = self.summary, session.id == sessionID,
+                  var altitude = session.altitude, !altitude.stoppedWithError, let log = self.log else { return }
+            do {
+                if let error {
+                    self.altimeter.stopRelativeAltitudeUpdates()
+                    altitude.stoppedWithError = true
+                    try log.append("event", SessionEvent(name: "altitudeError", batteryPercent: self.batteryPercent, detail: error.localizedDescription))
+                } else if let data {
+                    // Both Core Motion streams use seconds since boot.
+                    let sample = AltitudeSample(elapsedSinceFirstSampleSeconds: data.timestamp - origin,
+                                                pressureKilopascals: data.pressure.doubleValue,
+                                                relativeAltitudeMeters: data.relativeAltitude.doubleValue)
+                    guard altitude.add(sample) else { return }
+                    try log.append("altitude", sample)
+                } else { return }
+                session.altitude = altitude
+                self.summary = session
+                self.checkpointIfDue(force: error != nil)
+            } catch {
+                self.failStorage(error)
+            }
         }
     }
 
@@ -367,6 +399,7 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
     private func stopSensors() {
         summary = nil
         motion.stopDeviceMotionUpdates()
+        altimeter.stopRelativeAltitudeUpdates()
         location.stopUpdatingLocation()
         location.allowsBackgroundLocationUpdates = false
         timer?.invalidate()

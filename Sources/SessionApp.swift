@@ -75,6 +75,9 @@ private struct RecordingView: View {
                         LabeledContent("Измерений движения", value: session.motion.count.formatted())
                         LabeledContent("Точек GPS", value: session.locationCount.formatted())
                         MetricsRows(session: session)
+                        if let altitude = session.altitude {
+                            AltitudeRows(metrics: altitude, isRecording: true)
+                        }
                     }
                     .lagoonCard()
 
@@ -421,6 +424,14 @@ struct SessionDetail: View {
                 }
             }
             .listRowBackground(RiderTheme.surface)
+            if let altitude = session.altitude {
+                Section("Барометр") {
+                    AltitudeRows(metrics: altitude, isRecording: false)
+                    Text("Высота телефона относительно первого показания барометра в этой записи.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+                .listRowBackground(RiderTheme.surface)
+            }
             Section {
                 NavigationLink { SessionCardPreview(session: session) } label: {
                     Label("Карточка сессии для отправки", systemImage: "photo")
@@ -430,7 +441,7 @@ struct SessionDetail: View {
                         .foregroundStyle(RiderTheme.accent)
                 }
             } footer: {
-                Text("Найденные события, ваши отметки, название и заметки. GPS-координаты автоматически не добавляются.")
+                Text("Сводка, найденные события, ваши отметки и заметки. Отдельные замеры барометра есть в исходном логе.")
             }
             .listRowBackground(RiderTheme.surface)
             Section {
@@ -457,6 +468,33 @@ struct SessionDetail: View {
         }
         .sheet(isPresented: $editingSetup) {
             SetupEditor(setup: session.setup ?? SessionSetup(), recent: recorder.history) { recorder.saveSetup($0, for: session.id) }
+        }
+    }
+}
+
+private struct AltitudeRows: View {
+    let metrics: AltitudeMetrics
+    let isRecording: Bool
+
+    var body: some View {
+        if !metrics.supported {
+            LabeledContent("Барометр", value: "Недоступен")
+        } else {
+            LabeledContent("Замеров барометра", value: metrics.count.formatted())
+            if metrics.stoppedWithError {
+                Text("Запись барометра прервалась. Проверьте доступ к «Движению и фитнесу» в настройках iPhone.")
+                    .font(.footnote).foregroundStyle(.secondary)
+            } else if isRecording && metrics.count == 0 {
+                Text("Ждём первое показание барометра").font(.footnote).foregroundStyle(.secondary)
+            }
+            if metrics.count > 0 {
+                LabeledContent(isRecording && !metrics.stoppedWithError ? "Высота по барометру" : "Последняя высота по барометру",
+                               value: metric(metrics.latestMeters, unit: "м"))
+                if !isRecording {
+                    LabeledContent("Минимум / максимум", value: "\(metric(metrics.lowestMeters, unit: "м")) / \(metric(metrics.highestMeters, unit: "м"))")
+                    LabeledContent("Наибольший интервал", value: metric(metrics.longestIntervalSeconds, unit: "с", digits: 2))
+                }
+            }
         }
     }
 }
