@@ -45,6 +45,20 @@ enum DetectorTests {
         let restoredAltitude = try JSONDecoder().decode(AltitudeMetrics.self, from: altitudeData)
         check(restoredAltitude.count == 3 && restoredAltitude.lowestMeters == -0.2 && restoredAltitude.highestMeters == 3.4 && restoredAltitude.longestIntervalSeconds == 2, "Restore barometer range and interval from checkpoint")
 
+        let still = (0...500).map { sample(Double($0) / 100, 1.02) }
+        let calibration = try MotionCalibration.measure(still)
+        let original = still[0].verticalAccelerationMetersPerSecondSquared
+        check(abs(calibration.frequencyHz - 100) < 0.001 && abs(calibration.correctedVertical(original, at: 6)) < 1e-9, "Calibrate a stable nonzero baseline")
+        check(calibration.correctedVertical(original, at: 5) == original, "Calibration respects the sample boundary")
+        var shaking = still
+        shaking[100] = sample(1, 1.02, angle: 0.5)
+        do { _ = try MotionCalibration.measure(shaking); check(false, "Motion must invalidate calibration") }
+        catch MotionCalibration.Failure.movement { check(true, "Reject rotation during the baseline") }
+        var calibrationGap = still
+        calibrationGap.removeSubrange(100..<110)
+        do { _ = try MotionCalibration.measure(calibrationGap); check(false, "A clock gap must invalidate calibration") }
+        catch MotionCalibration.Failure.timing { check(true, "Reject gaps even when average sensor rate is high") }
+
         let standard = trace()
         let detected = run(standard)
         check(detected.count == 1, "Expected one unloading and return")
