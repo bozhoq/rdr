@@ -263,6 +263,10 @@ private struct HistoryView: View {
                             Text(durationText(session.durationSeconds))
                                 .font(.subheadline.monospacedDigit())
                                 .foregroundStyle(RiderTheme.accent)
+                            if let setup = session.setup {
+                                Text([setup.sport.title, setup.spot].filter { !$0.isEmpty }.joined(separator: " · "))
+                                    .font(.caption).foregroundStyle(RiderTheme.accent).lineLimit(2)
+                            }
                             if let analysis = session.jumpAnalysis {
                                 Text("Событий: \(analysis.candidates.count) · Отмечено: \(reviewedCount(session))")
                                     .font(.caption)
@@ -292,7 +296,7 @@ private struct HistoryView: View {
         .toolbarBackground(RiderTheme.canvas, for: .navigationBar, .tabBar)
         .toolbarBackground(.visible, for: .navigationBar, .tabBar)
         .navigationTitle("История")
-        .searchable(text: $search, prompt: "Название или заметки")
+        .searchable(text: $search, prompt: "Название, спот, снаряжение, заметки")
         .confirmationDialog("Удалить сессию и её лог?", isPresented: Binding(
             get: { pendingDeletion != nil },
             set: { if !$0 { pendingDeletion = nil } }
