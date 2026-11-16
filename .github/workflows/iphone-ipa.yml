@@ -23,6 +23,12 @@ jobs:
           build/detector-tests build/parity.json
           swiftc Sources/SessionLog.swift Sources/JumpDetector.swift Sources/SessionInsights.swift insights_tests.swift -o build/insights-tests
           build/insights-tests
+          swiftc Sources/SessionLog.swift Sources/JumpDetector.swift Sources/SessionInsights.swift Sources/EventReview.swift event_review_tests.swift -o build/event-tests
+          build/event-tests
+      - name: Render the session card preview
+        run: |
+          swiftc -target x86_64-apple-macos13.0 Sources/SessionLog.swift Sources/JumpDetector.swift Sources/SessionInsights.swift Sources/EventReview.swift Sources/CardArtwork.swift card_preview.swift -o build/card-preview
+          build/card-preview
       - name: Build for a physical iPhone
         run: |
           xcodebuild -version
@@ -40,9 +46,12 @@ jobs:
           cd build/package
           ditto -c -k --keepParent Payload KiteSessions.ipa
           unzip -Z1 KiteSessions.ipa | grep -Fx 'Payload/KiteSessions.app/Info.plist'
+          cp ../Rider-card-preview.png Rider-card-preview.png
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
           name: KiteSessions-iPhone
-          path: build/package/KiteSessions.ipa
+          path: |
+            build/package/KiteSessions.ipa
+            build/package/Rider-card-preview.png
           if-no-files-found: error
