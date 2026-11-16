@@ -643,7 +643,12 @@ struct HandSimulationDetector {
                 inertial = nil; stillSince = nil
                 return nil
             }
-            if still && track.descended {
+            // Near-zero acceleration also occurs at peak ascent/descent speed.
+            // Start the dwell only after velocity and position return close to
+            // their initial values; otherwise a slow descent is discarded early.
+            let closed = abs(track.velocity) <= 0.18 &&
+                abs(track.height) <= min(0.25, max(0.10, track.peak * 0.12))
+            if still && track.descended && closed {
                 if track.settledSince == nil { track.settledSince = time }
                 if time - (track.settledSince ?? time) >= 0.45 {
                     inertial = nil; stillSince = time
