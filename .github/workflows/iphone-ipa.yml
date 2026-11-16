@@ -8,9 +8,9 @@ permissions:
 
 jobs:
   build:
-    # Use the Intel pool while GitHub's macOS arm64 pool has long queues.
+    # Standard Intel runner; avoids the currently delayed macOS 26 pool.
     # Xcode still cross-compiles the application for a physical arm64 iPhone.
-    runs-on: macos-26-intel
+    runs-on: macos-15-intel
     timeout-minutes: 15
     steps:
       - name: Check out source
