@@ -71,15 +71,23 @@ private struct RecordingView: View {
             VStack(alignment: .leading, spacing: 20) {
                 recordingPanel
                 if let session = recorder.live {
-                    VStack(spacing: 12) {
-                        LabeledContent("Измерений движения", value: session.motion.count.formatted())
-                        LabeledContent("Точек GPS", value: session.locationCount.formatted())
-                        MetricsRows(session: session)
-                        if let altitude = session.altitude {
-                            AltitudeRows(metrics: altitude, isRecording: true)
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Калибровка телефона").font(.headline)
+                        if let calibration = session.motionCalibration {
+                            Label("Калибровка готова", systemImage: "checkmark.circle")
+                            DisclosureGroup("Подробнее") { CalibrationRows(calibration: calibration) }
+                        } else if recorder.isCalibrating {
+                            ProgressView("Замрите на 5 секунд")
+                        } else {
+                            Text("Закрепите телефон как для катания и замрите. Rider проверит датчики и снимет нулевой уровень вертикального ускорения.")
+                                .font(.footnote).foregroundStyle(.secondary)
+                            Button("Калибровать телефон", action: recorder.calibrateMotion)
+                                .disabled(!recorder.motionIsRecent)
+                            if let message = recorder.calibrationMessage {
+                                Text(message).font(.footnote).foregroundStyle(.secondary)
+                            }
                         }
-                    }
-                    .lagoonCard()
+                    }.lagoonCard()
 
                     VStack(alignment: .leading, spacing: 10) {
                         Label("Возможные прыжки", systemImage: "figure.jumprope")
@@ -92,6 +100,17 @@ private struct RecordingView: View {
                             .foregroundStyle(.secondary)
                     }
                     .lagoonCard()
+
+                    DisclosureGroup("Подробнее") {
+                        VStack(spacing: 12) {
+                            LabeledContent("Измерений движения", value: session.motion.count.formatted())
+                            LabeledContent("Точек GPS", value: session.locationCount.formatted())
+                            MetricsRows(session: session)
+                            if let altitude = session.altitude {
+                                AltitudeRows(metrics: altitude, isRecording: true)
+                            }
+                        }.padding(.top, 10)
+                    }.lagoonCard()
 
                     VStack(alignment: .leading, spacing: 12) {
                         Picker("Упражнение", selection: $markerKind) {
@@ -271,7 +290,7 @@ private struct HistoryView: View {
                                     .font(.caption).foregroundStyle(RiderTheme.accent).lineLimit(2)
                             }
                             if let analysis = session.jumpAnalysis {
-                                Text("Событий: \(analysis.candidates.count) · Отмечено: \(reviewedCount(session))")
+                                Text("Событий: \(analysis.candidates.count)")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             }
@@ -324,142 +343,23 @@ struct SessionDetail: View {
 
     var body: some View {
         List {
-            Section("Сессия") {
-                if session.status == .interrupted {
-                    Label("Запись прервана. Показаны сохранённые данные.", systemImage: "exclamationmark.circle")
-                        .foregroundStyle(.secondary)
-                }
-                LabeledContent("Длительность", value: durationText(session.durationSeconds))
-                MetricsRows(session: session)
-                if let title = session.review?.title, !title.isEmpty {
-                    LabeledContent("Название", value: title)
-                }
-                if let notes = session.review?.notes, !notes.isEmpty {
-                    Text(notes).textSelection(.enabled)
-                }
-                Button("Название и заметки") { editingNotes = true }
-                    .disabled(recorder.analyzingSessionID == session.id)
-            }
-            .listRowBackground(RiderTheme.surface)
-            Section("Маршрут и условия") {
+            sessionCard
+            eventsSection
+            Section {
                 NavigationLink { RouteView(recorder: recorder, session: session) } label: {
-                    Label("Карта, скорость и GPX", systemImage: "map")
-                }
-                LabeledContent("Занятие", value: session.setup?.sport.title ?? "Не указано")
-                if let setup = session.setup {
-                    if !setup.spot.isEmpty { LabeledContent("Спот", value: setup.spot) }
-                    if !setup.kite.isEmpty { LabeledContent("Кайт / винг", value: setup.kite) }
-                    if !setup.board.isEmpty { LabeledContent("Доска / лыжи", value: setup.board) }
-                    LabeledContent("Где телефон", value: setup.placement.title)
-                }
-                Button("Изменить занятие и снаряжение") { editingSetup = true }
-                    .disabled(recorder.analyzingSessionID == session.id)
-                if let setup = session.setup {
-                    Button("Использовать настройки для следующей сессии") {
-                        recorder.reuseSetup(setup)
-                        setupCopied = true
-                    }.disabled(recorder.live != nil)
-                    if setupCopied { Text("Настройки выбраны. Откройте вкладку «Запись».").font(.footnote).foregroundStyle(.secondary) }
+                    Label("Маршрут", systemImage: "map")
                 }
             }.listRowBackground(RiderTheme.surface)
             Section {
-                if let analysis = session.jumpAnalysis {
-                    LabeledContent("Найдено событий", value: analysis.candidates.count.formatted())
-                    LabeledContent("Отмечено вами", value: "\(reviewedCount(session)) из \(analysis.candidates.count)")
-                    if analysis.candidates.isEmpty {
-                        Text("Подходящих эпизодов не найдено. Это не доказывает, что прыжков не было.")
-                            .foregroundStyle(.secondary)
-                    }
-                    ForEach(Array(analysis.candidates.enumerated()), id: \.element.id) { index, candidate in
-                        VStack(alignment: .leading, spacing: 8) {
-                            CandidateRow(index: index, candidate: candidate, label: Binding(
-                                get: { session.review?.label(for: candidate, version: analysis.detectorVersion) ?? .unreviewed },
-                                set: { recorder.label(candidate.id, as: $0, in: session.id) }
-                            ))
-                            NavigationLink { EventDetailView(recorder: recorder, originalSession: session, index: index) } label: {
-                                Label("График и разбор события", systemImage: "waveform.path")
-                            }
-                        }.disabled(recorder.analyzingSessionID == session.id)
-                    }
-                    if analysis.discontinuities > 0 {
-                        Text("Разрывов данных: \(analysis.discontinuities). События через разрывы не объединяются.")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-                } else {
-                    Text("Эта сессия записана до появления детектора. Её можно разобрать сейчас.")
-                        .foregroundStyle(.secondary)
-                }
-                if recorder.analyzingSessionID == session.id {
-                    ProgressView("Разбираем запись…")
-                } else {
-                    Button(session.jumpAnalysis == nil ? "Найти возможные прыжки" : "Повторить разбор") {
-                        Task { await recorder.analyze(session.id) }
-                    }
-                    .disabled(recorder.live != nil || recorder.analyzingSessionID != nil)
-                }
-            } header: {
-                Text("Возможные прыжки · эксперимент")
-            } footer: {
-                Text("Время события отсчитывается от первого измерения движения. Для оценки высоты подброса выберите отметку «Подброс телефона». Высота прыжка райдера пока недоступна.")
-            }
-            .listRowBackground(RiderTheme.surface)
-            if let markers = session.markers, !markers.isEmpty {
-                Section {
-                    ForEach(markers) { marker in
-                        LabeledContent(marker.kind.title, value: eventTimeText(marker.elapsedSeconds))
-                    }
-                } header: { Text("Метки упражнений") }
-                footer: { Text("Момент нажатия по последнему измерению движения. Это ориентир для разбора, а не автоматическое определение упражнения.") }
-                .listRowBackground(RiderTheme.surface)
-            }
-            Section("Диагностика") {
-                LabeledContent("Измерений движения", value: session.motion.count.formatted())
-                LabeledContent("Точек GPS", value: session.locationCount.formatted())
-                LabeledContent("Средняя частота", value: metric(session.motion.averageHz, unit: "Гц"))
-                LabeledContent("Наибольший интервал", value: metric(session.motion.longestIntervalSeconds.map { $0 * 1_000 }, unit: "мс"))
-                LabeledContent("Интервалов больше 100 мс", value: session.motion.gapsOver100ms.formatted())
-                if let start = session.batteryAtStartPercent, let end = session.batteryAtCheckpointPercent {
-                    LabeledContent("Заряд", value: "\(start)% → \(end)%")
-                }
-            }
-            .listRowBackground(RiderTheme.surface)
-            if let altitude = session.altitude {
-                Section("Барометр") {
-                    AltitudeRows(metrics: altitude, isRecording: false)
-                    Text("Высота телефона относительно первого показания барометра в этой записи.")
-                        .font(.footnote).foregroundStyle(.secondary)
-                }
-                .listRowBackground(RiderTheme.surface)
-            }
-            Section {
-                NavigationLink { SessionCardPreview(session: session) } label: {
-                    Label("Карточка сессии для отправки", systemImage: "photo")
-                }
-                ShareLink(item: SessionResultExport(session: session), preview: SharePreview("Результаты Rider")) {
-                    Label("Экспортировать результат", systemImage: "square.and.arrow.up")
-                        .foregroundStyle(RiderTheme.accent)
-                }
-            } footer: {
-                Text("Сводка, найденные события, ваши отметки и заметки. Отдельные замеры барометра есть в исходном логе.")
-            }
-            .listRowBackground(RiderTheme.surface)
-            Section {
-                ShareLink(item: SessionExport(url: logURL), preview: SharePreview(logURL.lastPathComponent)) {
-                    Label("Экспортировать исходный лог", systemImage: "doc.text")
-                        .foregroundStyle(RiderTheme.accent)
-                }
-            } footer: {
-                Text("Если во время сессии был доступен GPS, файл содержит координаты.")
-            }
-            .listRowBackground(RiderTheme.surface)
+                DisclosureGroup("Подробнее") { sessionDetails }
+            }.listRowBackground(RiderTheme.surface)
         }
         .listStyle(.insetGrouped)
         .scrollContentBackground(.hidden)
         .background(RiderTheme.canvas.ignoresSafeArea())
         .toolbarBackground(RiderTheme.canvas, for: .navigationBar, .tabBar)
         .toolbarBackground(.visible, for: .navigationBar, .tabBar)
-        .navigationTitle("Сводка")
+        .navigationTitle("Сессия")
         .navigationBarTitleDisplayMode(.inline)
         .sheet(isPresented: $editingNotes) {
             NotesEditor(title: session.review?.title ?? "", notes: session.review?.notes ?? "") { title, notes in
@@ -469,6 +369,145 @@ struct SessionDetail: View {
         .sheet(isPresented: $editingSetup) {
             SetupEditor(setup: session.setup ?? SessionSetup(), recent: recorder.history) { recorder.saveSetup($0, for: session.id) }
         }
+    }
+
+    private var sessionCard: some View {
+        Section {
+            VStack(alignment: .leading, spacing: 10) {
+                if let title = session.review?.title, !title.isEmpty {
+                    Text(title).font(.title2.bold())
+                }
+                Text(session.startedAt, format: .dateTime.day().month(.wide).hour().minute())
+                    .font(.headline)
+                Label(durationText(session.durationSeconds), systemImage: "clock")
+                    .font(.subheadline.monospacedDigit())
+                if let analysis = session.jumpAnalysis {
+                    Label("Событий: \(analysis.candidates.count)", systemImage: "waveform")
+                        .font(.subheadline)
+                }
+                if session.status == .interrupted {
+                    Label("Запись прервана", systemImage: "exclamationmark.circle")
+                        .font(.footnote)
+                }
+            }
+            .foregroundStyle(.white)
+            .padding(18)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RiderTheme.lagoon, in: RoundedRectangle(cornerRadius: 18))
+        }
+        .listRowInsets(EdgeInsets())
+        .listRowBackground(Color.clear)
+    }
+
+    private var eventsSection: some View {
+        Section("События") {
+            if recorder.analyzingSessionID == session.id {
+                ProgressView("Разбираем запись…")
+            } else if let analysis = session.jumpAnalysis {
+                if analysis.candidates.isEmpty {
+                    Text("Событий не найдено").foregroundStyle(.secondary)
+                }
+                ForEach(Array(analysis.candidates.enumerated()), id: \.element.id) { index, _ in
+                    NavigationLink("Событие \(index + 1)") {
+                        EventDetailView(recorder: recorder, originalSession: session, index: index)
+                    }
+                }
+            } else {
+                analyzeButton("Найти события")
+            }
+        }
+        .listRowBackground(RiderTheme.surface)
+    }
+
+    private func analyzeButton(_ title: String) -> some View {
+        Button(title) { Task { await recorder.analyze(session.id) } }
+            .disabled(recorder.live != nil || recorder.analyzingSessionID != nil)
+    }
+
+    @ViewBuilder private var sessionDetails: some View {
+        MetricsRows(session: session)
+        if let notes = session.review?.notes, !notes.isEmpty {
+            Text(notes).textSelection(.enabled)
+        }
+        Button("Название и заметки") { editingNotes = true }
+            .disabled(recorder.analyzingSessionID == session.id)
+
+        LabeledContent("Занятие", value: session.setup?.sport.title ?? "Не указано")
+        if let setup = session.setup {
+            if !setup.spot.isEmpty { LabeledContent("Спот", value: setup.spot) }
+            if !setup.kite.isEmpty { LabeledContent("Кайт / винг", value: setup.kite) }
+            if !setup.board.isEmpty { LabeledContent("Доска / лыжи", value: setup.board) }
+            LabeledContent("Где телефон", value: setup.placement.title)
+        }
+        Button("Изменить занятие и снаряжение") { editingSetup = true }
+            .disabled(recorder.analyzingSessionID == session.id)
+        if let setup = session.setup {
+            Button("Использовать настройки для следующей сессии") {
+                recorder.reuseSetup(setup)
+                setupCopied = true
+            }.disabled(recorder.live != nil)
+            if setupCopied { Text("Настройки выбраны. Откройте вкладку «Запись».").font(.footnote).foregroundStyle(.secondary) }
+        }
+
+        DisclosureGroup("Диагностика") { diagnostics }
+        if let markers = session.markers, !markers.isEmpty {
+            DisclosureGroup("Метки упражнений") {
+                ForEach(markers) { marker in
+                    LabeledContent(marker.kind.title, value: eventTimeText(marker.elapsedSeconds))
+                }
+            }
+        }
+        if session.jumpAnalysis != nil { analyzeButton("Повторить разбор") }
+
+        NavigationLink { SessionCardPreview(session: session) } label: {
+            Label("Карточка сессии", systemImage: "photo")
+        }
+        ShareLink(item: SessionResultExport(session: session), preview: SharePreview("Результаты Rider")) {
+            Label("Экспортировать результат", systemImage: "square.and.arrow.up")
+        }
+        ShareLink(item: SessionExport(url: logURL), preview: SharePreview(logURL.lastPathComponent)) {
+            Label("Экспортировать исходный лог", systemImage: "doc.text")
+        }
+        Text("В исходном логе могут быть координаты GPS.")
+            .font(.footnote).foregroundStyle(.secondary)
+    }
+
+    @ViewBuilder private var diagnostics: some View {
+        LabeledContent("Измерений движения", value: session.motion.count.formatted())
+        LabeledContent("Точек GPS", value: session.locationCount.formatted())
+        LabeledContent("Средняя частота", value: metric(session.motion.averageHz, unit: "Гц"))
+        LabeledContent("Наибольший интервал движения", value: metric(session.motion.longestIntervalSeconds.map { $0 * 1_000 }, unit: "мс"))
+        LabeledContent("Интервалов больше 100 мс", value: session.motion.gapsOver100ms.formatted())
+        if let gaps = session.jumpAnalysis?.discontinuities, gaps > 0 {
+            LabeledContent("Разрывов в детекторе", value: gaps.formatted())
+        }
+        if let start = session.batteryAtStartPercent, let end = session.batteryAtCheckpointPercent {
+            LabeledContent("Заряд", value: "\(start)% → \(end)%")
+        }
+        if let altitude = session.altitude {
+            DisclosureGroup("Барометр") {
+                AltitudeRows(metrics: altitude, isRecording: false)
+                Text("Относительная высота от первого показания барометра.")
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
+        }
+        if let calibration = session.motionCalibration {
+            DisclosureGroup("Калибровка телефона") {
+                CalibrationRows(calibration: calibration)
+                LabeledContent("Поправка применяется после", value: eventTimeText(calibration.completedAtSeconds))
+            }
+        }
+    }
+
+}
+
+private struct CalibrationRows: View {
+    let calibration: MotionCalibration
+
+    var body: some View {
+        LabeledContent("Частота движения", value: metric(calibration.frequencyHz, unit: "Гц"))
+        LabeledContent("Смещение в покое", value: metric(calibration.verticalOffset, unit: "м/с²", digits: 3))
+        LabeledContent("Шум в покое", value: metric(calibration.verticalNoise, unit: "м/с²", digits: 3))
     }
 }
 
@@ -496,36 +535,6 @@ private struct AltitudeRows: View {
                 }
             }
         }
-    }
-}
-
-private struct CandidateRow: View {
-    let index: Int
-    let candidate: JumpCandidate
-    @Binding var label: JumpLabel
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Событие \(index + 1) · \(eventTimeText(candidate.startSeconds))")
-                .font(.headline)
-                .foregroundStyle(RiderTheme.accent)
-            Text("Разгрузка: \(metric(candidate.unloadingSeconds, unit: "с", digits: 2))")
-            TossHeightReadout(candidate: candidate, label: label)
-            if candidate.fastRotation {
-                Label("Сильное вращение телефона", systemImage: "arrow.triangle.2.circlepath").font(.footnote)
-            }
-            if candidate.strongImpact {
-                Label("Резкий удар или ловля телефона", systemImage: "exclamationmark.circle").font(.footnote)
-            }
-            Picker("Что происходило", selection: $label) {
-                ForEach(JumpLabel.allCases, id: \.self) { label in
-                    Text(label.title).tag(label)
-                }
-            }
-            .pickerStyle(.menu)
-            .accessibilityLabel("Отметка для события \(index + 1)")
-        }
-        .padding(.vertical, 4)
     }
 }
 
@@ -571,10 +580,7 @@ private struct NotesEditor: View {
     }
 }
 
-private func reviewedCount(_ session: SessionSummary) -> Int {
-    guard let analysis = session.jumpAnalysis, let review = session.review else { return 0 }
-    return analysis.candidates.filter { review.label(for: $0, version: analysis.detectorVersion) != .unreviewed }.count
-}
+
 
 enum RiderTheme {
     static let canvas = adaptive(light: 0xE1F7F4, dark: 0x092626)

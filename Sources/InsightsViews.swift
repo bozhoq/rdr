@@ -103,26 +103,11 @@ struct RouteView: View {
                         VStack(spacing: 12) {
                             LabeledContent("Дистанция GPS", value: metric(route.metrics.distanceMeters / 1000, unit: "км", digits: 2))
                             LabeledContent("Макс. скорость GPS", value: metric(route.metrics.maxSpeedMetersPerSecond.map { $0 * 3.6 }, unit: "км/ч"))
-                            LabeledContent("Точек принято / отброшено", value: "\(route.metrics.accepted) / \(route.metrics.rejected)")
-                            LabeledContent("Участков маршрута", value: route.metrics.segments.formatted())
                         }.lagoonCard()
-                        speedChart(route)
-                        if let gpx {
-                            ShareLink(item: GPXFile(url: gpx), preview: SharePreview("Маршрут Rider")) {
-                                Label("Экспортировать GPX", systemImage: "square.and.arrow.up")
-                                    .frame(maxWidth: .infinity)
-                            }
-                            .buttonStyle(.borderedProminent).tint(RiderTheme.action).controlSize(.large)
-                            Text("GPX содержит координаты и время маршрута. В нём нет сырых данных движения и ваших заметок.")
-                                .font(.footnote).foregroundStyle(.secondary)
-                        }
                     }
-                    Text("GPS даёт приблизительные значения. Неточные точки и очевидные скачки отбрасываются; разрывы не соединяются. Длинные маршруты и графики отображаются упрощённо; GPX сохраняет все принятые точки. Подложка карты может требовать интернет. Запись и разбор работают локально.")
-                        .font(.footnote).foregroundStyle(.secondary)
-                    if route.malformedLines > 0 {
-                        Text("Повреждённых строк в логе: \(route.malformedLines). Данные по разные стороны разрыва не объединены.")
-                            .font(.footnote).foregroundStyle(.secondary)
-                    }
+                    DisclosureGroup("Подробнее") {
+                        routeDetails(route)
+                    }.lagoonCard()
                 } else if let error {
                     ContentUnavailableView("Не удалось открыть маршрут", systemImage: "exclamationmark.circle", description: Text(error))
                     Button("Повторить") { retry += 1 }.buttonStyle(.bordered)
@@ -132,9 +117,26 @@ struct RouteView: View {
             }.padding(20)
         }
         .background(RiderTheme.canvas.ignoresSafeArea())
-        .navigationTitle("Маршрут и скорость")
+        .navigationTitle("Маршрут")
         .navigationBarTitleDisplayMode(.inline)
         .task(id: retry) { await load() }
+    }
+
+    private func routeDetails(_ route: RouteAnalysis) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            LabeledContent("Точек принято / отброшено", value: "\(route.metrics.accepted) / \(route.metrics.rejected)")
+            LabeledContent("Участков маршрута", value: route.metrics.segments.formatted())
+            if !route.points.isEmpty { speedChart(route) }
+            if let gpx {
+                ShareLink(item: GPXFile(url: gpx), preview: SharePreview("Маршрут Rider")) {
+                    Label("Экспортировать GPX", systemImage: "square.and.arrow.up")
+                }
+                Text("GPX содержит координаты и время маршрута.").font(.footnote).foregroundStyle(.secondary)
+            }
+            if route.malformedLines > 0 {
+                LabeledContent("Повреждённых строк в логе", value: route.malformedLines.formatted())
+            }
+        }.padding(.top, 10)
     }
 
     private func routeMap(_ route: RouteAnalysis) -> some View {

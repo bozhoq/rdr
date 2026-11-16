@@ -12,6 +12,8 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
     @Published var errorMessage: String?
     @Published private(set) var analyzingSessionID: UUID?
     @Published var draftSetup = SessionSetup(sport: .groundTest)
+    @Published private(set) var isCalibrating = false
+    @Published private(set) var calibrationMessage: String?
 
     private let store = SessionStore()
     private let motion = CMMotionManager()
@@ -29,6 +31,8 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
     private var routeFilter = RouteFilter()
     private var jumpDetector = JumpDetector()
     private var lastMarkerAt: ContinuousClock.Instant?
+    private var calibrationStartedAt: ContinuousClock.Instant?
+    private var calibrationSamples: [MotionSample] = []
 
     var motionAvailable: Bool { motion.isDeviceMotionAvailable }
     var locationAuthorized: Bool { authorization == .authorizedWhenInUse || authorization == .authorizedAlways }
@@ -98,6 +102,7 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
         jumpDetector = JumpDetector()
         lastMarkerAt = nil
         motionIsRecent = false
+        resetCalibration()
 
         if session.gpsEnabledAtStart {
             location.allowsBackgroundLocationUpdates = true
@@ -123,6 +128,20 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
 
     func stop() {
         finish(.finished)
+    }
+
+    func calibrateMotion() {
+        guard let summary, summary.motionCalibration == nil, motionIsRecent, !isCalibrating else { return }
+        resetCalibration()
+        calibrationStartedAt = clock.now
+        isCalibrating = true
+    }
+
+    private func resetCalibration(message: String? = nil) {
+        calibrationStartedAt = nil
+        calibrationSamples.removeAll()
+        isCalibrating = false
+        calibrationMessage = message
     }
 
     func addMarker(_ kind: MarkerKind) {
@@ -170,6 +189,9 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
 
     func sceneChanged(_ phase: ScenePhase) {
         guard summary != nil else { return }
+        if phase != .active, isCalibrating {
+            resetCalibration(message: "Для калибровки оставьте Rider открытым.")
+        }
         switch phase {
         case .active: recordEvent("active")
         case .inactive: recordEvent("inactive")
@@ -272,6 +294,7 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
         do {
             try log.append("motion", sample)
             session.motion.add(elapsed)
+            try updateCalibration(sample, session: &session, log: log)
             if let candidate = jumpDetector.process(sample) {
                 try log.append("jumpCandidate", candidate)
                 session.jumpAnalysis?.candidates.append(candidate)
@@ -287,6 +310,26 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
         } catch {
             failStorage(error)
         }
+    }
+
+    private func updateCalibration(_ sample: MotionSample, session: inout SessionSummary, log: SessionLog) throws {
+        guard isCalibrating else { return }
+        calibrationSamples.append(sample)
+        guard let first = calibrationSamples.first else { return }
+        if sample.elapsedSinceFirstSampleSeconds - first.elapsedSinceFirstSampleSeconds < MotionCalibration.durationSeconds {
+            if calibrationSamples.count >= 1_000 { resetCalibration(message: MotionCalibration.Failure.timing.message) }
+            return
+        }
+        let result: MotionCalibration
+        do {
+            result = try MotionCalibration.measure(calibrationSamples)
+        } catch let failure as MotionCalibration.Failure {
+            resetCalibration(message: failure.message)
+            return
+        }
+        try log.append("motionCalibration", result)
+        session.motionCalibration = result
+        resetCalibration()
     }
 
     private func startAltitude(sessionID: UUID, origin: TimeInterval) {
@@ -361,6 +404,9 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
     private func checkpointIfDue(force: Bool = false) {
         guard var session = summary, let log, let lastCheckpoint else { return }
         let now = clock.now
+        if let calibrationStartedAt, calibrationStartedAt.duration(to: now) > .seconds(8) {
+            resetCalibration(message: MotionCalibration.Failure.timing.message)
+        }
         guard force || lastCheckpoint.duration(to: now) >= .seconds(1) else { return }
         updateCheckpoint(&session, at: now)
         do {
@@ -408,6 +454,7 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
         log = nil
         live = nil
         motionIsRecent = false
+        resetCalibration()
         UIDevice.current.isBatteryMonitoringEnabled = false
     }
 

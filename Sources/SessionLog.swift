@@ -84,6 +84,7 @@ struct SessionSummary: Codable, Identifiable {
     var setup: SessionSetup?
     var gpsMetrics: RouteMetrics?
     var altitude: AltitudeMetrics?
+    var motionCalibration: MotionCalibration?
 
     func matches(_ query: String) -> Bool {
         let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -194,6 +195,59 @@ struct MotionSample: Codable {
     let rotationRadiansPerSecond: Vector3
     let attitude: Quaternion
     let verticalAccelerationMetersPerSecondSquared: Double
+}
+
+struct MotionCalibration: Codable {
+    static let durationSeconds: Double = 5
+
+    let completedAtSeconds: Double
+    let frequencyHz: Double
+    let verticalOffset: Double
+    let verticalNoise: Double
+
+    enum Failure: Error {
+        case timing, movement
+
+        var message: String {
+            switch self {
+            case .timing: return "Замеры шли с пропусками или слишком редко. Повторите калибровку."
+            case .movement: return "Телефон двигался. Закрепите его и замрите на 5 секунд."
+            }
+        }
+    }
+
+    static func measure(_ samples: [MotionSample]) throws -> Self {
+        guard let first = samples.first, let last = samples.last else { throw Failure.timing }
+        let span = last.elapsedSinceFirstSampleSeconds - first.elapsedSinceFirstSampleSeconds
+        let frequency = Double(samples.count - 1) / span
+        guard span.isFinite, span >= durationSeconds, frequency >= 90 else { throw Failure.timing }
+
+        var previous = first.elapsedSinceFirstSampleSeconds
+        var sum = 0.0, squares = 0.0
+        for (index, sample) in samples.enumerated() {
+            let time = sample.elapsedSinceFirstSampleSeconds
+            let gap = time - previous
+            guard gap.isFinite, (index == 0 || gap > 0), gap <= 0.05 else { throw Failure.timing }
+            previous = time
+            let a = sample.accelerationG
+            let r = sample.rotationRadiansPerSecond
+            let acceleration = (a.x*a.x + a.y*a.y + a.z*a.z).squareRoot()
+            let rotation = (r.x*r.x + r.y*r.y + r.z*r.z).squareRoot()
+            let vertical = sample.verticalAccelerationMetersPerSecondSquared
+            guard acceleration <= 0.10, rotation <= 0.30, vertical.isFinite else { throw Failure.movement }
+            sum += vertical
+            squares += vertical * vertical
+        }
+        let offset = sum / Double(samples.count)
+        let noise = max(0, squares / Double(samples.count) - offset * offset).squareRoot()
+        guard abs(offset) <= 0.30, noise <= 0.20 else { throw Failure.movement }
+        return Self(completedAtSeconds: last.elapsedSinceFirstSampleSeconds, frequencyHz: frequency,
+                    verticalOffset: offset, verticalNoise: noise)
+    }
+
+    func correctedVertical(_ raw: Double, at seconds: Double) -> Double {
+        seconds > completedAtSeconds ? raw - verticalOffset : raw
+    }
 }
 
 struct LocationSample: Codable, Sendable {

@@ -5,6 +5,7 @@ struct MotionWindowPoint: Identifiable, Sendable {
     let seconds: Double
     let loadG: Double
     let rotation: Double
+    let verticalAcceleration: Double
     let segment: Int
 }
 
@@ -51,7 +52,8 @@ struct MotionWindowCollector {
         }
         latestSeen = time
         let a = sample.accelerationG, g = sample.gravityG, r = sample.rotationRadiansPerSecond
-        let components = [a.x, a.y, a.z, g.x, g.y, g.z, r.x, r.y, r.z]
+        let vertical = sample.verticalAccelerationMetersPerSecondSquared
+        let components = [a.x, a.y, a.z, g.x, g.y, g.z, r.x, r.y, r.z, vertical]
         let load = sqrt(pow(a.x + g.x, 2) + pow(a.y + g.y, 2) + pow(a.z + g.z, 2))
         let rotation = sqrt(r.x*r.x + r.y*r.y + r.z*r.z)
         guard components.allSatisfy(\.isFinite), load.isFinite, rotation.isFinite,
@@ -62,7 +64,8 @@ struct MotionWindowCollector {
         // Preserve every accepted 100 Hz sample around the event, not a smooth
         // interpolation. A bad/gapped sample always starts a separate series.
         guard points.count < 6000 else { throw CocoaError(.fileReadTooLarge) }
-        points.append(MotionWindowPoint(id: points.count, seconds: time, loadG: load, rotation: rotation, segment: segment))
+        points.append(MotionWindowPoint(id: points.count, seconds: time, loadG: load, rotation: rotation,
+                                       verticalAcceleration: vertical, segment: segment))
         previous = time
     }
 

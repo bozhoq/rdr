@@ -11,8 +11,21 @@ struct EventDetailView: View {
     @State private var window: MotionWindow?
     @State private var error: String?
     @State private var selectedSeconds: Double?
-    @State private var rotation = false
+    @State private var signal: Signal = .load
     @State private var retry = 0
+    @State private var showingDetails = false
+
+    private enum Signal: Hashable {
+        case load, rotation, vertical
+
+        var unit: String {
+            switch self {
+            case .load: return "g"
+            case .rotation: return "рад/с"
+            case .vertical: return "м/с²"
+            }
+        }
+    }
 
     private var session: SessionSummary { recorder.history.first { $0.id == originalSession.id } ?? originalSession }
     private var candidates: [JumpCandidate] { session.jumpAnalysis?.candidates ?? [] }
@@ -36,62 +49,21 @@ struct EventDetailView: View {
                         Button { index = currentIndex + 1 } label: { Image(systemName: "chevron.right") }
                             .disabled(currentIndex + 1 >= candidates.count).accessibilityLabel("Следующее событие")
                     }.buttonStyle(.bordered)
-                    VStack(spacing: 12) {
-                        LabeledContent("Момент", value: eventTimeText(candidate.startSeconds))
-                        LabeledContent("Разгрузка", value: metric(candidate.unloadingSeconds, unit: "с", digits: 2))
-                        TossHeightReadout(candidate: candidate, label: label(for: candidate))
-                        LabeledContent("Минимальная нагрузка", value: metric(candidate.minimumLoadG, unit: "g", digits: 2))
-                        LabeledContent("Импульс после события", value: metric(candidate.returnPeakG, unit: "g"))
-                        if candidate.fastRotation { Label("Телефон сильно вращался", systemImage: "arrow.triangle.2.circlepath") }
-                        if candidate.strongImpact { Label("Резкий удар или ловля телефона", systemImage: "exclamationmark.circle") }
-                    }.lagoonCard()
                     VStack(alignment: .leading, spacing: 12) {
-                        Text("Движение вокруг события").font(.headline)
-                        Picker("Что показать", selection: $rotation) {
-                            Text("Нагрузка").tag(false)
-                            Text("Вращение").tag(true)
-                        }.pickerStyle(.segmented)
-                        if let window {
-                            if window.points.isEmpty {
-                                Text("В исходном логе нет подходящих измерений рядом с этим событием.").foregroundStyle(.secondary)
-                            } else {
-                                eventChart(window, candidate: candidate)
-                                Text("Выделенная область — найденная разгрузка. По бокам показано до двух секунд контекста. Разрывы данных не соединяются.")
-                                    .font(.footnote).foregroundStyle(.secondary)
-                                if window.gaps > 0 || window.rejected > 0 {
-                                    Text("Разрывов: \(window.gaps) · Отброшено измерений: \(window.rejected)")
-                                        .font(.footnote).foregroundStyle(.secondary)
-                                }
-                            }
-                        } else if let error {
-                            Text(error).foregroundStyle(.secondary)
-                            Button("Повторить загрузку") { retry += 1 }
-                        } else { ProgressView("Читаем измерения…") }
-                    }.lagoonCard()
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("Что происходило на самом деле").font(.headline)
-                        Picker("Ваша отметка", selection: Binding(
+                        LabeledContent("Момент", value: eventTimeText(candidate.startSeconds))
+                        Picker("Что происходило", selection: Binding(
                             get: { label(for: candidate) },
                             set: { recorder.label(candidate.id, as: $0, in: session.id) }
                         )) {
                             ForEach(JumpLabel.allCases, id: \.self) { Text($0.title).tag($0) }
                         }.disabled(recorder.analyzingSessionID == session.id)
-                        Text("Отметка сохраняется сразу. Она помогает отличать прыжок человека от подброса телефона и движения чехла.")
-                            .font(.footnote).foregroundStyle(.secondary)
+                        TossHeightReadout(candidate: candidate, label: label(for: candidate))
                     }.lagoonCard()
-                    if let markers = session.markers, !markers.isEmpty {
-                        let nearby = markers.filter { abs($0.elapsedSeconds - candidate.startSeconds) <= 10 }
-                        if !nearby.isEmpty {
-                            VStack(alignment: .leading, spacing: 10) {
-                                Text("Метки рядом · ±10 секунд").font(.headline)
-                                ForEach(nearby) { marker in
-                                    LabeledContent(marker.kind.title, value: eventTimeText(marker.elapsedSeconds))
-                                }
-                            }.lagoonCard()
-                        }
-                    }
-                    Text("Разгрузка — участок со сниженной нагрузкой на телефон. Около 1 g соответствует покою, около 0 g — почти свободному падению телефона.")
-                        .font(.footnote).foregroundStyle(.secondary)
+
+                    DisclosureGroup("Подробнее", isExpanded: $showingDetails) {
+                        diagnostics(candidate)
+                    }.lagoonCard()
+
                 } else {
                     ContentUnavailableView("Событий нет", systemImage: "waveform", description: Text("Вернитесь в сводку и выполните разбор сессии."))
                 }
@@ -100,10 +72,63 @@ struct EventDetailView: View {
         .background(RiderTheme.canvas.ignoresSafeArea())
         .navigationTitle("Разбор события")
         .navigationBarTitleDisplayMode(.inline)
-        .task(id: "\(candidate?.id.uuidString ?? "none")-\(retry)") { await load() }
+        .task(id: "\(candidate?.id.uuidString ?? "none")-\(showingDetails)-\(retry)") {
+            if showingDetails { await load() }
+        }
     }
 
+    private func diagnostics(_ candidate: JumpCandidate) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            LabeledContent("Разгрузка", value: metric(candidate.unloadingSeconds, unit: "с", digits: 2))
+            LabeledContent("Минимальная нагрузка", value: metric(candidate.minimumLoadG, unit: "g", digits: 2))
+            LabeledContent("Пик после события", value: metric(candidate.returnPeakG, unit: "g"))
+            if candidate.fastRotation { Label("Телефон сильно вращался", systemImage: "arrow.triangle.2.circlepath") }
+            if candidate.strongImpact { Label("Резкий удар или ловля телефона", systemImage: "exclamationmark.circle") }
+
+            Picker("График", selection: $signal) {
+                Text("Нагрузка").tag(Signal.load)
+                Text("Вращение").tag(Signal.rotation)
+                Text("Вертикаль").tag(Signal.vertical)
+            }.pickerStyle(.segmented)
+            if let window {
+                if window.points.isEmpty {
+                    Text("Рядом с событием нет подходящих измерений.").foregroundStyle(.secondary)
+                } else {
+                    eventChart(window, candidate: candidate)
+                    if window.gaps > 0 || window.rejected > 0 {
+                        Text("Разрывов: \(window.gaps) · Отброшено измерений: \(window.rejected)")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    }
+                }
+            } else if let error {
+                Text(error).foregroundStyle(.secondary)
+                Button("Повторить загрузку") { retry += 1 }
+            } else { ProgressView("Читаем измерения…") }
+
+            let nearby = (session.markers ?? []).filter { abs($0.elapsedSeconds - candidate.startSeconds) <= 10 }
+            if !nearby.isEmpty {
+                Text("Метки рядом").font(.headline)
+                ForEach(nearby) { marker in
+                    LabeledContent(marker.kind.title, value: eventTimeText(marker.elapsedSeconds))
+                }
+            }
+            Text("Выделенный участок — разгрузка. Около 1 g соответствует покою, около 0 g — почти свободному падению телефона.")
+                .font(.footnote).foregroundStyle(.secondary)
+        }.padding(.top, 12)
+    }
+
+
     private func eventChart(_ window: MotionWindow, candidate: JumpCandidate) -> some View {
+        let calibration = session.motionCalibration
+        let correctionStartsAt = calibration?.completedAtSeconds ?? .infinity
+        func value(_ point: MotionWindowPoint) -> Double {
+            switch signal {
+            case .load: return point.loadG
+            case .rotation: return point.rotation
+            case .vertical:
+                return calibration?.correctedVertical(point.verticalAcceleration, at: point.seconds) ?? point.verticalAcceleration
+            }
+        }
         let selected = selectedSeconds.flatMap { seconds in
             window.points.min { abs($0.seconds - seconds) < abs($1.seconds - seconds) }
         }
@@ -112,25 +137,30 @@ struct EventDetailView: View {
                 RectangleMark(xStart: .value("Начало", candidate.startSeconds), xEnd: .value("Конец", candidate.endSeconds), yStart: nil, yEnd: nil)
                     .foregroundStyle(RiderTheme.accent.opacity(0.12))
                 ForEach(window.points) { point in
-                    LineMark(x: .value("Секунды", point.seconds), y: .value(rotation ? "рад/с" : "g", rotation ? point.rotation : point.loadG), series: .value("Участок", point.segment))
+                    LineMark(x: .value("Секунды", point.seconds), y: .value(signal.unit, value(point)),
+                             series: .value("Участок", point.segment * 2 + (signal == .vertical && point.seconds > correctionStartsAt ? 1 : 0)))
                         .foregroundStyle(RiderTheme.accent)
-                    PointMark(x: .value("Секунды", point.seconds), y: .value(rotation ? "рад/с" : "g", rotation ? point.rotation : point.loadG))
+                    PointMark(x: .value("Секунды", point.seconds), y: .value(signal.unit, value(point)))
                         .foregroundStyle(RiderTheme.accent).symbolSize(3)
                 }
-                if !rotation {
-                    RuleMark(y: .value("Покой", 1)).foregroundStyle(.secondary.opacity(0.4)).lineStyle(StrokeStyle(dash: [4]))
+                if signal != .rotation {
+                    RuleMark(y: .value("Покой", signal == .load ? 1.0 : 0.0)).foregroundStyle(.secondary.opacity(0.4)).lineStyle(StrokeStyle(dash: [4]))
                 }
                 if let selected { RuleMark(x: .value("Выбрано", selected.seconds)).foregroundStyle(.secondary) }
             }
             .chartXScale(domain: window.lower...window.upper)
             .chartXAxisLabel("Секунды от начала движения")
-            .chartYAxisLabel(rotation ? "рад/с" : "g")
+            .chartYAxisLabel(signal.unit)
             .chartXSelection(value: $selectedSeconds)
             .frame(height: 220)
             if let selected {
-                Text("\(eventTimeText(selected.seconds)) · \(metric(rotation ? selected.rotation : selected.loadG, unit: rotation ? "рад/с" : "g", digits: 2))")
+                Text("\(eventTimeText(selected.seconds)) · \(metric(value(selected), unit: signal.unit, digits: 2))")
                     .font(.subheadline.monospacedDigit())
             } else { Text("Проведите по графику, чтобы посмотреть измерение.").font(.footnote).foregroundStyle(.secondary) }
+            if signal == .vertical {
+                Text(calibration.map { "Поправка нуля действует после \(eventTimeText($0.completedAtSeconds))." } ?? "Вертикальное ускорение без поправки нуля.")
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
         }
     }
 
