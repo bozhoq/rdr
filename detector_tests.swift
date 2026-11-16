@@ -94,6 +94,63 @@ enum DetectorTests {
         encoder.dateEncodingStrategy = .millisecondsSince1970
         let restored = try decoder.decode(SessionSummary.self, from: encoder.encode(summary))
         check(restored.id == summary.id && restored.jumpAnalysis?.candidates.count == 1, "Preserve session identity and results")
+        check(restored.review == nil && restored.markers == nil, "Old summaries load without review or markers")
+
+        // Replaying generates fresh event UUIDs: user labels must follow the
+        // sensor interval, and never silently transfer to a changed algorithm.
+        var review = SessionReview(title: "Тест прогулки", notes: "Телефон свободно в чехле")
+        review.setLabel(.phoneToss, for: detected[0], version: JumpDetector.version)
+        let replayedCandidate = run(standard)[0]
+        check(replayedCandidate.id != detected[0].id, "Replay generates new event UUID")
+        check(review.label(for: replayedCandidate, version: JumpDetector.version) == .phoneToss, "Label survives replay")
+        check(review.label(for: replayedCandidate, version: "future-version") == .unreviewed, "No label transfer to a new detector")
+        review.setLabel(.unreviewed, for: replayedCandidate, version: JumpDetector.version)
+        check(review.labels.isEmpty, "User can clear a label")
+
+        // Disk integration verifies that edits/replay don't overwrite one another
+        // or mutate the original log, and that results are exported from current metadata.
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("rider-store-tests-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = SessionStore(root: root)
+        summary.markers = [SessionMarker(elapsedSeconds: 1.1, kind: .phoneToss)]
+        let writer = try store.makeLog(for: summary)
+        try writer.writeStart(summary, systemVersion: "synthetic-test")
+        writer.close()
+        let rawBefore = try Data(contentsOf: store.logURL(for: summary.id))
+        try store.saveNotes(title: "  Тест прогулки  ", notes: "Телефон свободно в чехле", for: summary.id)
+        try store.saveLabel(.phoneToss, candidateID: detected[0].id, for: summary.id)
+        try store.saveAnalysis(JumpAnalysis(candidates: [replayedCandidate]), for: summary.id)
+        let stored = try store.history()[0]
+        check(stored.review?.title == "Тест прогулки", "Title is trimmed and preserved through replay")
+        check(stored.review?.notes == "Телефон свободно в чехле", "Notes preserved through label and replay edits")
+        check(stored.review?.label(for: replayedCandidate, version: JumpDetector.version) == .phoneToss, "Stored label survives replay")
+        check(stored.markers?.count == 1 && stored.markers?[0].elapsedSeconds == 1.1, "Marker persists through edits")
+        check(stored.matches("ПРОГУЛКИ") && stored.matches("чехле"), "Search matches titles and notes case-insensitively")
+        check(stored.matches("  ") && !stored.matches("несуществующее"), "Empty search and no-match search")
+        let rawAfter = try Data(contentsOf: store.logURL(for: summary.id))
+        check(rawBefore == rawAfter, "Review and replay never rewrite raw log")
+        let reportData = try SessionReport.data(for: stored)
+        let report = try JSONSerialization.jsonObject(with: reportData) as! [String: Any]
+        check(report["kind"] as? String == "rider-session-result", "Export has identifiable schema")
+        let exported = report["session"] as! [String: Any]
+        let exportedReview = exported["review"] as! [String: Any]
+        check(exportedReview["title"] as? String == "Тест прогулки", "Export contains latest review")
+        check((exported["markers"] as? [[String: Any]])?.count == 1, "Export includes markers")
+        check(exported["latitude"] == nil && exported["longitude"] == nil && exported["locations"] == nil, "Report has no raw GPS coordinates")
+        let exportedAnalysis = exported["jumpAnalysis"] as! [String: Any]
+        check((exportedAnalysis["candidates"] as? [[String: Any]])?.count == 1, "Export contains replay results")
+        try store.saveNotes(title: String(repeating: "а", count: 120), notes: String(repeating: "б", count: 4200), for: summary.id)
+        let limited = try store.history()[0]
+        check(limited.review?.title.count == 100 && limited.review?.notes.count == 4000, "Bound note sizes in storage as well as UI")
+        check(limited.review?.label(for: replayedCandidate, version: JumpDetector.version) == .phoneToss, "Changing notes preserves labels")
+        do {
+            try store.saveLabel(.bodyJump, candidateID: UUID(), for: summary.id)
+            fatalError("Unknown candidate must not be silently annotated")
+        } catch { checks += 1 }
+        let reportURL = try SessionReport.write(stored)
+        defer { try? FileManager.default.removeItem(at: reportURL) }
+        let savedReport = try Data(contentsOf: reportURL)
+        check(savedReport == reportData, "Share file matches the current report snapshot")
 
         struct Row: Encodable { let type = "motion"; let data: MotionSample }
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("rider-tests-\(UUID()).jsonl")
