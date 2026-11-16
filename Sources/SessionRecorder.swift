@@ -50,6 +50,12 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
         location.requestWhenInUseAuthorization()
     }
 
+    func reuseSetup(_ setup: SessionSetup) {
+        guard live == nil else { return }
+        draftSetup = setup.cleaned
+        if let data = try? JSONEncoder().encode(draftSetup) { UserDefaults.standard.set(data, forKey: "rider.sessionSetup") }
+    }
+
     func start() {
         guard summary == nil, analyzingSessionID == nil, motionAvailable else { return }
         UIDevice.current.isBatteryMonitoringEnabled = true

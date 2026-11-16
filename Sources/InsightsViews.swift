@@ -6,18 +6,36 @@ import UniformTypeIdentifiers
 
 struct SetupFields: View {
     @Binding var setup: SessionSetup
+    var recent: [SessionSummary] = []
     var body: some View {
+        let suggestions = SetupSuggestions(history: recent)
         Picker("Занятие", selection: $setup.sport) {
             ForEach(SessionSport.allCases, id: \.self) { Text($0.title).tag($0) }
         }
         TextField("Спот или место", text: $setup.spot)
             .onChange(of: setup.spot) { _, value in setup.spot = String(value.prefix(100)) }
+        RecentChoice(title: "Недавние споты", values: suggestions.spots, selection: $setup.spot)
         TextField("Кайт / винг и размер, например 9 м²", text: $setup.kite)
             .onChange(of: setup.kite) { _, value in setup.kite = String(value.prefix(100)) }
+        RecentChoice(title: "Мои кайты / винги", values: suggestions.kites, selection: $setup.kite)
         TextField("Доска / лыжи", text: $setup.board)
             .onChange(of: setup.board) { _, value in setup.board = String(value.prefix(100)) }
+        RecentChoice(title: "Мои доски / лыжи", values: suggestions.boards, selection: $setup.board)
         Picker("Где телефон", selection: $setup.placement) {
             ForEach(PhonePlacement.allCases, id: \.self) { Text($0.title).tag($0) }
+        }
+    }
+}
+
+private struct RecentChoice: View {
+    let title: String
+    let values: [String]
+    @Binding var selection: String
+    var body: some View {
+        if !values.isEmpty {
+            Menu {
+                ForEach(values, id: \.self) { value in Button(value) { selection = value } }
+            } label: { Label(title, systemImage: "clock.arrow.circlepath").font(.subheadline) }
         }
     }
 }
@@ -25,13 +43,14 @@ struct SetupFields: View {
 struct SetupEditor: View {
     @Environment(\.dismiss) private var dismiss
     @State var setup: SessionSetup
+    var recent: [SessionSummary] = []
     @State private var failed = false
     let onSave: (SessionSetup) -> Bool
 
     var body: some View {
         NavigationStack {
             Form {
-                Section { SetupFields(setup: $setup) }
+                Section { SetupFields(setup: $setup, recent: recent) }
                 footer: { Text("Тесты на земле и сессии без указанного занятия не входят в статистику катания. Положение телефона помогает разбирать реальные движения чехла.") }
                 .listRowBackground(RiderTheme.surface)
                 if failed { Text("Не удалось сохранить. Попробуйте ещё раз.").foregroundStyle(.red) }
@@ -62,6 +81,11 @@ struct RouteView: View {
     @State private var retry = 0
     @State private var mapSegments: [[RoutePoint]] = []
     @State private var speedPoints: [RoutePoint] = []
+    @State private var satellite = false
+    @State private var camera: MapCameraPosition = .automatic
+    private var selectedPoint: RoutePoint? {
+        selectedTime.flatMap { time in speedPoints.min { abs($0.sample.timestamp.timeIntervalSince(time)) < abs($1.sample.timestamp.timeIntervalSince(time)) } }
+    }
 
     var body: some View {
         ScrollView {
@@ -70,7 +94,12 @@ struct RouteView: View {
                     if route.points.isEmpty {
                         ContentUnavailableView("Маршрут не записан", systemImage: "location.slash", description: Text("В этой сессии нет точек GPS с достаточной точностью. Данные движения и события сохранены отдельно."))
                     } else {
+                        Picker("Карта", selection: $satellite) {
+                            Text("Схема").tag(false)
+                            Text("Спутник").tag(true)
+                        }.pickerStyle(.segmented)
                         routeMap(route)
+                        Button("Показать весь маршрут") { camera = .automatic }
                         VStack(spacing: 12) {
                             LabeledContent("Дистанция GPS", value: metric(route.metrics.distanceMeters / 1000, unit: "км", digits: 2))
                             LabeledContent("Макс. скорость GPS", value: metric(route.metrics.maxSpeedMetersPerSecond.map { $0 * 3.6 }, unit: "км/ч"))
@@ -110,7 +139,7 @@ struct RouteView: View {
 
     private func routeMap(_ route: RouteAnalysis) -> some View {
         let segments = mapSegments
-        return Map {
+        return Map(position: $camera) {
             ForEach(segments.indices, id: \.self) { index in
                 MapPolyline(coordinates: segments[index].map { CLLocationCoordinate2D(latitude: $0.sample.latitude, longitude: $0.sample.longitude) })
                     .stroke(RiderTheme.action, lineWidth: 4)
@@ -123,8 +152,14 @@ struct RouteView: View {
                 Marker("Финиш", systemImage: "flag.checkered", coordinate: CLLocationCoordinate2D(latitude: last.sample.latitude, longitude: last.sample.longitude))
                     .tint(.indigo)
             }
+            if let selected = selectedPoint {
+                Annotation("Выбранная скорость", coordinate: CLLocationCoordinate2D(latitude: selected.sample.latitude, longitude: selected.sample.longitude)) {
+                    Image(systemName: "scope").font(.title2.bold()).foregroundStyle(.white).padding(6)
+                        .background(RiderTheme.action, in: Circle()).shadow(radius: 3)
+                }
+            }
         }
-        .mapStyle(.standard(elevation: .flat))
+        .mapStyle(satellite ? .imagery(elevation: .flat) : .standard(elevation: .flat))
         .mapControls { MapCompass(); MapScaleView() }
         .frame(height: 300)
         .clipShape(RoundedRectangle(cornerRadius: 20))
@@ -133,9 +168,7 @@ struct RouteView: View {
 
     private func speedChart(_ route: RouteAnalysis) -> some View {
         let points = speedPoints
-        let selected = selectedTime.flatMap { time in
-            points.min { abs($0.sample.timestamp.timeIntervalSince(time)) < abs($1.sample.timestamp.timeIntervalSince(time)) }
-        }
+        let selected = selectedPoint
         return VStack(alignment: .leading, spacing: 12) {
             Text("Скорость · км/ч").font(.headline)
             if points.isEmpty {
@@ -158,6 +191,9 @@ struct RouteView: View {
                 if let selected {
                     Text("\(selected.sample.timestamp.formatted(date: .omitted, time: .standard)) · \(metric(selected.speed.map { $0 * 3.6 }, unit: "км/ч"))")
                         .font(.subheadline.monospacedDigit())
+                    Button("Показать точку на карте") {
+                        camera = .region(MKCoordinateRegion(center: CLLocationCoordinate2D(latitude: selected.sample.latitude, longitude: selected.sample.longitude), span: MKCoordinateSpan(latitudeDelta: 0.003, longitudeDelta: 0.003)))
+                    }.font(.subheadline)
                 } else {
                     Text("Проведите по графику, чтобы выбрать ближайшее измерение.").font(.footnote).foregroundStyle(.secondary)
                 }

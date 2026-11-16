@@ -126,7 +126,7 @@ private struct RecordingView: View {
                 } else {
                     VStack(alignment: .leading, spacing: 12) {
                         Text("Занятие и снаряжение").font(.headline)
-                        SetupFields(setup: $recorder.draftSetup)
+                        SetupFields(setup: $recorder.draftSetup, recent: recorder.history)
                         Text("Настройки запомнятся для следующего старта. Тесты на земле не входят в статистику катания.")
                             .font(.footnote).foregroundStyle(.secondary)
                     }.lagoonCard()
@@ -312,6 +312,7 @@ struct SessionDetail: View {
     let originalSession: SessionSummary
     @State private var editingNotes = false
     @State private var editingSetup = false
+    @State private var setupCopied = false
 
     private var session: SessionSummary {
         recorder.history.first { $0.id == originalSession.id } ?? originalSession
@@ -350,6 +351,13 @@ struct SessionDetail: View {
                 }
                 Button("Изменить занятие и снаряжение") { editingSetup = true }
                     .disabled(recorder.analyzingSessionID == session.id)
+                if let setup = session.setup {
+                    Button("Использовать настройки для следующей сессии") {
+                        recorder.reuseSetup(setup)
+                        setupCopied = true
+                    }.disabled(recorder.live != nil)
+                    if setupCopied { Text("Настройки выбраны. Откройте вкладку «Запись».").font(.footnote).foregroundStyle(.secondary) }
+                }
             }.listRowBackground(RiderTheme.surface)
             Section {
                 if let analysis = session.jumpAnalysis {
@@ -360,11 +368,15 @@ struct SessionDetail: View {
                             .foregroundStyle(.secondary)
                     }
                     ForEach(Array(analysis.candidates.enumerated()), id: \.element.id) { index, candidate in
-                        CandidateRow(index: index, candidate: candidate, label: Binding(
-                            get: { session.review?.label(for: candidate, version: analysis.detectorVersion) ?? .unreviewed },
-                            set: { recorder.label(candidate.id, as: $0, in: session.id) }
-                        ))
-                        .disabled(recorder.analyzingSessionID == session.id)
+                        VStack(alignment: .leading, spacing: 8) {
+                            CandidateRow(index: index, candidate: candidate, label: Binding(
+                                get: { session.review?.label(for: candidate, version: analysis.detectorVersion) ?? .unreviewed },
+                                set: { recorder.label(candidate.id, as: $0, in: session.id) }
+                            ))
+                            NavigationLink { EventDetailView(recorder: recorder, originalSession: session, index: index) } label: {
+                                Label("График и разбор события", systemImage: "waveform.path")
+                            }
+                        }.disabled(recorder.analyzingSessionID == session.id)
                     }
                     if analysis.discontinuities > 0 {
                         Text("Разрывов данных: \(analysis.discontinuities). События через разрывы не объединяются.")
@@ -410,6 +422,9 @@ struct SessionDetail: View {
             }
             .listRowBackground(RiderTheme.surface)
             Section {
+                NavigationLink { SessionCardPreview(session: session) } label: {
+                    Label("Карточка сессии для отправки", systemImage: "photo")
+                }
                 ShareLink(item: SessionResultExport(session: session), preview: SharePreview("Результаты Rider")) {
                     Label("Экспортировать результат", systemImage: "square.and.arrow.up")
                         .foregroundStyle(RiderTheme.accent)
@@ -441,7 +456,7 @@ struct SessionDetail: View {
             }
         }
         .sheet(isPresented: $editingSetup) {
-            SetupEditor(setup: session.setup ?? SessionSetup()) { recorder.saveSetup($0, for: session.id) }
+            SetupEditor(setup: session.setup ?? SessionSetup(), recent: recorder.history) { recorder.saveSetup($0, for: session.id) }
         }
     }
 }
@@ -593,7 +608,7 @@ private struct SessionResultExport: Transferable {
     }
 }
 
-private func eventTimeText(_ seconds: Double) -> String {
+func eventTimeText(_ seconds: Double) -> String {
     let tenths = Int((seconds * 10).rounded())
     return String(format: "%02d:%02d,%d", tenths / 600, tenths / 10 % 60, tenths % 10)
 }
