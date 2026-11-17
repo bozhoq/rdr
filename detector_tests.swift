@@ -17,7 +17,7 @@ enum DetectorTests {
             gravityG: g,
             rotationRadiansPerSecond: Vector3(x: 0, y: angle == 0 ? 0 : 15, z: 0),
             attitude: Quaternion(x: 0, y: 0, z: 0, w: 1),
-            verticalAccelerationMetersPerSecondSquared: (1 - load) * -9.80665
+            verticalAccelerationMetersPerSecondSquared: (1 - load) * 9.80665
         )
     }
 
@@ -45,11 +45,13 @@ enum DetectorTests {
         let restoredAltitude = try JSONDecoder().decode(AltitudeMetrics.self, from: altitudeData)
         check(restoredAltitude.count == 3 && restoredAltitude.lowestMeters == -0.2 && restoredAltitude.highestMeters == 3.4 && restoredAltitude.longestIntervalSeconds == 2, "Restore barometer range and interval from checkpoint")
 
-        let still = (0...500).map { sample(Double($0) / 100, 1.02) }
+        let still = (0...300).map { sample(Double($0) / 100, 1.02) }
         let calibration = try MotionCalibration.measure(still)
+        check(still[0].upwardAcceleration > 0 && calibration.completedAtSeconds == 3,
+              "Convert the recorded projection to physical up and calibrate in three seconds")
         let original = still[0].verticalAccelerationMetersPerSecondSquared
         check(abs(calibration.frequencyHz - 100) < 0.001 && abs(calibration.correctedVertical(original, at: 6)) < 1e-9, "Calibrate a stable nonzero baseline")
-        check(calibration.correctedVertical(original, at: 5) == original, "Calibration respects the sample boundary")
+        check(calibration.correctedVertical(original, at: 3) == original, "Calibration respects the sample boundary")
         var shaking = still
         shaking[100] = sample(1, 1.02, angle: 0.5)
         do { _ = try MotionCalibration.measure(shaking); check(false, "Motion must invalidate calibration") }
@@ -132,8 +134,8 @@ enum DetectorTests {
         let ridingJumps = ridingTrace.dropFirst(342).compactMap { riding.process($0, calibration: nil, moving: false) }
         check(ridingJumps.count == 1 && ridingJumps[0].event.minimumLoadG > 0.65 &&
               (1.5...2.3).contains(ridingJumps[0].event.unloadingSeconds), "Detect a supported riding jump without GPS or free fall")
-        // A smooth supported indoor lift has no free-fall interval. Analytic
-        // position H*sin²(pi*t/T) returns to its initial height and velocity.
+        // Physical height H*sin²(pi*t/T) starts and finishes at rest.
+        // Use the sign actually written by iOS for upward acceleration.
         for duration in [2.0, 4.0, 6.0] {
             var hand = HandSimulationDetector()
             var results: [(JumpCandidate, Double)] = []
@@ -142,19 +144,31 @@ enum DetectorTests {
                 let phase = time - 1
                 let acceleration = phase >= 0 && phase < duration
                     ? 2 * 1.2 * Double.pi * Double.pi / (duration * duration) * cos(2 * Double.pi * phase / duration) : 0
-                if let event = hand.processMotion(sample(time, 1 + acceleration / 9.80665), calibration: nil,
-                                                  allowInertialFallback: true) { results.append(event) }
+                let bias = 0.03
+                if let event = hand.processMotion(sample(time, 1 + (acceleration + bias) / 9.80665)) {
+                    check(time >= duration + 1.5 && time < duration + 2,
+                          "Announce only after a settled return, within a second")
+                    results.append(event)
+                }
             }
             check(results.count == 1 && abs(results[0].1 - 1.2) < 0.15 &&
                   results[0].0.endSeconds >= duration + 0.95,
                   "Supported lift duration \(duration)s: expected one ~1.2m result, got \(results.map { $0.1 })")
         }
-        var noFallback = HandSimulationDetector()
-        check(ridingTrace.compactMap { noFallback.processMotion($0, calibration: nil, allowInertialFallback: false) }.isEmpty,
-              "Pressure mode never silently substitutes an inertial height")
+
+        var handAtUpperLevel = HandSimulationDetector()
+        let ascentOnly = (0...450).map { i in
+            let t = Double(i) / 100
+            let phase = t - 1
+            let acceleration = phase >= 0 && phase < 2 ? 1.2 * Double.pi * Double.pi / 8 * cos(Double.pi * phase / 2) : 0
+            return sample(t, 1 + acceleration / 9.80665)
+        }
+        check(ascentOnly.compactMap { handAtUpperLevel.processMotion($0) }.isEmpty,
+              "Stopping on a higher surface cannot close the excursion")
+
         var rejectHandToss = HandSimulationDetector()
-        check(standard.compactMap { rejectHandToss.processMotion($0, calibration: nil, allowInertialFallback: true) }.isEmpty,
-              "Free flight is not a supported hand lift")
+        check(standard.compactMap { rejectHandToss.processMotion($0) }.isEmpty,
+              "Sustained free flight is not a supported hand lift")
         var choppyRide = RidingJumpDetector()
         let chop = ridingTrace.enumerated().map { index, original in
             index < 100 ? sample(Double(index) / 100, 1 + 2.8 * sin(Double(index) * 0.19) / 9.80665) : original
