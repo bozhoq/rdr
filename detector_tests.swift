@@ -134,6 +134,41 @@ enum DetectorTests {
         let ridingJumps = ridingTrace.dropFirst(342).compactMap { riding.process($0, calibration: nil, moving: false) }
         check(ridingJumps.count == 1 && ridingJumps[0].event.minimumLoadG > 0.65 &&
               (1.5...2.3).contains(ridingJumps[0].event.unloadingSeconds), "Detect a supported riding jump without GPS or free fall")
+        func shortRide(unloadingCount: Int, landingLoad: Double, startsWithPush: Bool) -> [MotionSample] {
+            (0..<320).map { index in
+                let load: Double
+                if (88..<100).contains(index), startsWithPush { load = 2.8 }
+                else if (100..<(100 + unloadingCount)).contains(index) { load = 0.12 }
+                else if ((100 + unloadingCount)..<(105 + unloadingCount)).contains(index) { load = landingLoad }
+                else { load = 1.0 }
+                return sample(Double(index) / 100, load)
+            }
+        }
+        var shortRideDetector = RidingJumpDetector()
+        let briefJump = shortRide(unloadingCount: 30, landingLoad: 2.4, startsWithPush: true)
+        check(briefJump.prefix(140).compactMap { shortRideDetector.process($0, calibration: nil, moving: false) }.isEmpty,
+              "A short flight must wait for the landing confirmation")
+        let shortResults = briefJump.dropFirst(140).compactMap { shortRideDetector.process($0, calibration: nil, moving: false) }
+        check(shortResults.count == 1 && abs(shortResults[0].event.unloadingSeconds - 0.30) < 0.01 &&
+              shortResults[0].trajectory.isEmpty, "Save one brief jump without requiring GPS")
+        let shortEstimate = LiveJumpEstimate.riding(shortResults[0], altitude: [], gps: [], motionClock: nil)
+        check(shortEstimate.assumesLevelLanding == true && abs((shortEstimate.heightMeters ?? 0) - 0.097) < 0.015,
+              "Integrate the vertical acceleration of a short jump with a level landing")
+        func pressure(_ time: Double, _ height: Double) -> AltitudeSample {
+            AltitudeSample(elapsedSinceFirstSampleSeconds: time, pressureKilopascals: 100, relativeAltitudeMeters: height)
+        }
+        let differentLevels = [pressure(0.1, 1), pressure(0.8, 1), pressure(1.6, 0), pressure(2.3, 0)]
+        check(LiveJumpEstimate.riding(shortResults[0], altitude: differentLevels, gps: [], motionClock: nil).heightMeters == nil,
+              "Skip equal-level estimate when pressure confirms a change in level")
+        for trace in [
+            shortRide(unloadingCount: 12, landingLoad: 2.4, startsWithPush: true),
+            shortRide(unloadingCount: 30, landingLoad: 1.1, startsWithPush: true),
+            shortRide(unloadingCount: 30, landingLoad: 2.4, startsWithPush: false)
+        ] {
+            var detector = RidingJumpDetector()
+            check(trace.compactMap { detector.process($0, calibration: nil, moving: false) }.isEmpty,
+                  "Isolated unloading, weak returns and footstep-like blips are not short jumps")
+        }
         // Physical height H*sin²(pi*t/T) starts and finishes at rest.
         // Use the sign actually written by iOS for upward acceleration.
         for duration in [2.0, 4.0, 6.0] {
