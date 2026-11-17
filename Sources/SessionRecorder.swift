@@ -663,7 +663,10 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
         let key = SessionReview.key(for: event, version: session.jumpAnalysis?.detectorVersion ?? JumpDetector.version)
         try log.append("liveJumpEstimate", JumpEstimateEntry(startSeconds: event.startSeconds, endSeconds: event.endSeconds, estimate: estimate))
         session.liveJumpEstimates?[key] = estimate
-        if speak, voiceEnabled, let height = estimate.heightMeters, let phrase = LiveJumpEstimate.spokenHeight(height) {
+        let phrase = estimate.heightMeters.flatMap(LiveJumpEstimate.spokenHeight)
+            .map { estimate.assumesLevelLanding == true ? "Примерно \($0)" : $0 }
+            ?? (session.recordingMode == .battle ? "Прыжок" : nil)
+        if speak, voiceEnabled, let phrase {
             let utterance = AVSpeechUtterance(string: phrase)
             utterance.voice = AVSpeechSynthesisVoice(language: "ru-RU")
             speech.speak(utterance)

@@ -448,6 +448,7 @@ struct LiveJumpEstimate: Codable {
     var isPhoneToss: Bool?
     var isHandLift: Bool?
     var inertialLift: Bool?
+    var assumesLevelLanding: Bool?
 
     static func phoneToss(_ event: JumpCandidate) -> Self? {
         guard event.minimumLoadG.isFinite, (0...0.2).contains(event.minimumLoadG),
@@ -459,11 +460,30 @@ struct LiveJumpEstimate: Codable {
                        gps: [RoutePoint], motionClock: Date?) -> Self {
         let event = flight.event
         let start = event.startSeconds, end = event.endSeconds
-        return Self(heightMeters: ridingHeight(flight, altitude: altitude), airtimeSeconds: event.unloadingSeconds,
-                    distanceMeters: gpsDistance(start: start, end: end, gps: gps, motionClock: motionClock))
+        let corroborated = ridingHeight(flight, altitude: altitude)
+        let approximate = corroborated == nil && !pressureShowsLevelChange(start: start, end: end, altitude: altitude)
+            ? flight.levelLandingHeight : nil
+        return Self(heightMeters: corroborated ?? approximate, airtimeSeconds: event.unloadingSeconds,
+                    distanceMeters: gpsDistance(start: start, end: end, gps: gps, motionClock: motionClock),
+                    assumesLevelLanding: approximate != nil ? true : nil)
+    }
+
+    private static func pressureShowsLevelChange(start: Double, end: Double, altitude: [AltitudeSample]) -> Bool {
+        let before = altitude.filter { $0.elapsedSinceFirstSampleSeconds >= start - 2.5
+            && $0.elapsedSinceFirstSampleSeconds <= start }.suffix(2)
+        let after = altitude.filter { $0.elapsedSinceFirstSampleSeconds >= end + 0.15
+            && $0.elapsedSinceFirstSampleSeconds <= end + 3 }.prefix(2)
+        guard before.count == 2, after.count == 2, let pre = before.first, let preLast = before.last,
+              let post = after.first, let postLast = after.last,
+              abs(pre.relativeAltitudeMeters - preLast.relativeAltitudeMeters) <= 0.15,
+              abs(post.relativeAltitudeMeters - postLast.relativeAltitudeMeters) <= 0.15 else { return false }
+        let beforeHeight = (pre.relativeAltitudeMeters + preLast.relativeAltitudeMeters) * 0.5
+        let afterHeight = (post.relativeAltitudeMeters + postLast.relativeAltitudeMeters) * 0.5
+        return abs(afterHeight - beforeHeight) > 0.30
     }
 
     private static func ridingHeight(_ flight: RidingJumpDetector.Flight, altitude: [AltitudeSample]) -> Double? {
+        guard !flight.trajectory.isEmpty else { return nil }
         let start = flight.event.startSeconds, end = flight.event.endSeconds
         guard start.isFinite, end.isFinite, end > start,
               flight.settledHeight.isFinite, flight.residualVelocity.isFinite,

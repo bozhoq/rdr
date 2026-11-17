@@ -165,7 +165,7 @@ struct JumpDetector {
 /// Detects a push, ascent, descent and braking as separate phases. A kite jump
 /// can stay loaded in the air, so it never needs a free-fall interval.
 struct RidingJumpDetector {
-    static let version = "ride-3"
+    static let version = "ride-5"
 
     struct Point {
         let time: Double
@@ -177,6 +177,7 @@ struct RidingJumpDetector {
         let trajectory: [Point]
         let settledHeight: Double
         let residualVelocity: Double
+        var levelLandingHeight: Double? = nil
     }
 
     private struct Motion {
@@ -202,12 +203,56 @@ struct RidingJumpDetector {
         var trajectory: [Point] = []
     }
 
+    private struct ShortFlight {
+        let start: Double
+        var minimumLoad: Double
+        var maximumSpin: Double
+        var landing: Double?
+        var landingLoad = 0.0
+        var landingAcceleration = 0.0
+        var samples: [Motion]
+
+        func estimateHeight() -> Double? {
+            guard let landing, samples.count >= 15 else { return nil }
+            let duration = landing - start
+            var velocity = 0.0
+            var displacement = 0.0
+            var lowLoadTime = 0.0
+            var positions: [Point] = []
+            for (before, after) in zip(samples, samples.dropFirst()) {
+                let dt = after.time - before.time
+                let nextVelocity = velocity + (before.vertical + after.vertical) * 0.5 * dt
+                displacement += (velocity + nextVelocity) * 0.5 * dt
+                if before.load < 0.70 { lowLoadTime += dt }
+                positions.append(Point(time: after.time, height: displacement))
+                velocity = nextVelocity
+            }
+            // Estimate only in a predominantly unloaded short flight. Use
+            // equal takeoff and landing heights to solve for vertical velocity
+            // at takeoff. Horizontal motion does not enter this calculation.
+            guard lowLoadTime >= duration * 0.75,
+                  (-13.0 ... -6.0).contains(velocity / duration) else { return nil }
+            let takeoffVelocity = -displacement / duration
+            guard takeoffVelocity > 0.5, takeoffVelocity + velocity < -0.5 else { return nil }
+            let apex = positions.max {
+                $0.height + takeoffVelocity * ($0.time - start) < $1.height + takeoffVelocity * ($1.time - start)
+            }
+            guard let apex, (0.2...0.8).contains((apex.time - start) / duration) else { return nil }
+            let height = apex.height + takeoffVelocity * (apex.time - start)
+            return (0.08...0.95).contains(height) ? height : nil
+        }
+    }
+
     private(set) var discontinuities = 0
     private var previous: Motion?
     private var settledSince: Double?
     private var preparation: [Motion] = []
     private var preparedUntil = -Double.infinity
     private var arc: Arc?
+    private var lastPush = -Double.infinity
+    private var shortFlight: ShortFlight?
+    private var pendingShortFlight: Flight?
+    private var lastLanding = -Double.infinity
 
     mutating func process(_ sample: MotionSample, calibration: MotionCalibration?, moving: Bool) -> Flight? {
         let time = sample.elapsedSinceFirstSampleSeconds
@@ -232,10 +277,36 @@ struct RidingJumpDetector {
         defer { previous = motion }
         guard let last = previous else { return nil }
 
+        if let detected = detectShortFlight(Motion(time: time, vertical: raw, load: load, spin: spin)) {
+            pendingShortFlight = detected
+        }
+        if var flight = detectRidingFlight(from: last, to: motion, moving: moving) {
+            if let pendingShortFlight, pendingShortFlight.event.startSeconds <= flight.event.endSeconds,
+               pendingShortFlight.event.endSeconds >= flight.event.startSeconds {
+                flight.levelLandingHeight = pendingShortFlight.levelLandingHeight
+                self.pendingShortFlight = nil
+            }
+            if let shortFlight, shortFlight.start <= flight.event.endSeconds {
+                self.shortFlight = nil
+            }
+            lastLanding = flight.event.endSeconds
+            return flight
+        }
+        guard let short = pendingShortFlight,
+              arc == nil || time >= short.event.endSeconds + 0.45 else { return nil }
+        pendingShortFlight = nil
+        lastLanding = short.event.endSeconds
+        arc = nil
+        return short
+    }
+
+    private mutating func detectRidingFlight(from last: Motion, to motion: Motion, moving: Bool) -> Flight? {
         if let current = arc {
             arc = nil
             return advance(current, from: last, to: motion)
         }
+        let time = motion.time
+        let filtered = motion.vertical
         // A rider may be edging through chop, not standing still. A bounded
         // one-second window with near-zero mean vertical acceleration supplies
         // context without GPS. It never supplies height or proves takeoff.
@@ -251,11 +322,58 @@ struct RidingJumpDetector {
         if abs(filtered) <= 1.0 {
             if settledSince == nil { settledSince = time }
         } else if filtered >= 1.7, (time - (settledSince ?? time) >= 0.25 || time <= preparedUntil) {
-            arc = Arc(began: last.time, launchSpeed: moving ? 1.15 : 1.35, minimumLoad: load, maximumRotation: spin)
+            arc = Arc(began: last.time, launchSpeed: moving ? 1.15 : 1.35,
+                      minimumLoad: motion.load, maximumRotation: motion.spin)
             settledSince = nil
         } else if filtered < -1.0 {
             settledSince = nil
         }
+        return nil
+    }
+
+    private mutating func detectShortFlight(_ motion: Motion) -> Flight? {
+        let time = motion.time, vertical = motion.vertical, load = motion.load, spin = motion.spin
+        let followsPush = time - lastPush <= 0.55
+        if load >= 1.55 && vertical >= 5 { lastPush = time }
+        guard var flight = shortFlight else {
+            if load <= 0.52, followsPush, time - lastLanding >= 0.35 {
+                shortFlight = ShortFlight(start: time, minimumLoad: load, maximumSpin: spin, samples: [motion])
+            }
+            return nil
+        }
+        flight.maximumSpin = max(flight.maximumSpin, spin)
+        if let landing = flight.landing {
+            let recovery = time - landing
+            guard recovery <= 0.18, load >= 0.50 else {
+                shortFlight = nil
+                return nil
+            }
+            flight.landingLoad = max(flight.landingLoad, load)
+            flight.landingAcceleration = max(flight.landingAcceleration, vertical)
+            if recovery >= 0.10, flight.landingLoad >= 1.65, flight.landingAcceleration >= 4 {
+                shortFlight = nil
+                lastPush = -.infinity
+                guard landing - flight.start >= 0.22, flight.minimumLoad <= 0.22 else { return nil }
+                let event = JumpCandidate(startSeconds: flight.start, endSeconds: landing,
+                                          minimumLoadG: flight.minimumLoad, returnPeakG: flight.landingLoad,
+                                          maximumRotationRadiansPerSecond: flight.maximumSpin)
+                return Flight(event: event, trajectory: [], settledHeight: 0, residualVelocity: 0,
+                              levelLandingHeight: flight.estimateHeight())
+            }
+        } else {
+            guard time - flight.start <= 0.75 else {
+                shortFlight = nil
+                return nil
+            }
+            flight.samples.append(motion)
+            flight.minimumLoad = min(flight.minimumLoad, load)
+            if load >= 0.80 {
+                flight.landing = time
+                flight.landingLoad = load
+                flight.landingAcceleration = vertical
+            }
+        }
+        shortFlight = flight
         return nil
     }
 
@@ -264,6 +382,10 @@ struct RidingJumpDetector {
         previous = nil
         settledSince = nil
         arc = nil
+        lastPush = -.infinity
+        shortFlight = nil
+        pendingShortFlight = nil
+        lastLanding = -.infinity
         preparation.removeAll()
         preparedUntil = -Double.infinity
     }
