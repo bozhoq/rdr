@@ -242,9 +242,11 @@ enum DetectorTests {
                         attitude: Quaternion(x: 0, y: 0, z: 0, w: 1),
                         verticalAccelerationMetersPerSecondSquared: -vertical)
                     if let measured = tracker.process(raw, calibration: calibration) {
-                        check(time >= duration + 2 && measured.event.startSeconds < measured.apexSeconds &&
+                        let remainingHeight = phase < duration ? height * pow(sin(Double.pi * phase / duration), 2) : 0
+                        check(phase > duration * 0.5 && remainingHeight <= 0.10 &&
+                              measured.event.startSeconds < measured.apexSeconds &&
                               measured.apexSeconds < measured.event.endSeconds,
-                              "Remember an apex and finish after descent and return while moving")
+                              "Remember the apex and finish within ten centimeters of the initial level while moving")
                         measurements.append(measured)
                     }
                 }
