@@ -569,16 +569,16 @@ struct LiveJumpEstimate: Codable {
 /// Pressure measures supported hand lifts. Motion only rejects free fall and
 /// supplies a conservative still-to-still fallback when pressure is unavailable.
 struct HandSimulationDetector {
-    static let version = "hand-practice-4"
+    static let version = "hand-practice-5"
     private var quiet: [Double] = []
     private var baseline: Double?
     private var returnTolerance = 0.28
     private var previousTime: Double?
     private var lift: Lift?
-    private var unsupportedUntil = -Double.infinity
-    private var previousMotion: (time: Double, acceleration: Double)?
-    private var stillSince: Double?
-    private var inertial: InertialLift?
+    private var previousMotion: Motion?
+    private var rest: Rest?
+    private var excursion: Excursion?
+    private var lowLoadSince: Double?
 
     private struct Lift {
         let start: Double
@@ -586,96 +586,159 @@ struct HandSimulationDetector {
         var returnTime: Double?
         var returnAltitude: Double?
     }
-    private struct InertialLift {
-        let start: Double
-        var velocity = 0.0
-        var height = 0.0
-        var peak = 0.0
-        var minimumLoad = 1.0
-        var maximumLoad = 1.0
-        var maximumSpin = 0.0
-        var descended = false
-        var settledSince: Double?
+
+    private struct Motion {
+        let time: Double
+        let upwardAcceleration: Double
+        let load: Double
+        let spin: Double
     }
 
-    /// Call alongside pressure, so a tossed phone cannot become a supported lift.
-    /// Gravity-projected acceleration survives orientation changes. The gyro
-    /// rejects unstable endpoints.
-    mutating func processMotion(_ sample: MotionSample, calibration: MotionCalibration?,
-                                allowInertialFallback: Bool) -> (JumpCandidate, Double)? {
+    private struct Rest {
+        let start: Double
+        var sum = 0.0
+        var count = 0
+
+        mutating func add(_ acceleration: Double) {
+            sum += acceleration
+            count += 1
+        }
+
+        var mean: Double { sum / Double(count) }
+    }
+
+    private struct Excursion {
+        let baselineAcceleration: Double
+        var samples: [Motion]
+        var stoppedAt: Double?
+        var lastAnalysisAt = -Double.infinity
+
+        func estimate(endingAt end: Double) -> (event: JumpCandidate?, height: Double)? {
+            guard let first = samples.first, let last = samples.last else { return nil }
+            let duration = last.time - first.time
+            guard end - first.time >= 0.55, duration > 0 else { return nil }
+            var velocity = 0.0
+            var position = 0.0
+            var positions: [Double] = [0]
+            var previous = first
+            for sample in samples.dropFirst() {
+                let dt = sample.time - previous.time
+                let nextVelocity = velocity + ((previous.upwardAcceleration + sample.upwardAcceleration) * 0.5
+                                               - baselineAcceleration) * dt
+                position += (velocity + nextVelocity) * 0.5 * dt
+                positions.append(position)
+                velocity = nextVelocity
+                previous = sample
+            }
+
+            // Remove the measured velocity drift before testing the return to
+            // the original level. A movement that ends on a shelf must fail.
+            let closure = position - velocity * duration * 0.5
+            guard abs(velocity) <= 0.45, abs(closure) <= 0.4 else { return nil }
+            var peak = 0.0
+            var low = 0.0
+            var peakTime = first.time
+            for (sample, position) in zip(samples, positions) {
+                let elapsed = sample.time - first.time
+                let fraction = elapsed / duration
+                let height = position - velocity * elapsed * fraction * 0.5
+                    - closure * fraction * fraction * (3 - 2 * fraction)
+                if height > peak {
+                    peak = height
+                    peakTime = sample.time
+                }
+                low = min(low, height)
+            }
+            if abs(closure) <= 0.18, peak < 0.4, low >= -0.16 { return (nil, peak) }
+            guard (0.4...4).contains(peak), peakTime < end,
+                  abs(closure) <= max(0.18, peak * 0.20), low >= -max(0.16, peak * 0.20) else { return nil }
+            let event = JumpCandidate(startSeconds: first.time, endSeconds: end,
+                                      minimumLoadG: samples.map(\.load).min() ?? 1,
+                                      returnPeakG: samples.map(\.load).max() ?? 1,
+                                      maximumRotationRadiansPerSecond: samples.map(\.spin).max() ?? 0)
+            return (event, peak)
+        }
+    }
+
+    mutating func processMotion(_ sample: MotionSample) -> (event: JumpCandidate, height: Double)? {
         let time = sample.elapsedSinceFirstSampleSeconds
         let a = sample.accelerationG, g = sample.gravityG, r = sample.rotationRadiansPerSecond
         let load = sqrt(pow(a.x + g.x, 2) + pow(a.y + g.y, 2) + pow(a.z + g.z, 2))
         let spin = sqrt(r.x * r.x + r.y * r.y + r.z * r.z)
         let magnitude = sqrt(a.x * a.x + a.y * a.y + a.z * a.z) * 9.80665
-        let vertical = calibration?.correctedVertical(sample.verticalAccelerationMetersPerSecondSquared, at: time)
-            ?? sample.verticalAccelerationMetersPerSecondSquared
-        guard time.isFinite, time >= 0, vertical.isFinite, load.isFinite, spin.isFinite, magnitude.isFinite else {
-            previousMotion = nil; inertial = nil; stillSince = nil; lift = nil
+        let upward = sample.upwardAcceleration
+        guard time.isFinite, time >= 0, upward.isFinite, load.isFinite, spin.isFinite, magnitude.isFinite else {
+            previousMotion = nil
+            rest = nil
+            excursion = nil
+            lowLoadSince = nil
             return nil
-        }
-        if load < 0.35 {
-            unsupportedUntil = time + 2
-            lift = nil; inertial = nil; baseline = nil; quiet.removeAll()
         }
         let prior = previousMotion
-        previousMotion = (time, vertical)
-        guard let prior, time > prior.time, time - prior.time <= 0.05 else {
-            inertial = nil; stillSince = nil
-            return nil
+        let motion = Motion(time: time, upwardAcceleration: upward, load: load, spin: spin)
+        previousMotion = motion
+        if let prior, time <= prior.time || time - prior.time > 0.05 {
+            rest = nil
+            excursion = nil
+            lowLoadSince = nil
         }
-        let still = magnitude <= 0.28 && abs(vertical) <= 0.22 && spin <= 0.35
-        guard allowInertialFallback, time > unsupportedUntil else {
-            inertial = nil; stillSince = nil
-            return nil
-        }
-        if var track = inertial {
-            let dt = time - prior.time
-            let oldVelocity = track.velocity
-            track.velocity += (prior.acceleration + vertical) * 0.5 * dt
-            track.height += (oldVelocity + track.velocity) * 0.5 * dt
-            track.peak = max(track.peak, track.height)
-            track.minimumLoad = min(track.minimumLoad, load)
-            track.maximumLoad = max(track.maximumLoad, load)
-            track.maximumSpin = max(track.maximumSpin, spin)
-            if track.peak >= 0.4 && track.velocity < -0.15 { track.descended = true }
-            guard time - track.start <= 10, abs(track.velocity) < 5, track.height > -0.4, track.peak < 4 else {
-                inertial = nil; stillSince = nil
-                return nil
-            }
-            // Near-zero acceleration also occurs at peak ascent/descent speed.
-            // Start the dwell only after velocity and position return close to
-            // their initial values; otherwise a slow descent is discarded early.
-            let closed = abs(track.velocity) <= 0.18 &&
-                abs(track.height) <= min(0.25, max(0.10, track.peak * 0.12))
-            if still && track.descended && closed {
-                if track.settledSince == nil { track.settledSince = time }
-                if time - (track.settledSince ?? time) >= 0.45 {
-                    inertial = nil; stillSince = time
-                    // Endpoint constraints bound drift; they cannot certify an
-                    // absolute height. This remains an approximate indoor test.
-                    guard abs(track.velocity) <= 0.18,
-                          abs(track.height) <= min(0.25, max(0.10, track.peak * 0.12)),
-                          (0.4...3.5).contains(track.peak), track.minimumLoad >= 0.35 else { return nil }
-                    return (JumpCandidate(startSeconds: track.start, endSeconds: track.settledSince ?? time,
-                                          minimumLoadG: track.minimumLoad, returnPeakG: track.maximumLoad,
-                                          maximumRotationRadiansPerSecond: track.maximumSpin), track.peak)
-                }
-            } else { track.settledSince = nil }
-            inertial = track
-        } else if still {
-            if stillSince == nil { stillSince = time }
+        if load < 0.35 {
+            if lowLoadSince == nil { lowLoadSince = time }
         } else {
-            if vertical > 0.35, time - (stillSince ?? time) >= 0.35 {
-                let dt = time - prior.time
-                var track = InertialLift(start: prior.time)
-                track.velocity = (prior.acceleration + vertical) * 0.5 * dt
-                track.height = track.velocity * 0.5 * dt
-                inertial = track
-            }
-            stillSince = nil
+            lowLoadSince = nil
         }
-        return nil
+        // A fast hand movement can briefly approach zero load at the top.
+        // Only sustained unloading cancels the measurement as a possible toss.
+        if let lowLoadSince, time - lowLoadSince >= 0.18 {
+            rest = nil
+            excursion = nil
+            return nil
+        }
+
+        let still = magnitude <= 0.30 && spin <= 0.35
+        if excursion == nil {
+            if still {
+                if rest == nil { rest = Rest(start: time) }
+                rest?.add(upward)
+            } else {
+                if let prior, let rest, prior.time - rest.start >= 0.35 {
+                    excursion = Excursion(baselineAcceleration: rest.mean, samples: [prior, motion])
+                }
+                rest = nil
+            }
+            return nil
+        }
+
+        guard let start = excursion?.samples.first?.time, time - start <= 22 else {
+            excursion = nil
+            rest = nil
+            return nil
+        }
+        excursion?.samples.append(motion)
+        guard still else {
+            excursion?.stoppedAt = nil
+            return nil
+        }
+        if excursion?.stoppedAt == nil { excursion?.stoppedAt = time }
+        guard let end = excursion?.stoppedAt, time - end >= 0.60,
+              let lastAnalysis = excursion?.lastAnalysisAt, time - lastAnalysis >= 0.2 else { return nil }
+        excursion?.lastAnalysisAt = time
+
+        guard let estimate = excursion?.estimate(endingAt: end) else { return nil }
+        // A pause at the top can last a while. Keep the excursion for a
+        // subsequent descent, unless this was only a small closed movement.
+        guard estimate.event != nil || time - end >= 1.2 else { return nil }
+        excursion = nil
+        rest = Rest(start: end)
+        rest?.add(upward)
+        return estimate.event.map { ($0, estimate.height) }
+    }
+
+    mutating func resetPressure() {
+        quiet.removeAll()
+        baseline = nil
+        previousTime = nil
+        lift = nil
     }
 
     mutating func consume(_ sample: AltitudeSample) -> (JumpCandidate, Double)? {
@@ -689,7 +752,6 @@ struct HandSimulationDetector {
             lift = nil; baseline = nil; quiet.removeAll()
         }
         previousTime = time
-        guard time > unsupportedUntil else { return nil }
         if var lift, let baseline {
             if time - lift.start > 75 || abs(altitude - baseline) > 5 {
                 self.lift = nil; self.baseline = nil; quiet.removeAll()

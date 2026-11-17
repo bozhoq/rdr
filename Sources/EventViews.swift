@@ -194,7 +194,7 @@ struct EventDetailView: View {
     }
 
     private func estimateExplanation(_ estimate: LiveJumpEstimate) -> String {
-        if estimate.inertialLift == true { return "Приблизительная высота по движению телефона. Барометр не подтвердил пик." }
+        if estimate.inertialLift == true { return "Приблизительная высота по движению телефона." }
         if session.handSimulationTest == true || estimate.isHandLift == true { return "Барометр замеряет подъём телефона и время выше исходного уровня." }
         if estimate.isPhoneToss == true { return "Оценка по времени полёта, если телефон отпустили и поймали примерно на одном уровне." }
         if estimate.heightMeters == nil { return "Приземление зафиксировано. Данных для оценки высоты недостаточно." }
@@ -204,7 +204,7 @@ struct EventDetailView: View {
     private func diagnostics(_ candidate: JumpCandidate) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             if session.handSimulationTest != true {
-                LabeledContent(session.jumpAnalysis?.detectorVersion == RidingJumpDetector.version ? "Полёт" : "Разгрузка",
+                LabeledContent(session.jumpAnalysis?.detectorVersion.hasPrefix("ride-") == true ? "Полёт" : "Разгрузка",
                                value: metric(candidate.unloadingSeconds, unit: "с", digits: 2))
                 LabeledContent("Минимальная нагрузка", value: metric(candidate.minimumLoadG, unit: "g", digits: 2))
                 LabeledContent("Пик после события", value: metric(candidate.returnPeakG, unit: "g"))
@@ -293,7 +293,7 @@ struct EventDetailView: View {
 
     private var graphExplanation: String {
         if session.handSimulationTest == true { return "Выделен подъём, обнаруженный барометром." }
-        if session.jumpAnalysis?.detectorVersion == RidingJumpDetector.version { return "Выделен интервал от отрыва до начала приземления." }
+        if session.jumpAnalysis?.detectorVersion.hasPrefix("ride-") == true { return "Выделен интервал от отрыва до начала приземления." }
         return "Выделенный участок — разгрузка. Около 1 g соответствует покою, около 0 g — почти свободному падению телефона."
     }
 

@@ -47,7 +47,6 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
     private var recentAltitude: [AltitudeSample] = []
     private var recentFixes: [RoutePoint] = []
     private var pendingRides: [RidingJumpDetector.Flight] = []
-    private var pendingTestLifts: [(event: JumpCandidate, height: Double)] = []
     private var motionClock: Date?
     private let calibrationKey = "rider.calibrationByPlacement"
     private let sensorCheckKey = "rider.completedSensorCheck"
@@ -175,7 +174,7 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
             }
         }
         checkTask = Task { [weak self] in
-            do { try await Task.sleep(for: .seconds(7)) } catch { return }
+            do { try await Task.sleep(for: .seconds(5)) } catch { return }
             self?.finishSensorCheck(id)
         }
     }
@@ -289,7 +288,6 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
         recentAltitude.removeAll()
         recentFixes.removeAll()
         pendingRides.removeAll()
-        pendingTestLifts.removeAll()
         motionClock = session.startedAt
 
         if session.gpsEnabledAtStart {
@@ -517,15 +515,8 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
                 }
                 session.jumpAnalysis?.discontinuities = ridingDetector.discontinuities
             } else if session.handSimulationTest == true {
-                let pressure = session.altitude
-                if let (event, height) = handSimulation.processMotion(sample, calibration: session.motionCalibration,
-                                                                     allowInertialFallback: true) {
-                    if pressure?.supported == true && pressure?.stoppedWithError == false &&
-                        elapsed - (pressure?.lastElapsedSeconds ?? 0) <= 3.5 {
-                        pendingTestLifts.append((event, height))
-                    } else {
-                        try recordGroundLift(event, height: height, session: &session, log: log, inertial: true)
-                    }
+                if let lift = handSimulation.processMotion(sample) {
+                    try recordGroundLift(lift.event, height: lift.height, session: &session, log: log, inertial: true)
                 }
             }
             summary = session
@@ -583,8 +574,14 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
                     self.recentAltitude.append(sample)
                     self.recentAltitude.removeAll { sample.elapsedSinceFirstSampleSeconds - $0.elapsedSinceFirstSampleSeconds > 24 }
                     if self.recentAltitude.count > 128 { self.recentAltitude.removeFirst() }
-                    if session.handSimulationTest == true, let (event, height) = self.handSimulation.consume(sample) {
-                        try self.recordGroundLift(event, height: height, session: &session, log: log)
+                    let motionAge = sample.elapsedSinceFirstSampleSeconds - (session.motion.lastElapsedSeconds ?? 0)
+                    let pressureOnly = session.sensors?.deviceMotion != true || motionAge > 2
+                    if session.handSimulationTest == true {
+                        if !pressureOnly {
+                            self.handSimulation.resetPressure()
+                        } else if let (event, height) = self.handSimulation.consume(sample) {
+                            try self.recordGroundLift(event, height: height, session: &session, log: log)
+                        }
                     }
                 } else { return }
                 session.altitude = altitude
@@ -597,7 +594,7 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
     }
 
     private func recordGroundLift(_ event: JumpCandidate, height: Double, session: inout SessionSummary,
-                                  log: SessionLog, inertial: Bool = false, speak: Bool = true) throws {
+                                  log: SessionLog, inertial: Bool = false) throws {
         let overlaps = session.jumpAnalysis?.candidates.contains {
             $0.startSeconds < event.endSeconds && $0.endSeconds > event.startSeconds
         }
@@ -608,7 +605,7 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
                                                    gps: recentFixes, motionClock: motionClock)
         let estimate = LiveJumpEstimate(heightMeters: height, airtimeSeconds: event.unloadingSeconds,
                                         distanceMeters: distance, isHandLift: true, inertialLift: inertial)
-        try storeEstimate(estimate, for: event, session: &session, log: log, speak: speak)
+        try storeEstimate(estimate, for: event, session: &session, log: log, speak: true)
     }
 
     private func recordLocation(_ point: CLLocation) {
@@ -653,11 +650,6 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
     private func resolveJumps(_ session: inout SessionSummary, log: SessionLog, finishing: Bool = false) throws {
         let elapsed = ProcessInfo.processInfo.systemUptime - (motionTimeOrigin ?? ProcessInfo.processInfo.systemUptime)
         let pressureAvailable = session.altitude?.supported == true && session.altitude?.stoppedWithError == false
-        while let lift = pendingTestLifts.first,
-              finishing || !pressureAvailable || elapsed >= lift.event.endSeconds + 3.5 {
-            pendingTestLifts.removeFirst()
-            try recordGroundLift(lift.event, height: lift.height, session: &session, log: log, inertial: true, speak: !finishing)
-        }
         while let flight = pendingRides.first,
               finishing || elapsed >= flight.event.endSeconds + (pressureAvailable ? 3.0 : 0.8) {
             pendingRides.removeFirst()
@@ -695,7 +687,7 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
     private func checkpointIfDue(force: Bool = false) {
         guard var session = summary, let log, let lastCheckpoint else { return }
         let now = clock.now
-        if let calibrationStartedAt, calibrationStartedAt.duration(to: now) > .seconds(8) {
+        if let calibrationStartedAt, calibrationStartedAt.duration(to: now) > .seconds(6) {
             resetCalibration(message: MotionCalibration.Failure.timing.message)
         }
         guard force || lastCheckpoint.duration(to: now) >= .seconds(1) else { return }

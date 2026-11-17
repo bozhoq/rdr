@@ -225,10 +225,14 @@ struct MotionSample: Codable {
     let rotationRadiansPerSecond: Vector3
     let attitude: Quaternion
     let verticalAccelerationMetersPerSecondSquared: Double
+
+    // The stored projection in legacy and current logs has the opposite sign
+    // from upward physical acceleration. Keep the JSON convention stable.
+    var upwardAcceleration: Double { -verticalAccelerationMetersPerSecondSquared }
 }
 
 struct MotionCalibration: Codable {
-    static let durationSeconds: Double = 5
+    static let durationSeconds: Double = 3
 
     let completedAtSeconds: Double
     let frequencyHz: Double
@@ -241,7 +245,7 @@ struct MotionCalibration: Codable {
         var message: String {
             switch self {
             case .timing: return "Замеры шли с пропусками или слишком редко. Повторите калибровку."
-            case .movement: return "Телефон двигался. Закрепите его и замрите на 5 секунд."
+            case .movement: return "Телефон двигался. Закрепите его и замрите на 3 секунды."
             }
         }
     }

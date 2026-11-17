@@ -165,7 +165,7 @@ struct JumpDetector {
 /// Detects a push, ascent, descent and braking as separate phases. A kite jump
 /// can stay loaded in the air, so it never needs a free-fall interval.
 struct RidingJumpDetector {
-    static let version = "ride-2"
+    static let version = "ride-3"
 
     struct Point {
         let time: Double
@@ -214,8 +214,8 @@ struct RidingJumpDetector {
         let a = sample.accelerationG, g = sample.gravityG, r = sample.rotationRadiansPerSecond
         let load = (pow(a.x + g.x, 2) + pow(a.y + g.y, 2) + pow(a.z + g.z, 2)).squareRoot()
         let spin = (r.x * r.x + r.y * r.y + r.z * r.z).squareRoot()
-        let raw = calibration?.correctedVertical(sample.verticalAccelerationMetersPerSecondSquared, at: time)
-            ?? sample.verticalAccelerationMetersPerSecondSquared
+        let corrected = calibration?.correctedVertical(sample.verticalAccelerationMetersPerSecondSquared, at: time)
+        let raw = corrected.map { -$0 } ?? sample.upwardAcceleration
         guard time.isFinite, time >= 0, raw.isFinite, load.isFinite, spin.isFinite else {
             breakContinuity()
             return nil

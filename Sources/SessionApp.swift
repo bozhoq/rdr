@@ -212,7 +212,7 @@ private struct RecordingView: View {
             Form {
                 Section("Калибровка") {
                     if recorder.sensorCheckRunning {
-                        ProgressView("Не двигайте телефон 5 секунд")
+                        ProgressView("Не двигайте телефон 3 секунды")
                     } else if recorder.checkedCalibration != nil {
                         Label("Калибровка готова", systemImage: "checkmark.circle")
                     } else if let message = recorder.sensorCheckMessage {
@@ -357,7 +357,7 @@ private struct RecordingView: View {
                         }
                         CalibrationRows(calibration: calibration)
                     } else if recorder.isCalibrating {
-                        ProgressView("Замрите на 5 секунд")
+                        ProgressView("Замрите на 3 секунды")
                     } else {
                         Button("Калибровать телефон", action: recorder.calibrateMotion)
                             .disabled(!recorder.motionIsRecent)
