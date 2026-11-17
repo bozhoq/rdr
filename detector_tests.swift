@@ -154,6 +154,11 @@ enum DetectorTests {
         let shortEstimate = LiveJumpEstimate.riding(shortResults[0], altitude: [], gps: [], motionClock: nil)
         check(shortEstimate.assumesLevelLanding == true && abs((shortEstimate.heightMeters ?? 0) - 0.097) < 0.015,
               "Integrate the vertical acceleration of a short jump with a level landing")
+        let handheldEstimate = LiveJumpEstimate.riding(shortResults[0], altitude: [], gps: [], motionClock: nil,
+                                                      allowLevelLandingEstimate: false)
+        check(handheldEstimate.heightMeters == nil && handheldEstimate.assumesLevelLanding == nil &&
+              handheldEstimate.airtimeSeconds == shortEstimate.airtimeSeconds,
+              "A handheld phone with unknown endpoint heights cannot use the level-landing assumption")
         func pressure(_ time: Double, _ height: Double) -> AltitudeSample {
             AltitudeSample(elapsedSinceFirstSampleSeconds: time, pressureKilopascals: 100, relativeAltitudeMeters: height)
         }
@@ -169,6 +174,27 @@ enum DetectorTests {
             check(trace.compactMap { detector.process($0, calibration: nil, moving: false) }.isEmpty,
                   "Isolated unloading, weak returns and footstep-like blips are not short jumps")
         }
+        var repeatedMovement = RidingJumpDetector()
+        var rejectionReasons: [String] = []
+        let separatedGestures = (0..<1100).map { index -> MotionSample in
+            let time = Double(index) / 100
+            let vertical: Double
+            switch time {
+            case 1..<1.34: vertical = 10
+            case 1.34..<4.34: vertical = -3
+            case 4.34..<4.54: vertical = 7
+            case 6.54..<6.84: vertical = 12
+            default: vertical = 0
+            }
+            return sample(time, 1 + vertical / 9.80665)
+        }
+        let merged = separatedGestures.compactMap { motion -> RidingJumpDetector.Flight? in
+            let result = repeatedMovement.process(motion, calibration: nil, moving: true)
+            if let reason = repeatedMovement.lastRejection { rejectionReasons.append(reason) }
+            return result
+        }
+        check(merged.isEmpty && rejectionReasons.contains("trajectoryBelowTakeoff"),
+              "An invalid downward trajectory must not join a later gesture into a long flight")
         // Physical height H*sin²(pi*t/T) starts and finishes at rest.
         // Use the sign actually written by iOS for upward acceleration.
         for duration in [2.0, 4.0, 6.0] {
@@ -181,14 +207,50 @@ enum DetectorTests {
                     ? 2 * 1.2 * Double.pi * Double.pi / (duration * duration) * cos(2 * Double.pi * phase / duration) : 0
                 let bias = 0.03
                 if let event = hand.processMotion(sample(time, 1 + (acceleration + bias) / 9.80665)) {
-                    check(time >= duration + 1.5 && time < duration + 2,
-                          "Announce only after a settled return, within a second")
+                    check(time >= duration + 1 && time < duration + 2,
+                          "Announce after return to the initial level, within a second")
                     results.append(event)
                 }
             }
             check(results.count == 1 && abs(results[0].1 - 1.2) < 0.15 &&
                   results[0].0.endSeconds >= duration + 0.95,
                   "Supported lift duration \(duration)s: expected one ~1.2m result, got \(results.map { $0.1 })")
+        }
+
+        // Horizontal acceleration and rotation continue before, throughout
+        // and after a known vertical excursion.
+        for height in [0.6, 1.2, 2.5] {
+            for duration in [2.0, 4.0, 6.0] {
+                var tracker = MovingHeightDetector()
+                let calibration = MotionCalibration(completedAtSeconds: 0, frequencyHz: 100,
+                                                    verticalOffset: 0, verticalNoise: 0.01)
+                var measurements: [MovingHeightDetector.Measurement] = []
+                for index in 0...Int((duration + 4) * 100) {
+                    let time = Double(index) / 100
+                    let phase = time - 2
+                    let ascent = phase >= 0 && phase < duration
+                        ? 2 * height * pow(Double.pi / duration, 2) * cos(2 * Double.pi * phase / duration) : 0
+                    let vertical = ascent + 0.7 * sin(2 * Double.pi * 1.8 * time)
+                    let angle = 0.6 * sin(time)
+                    let gravity = Vector3(x: sin(angle), y: 0, z: -cos(angle))
+                    let lateral = 0.6 * sin(time * 6)
+                    let raw = MotionSample(
+                        elapsedSinceFirstSampleSeconds: time,
+                        accelerationG: Vector3(x: vertical / 9.80665 * gravity.x + lateral * cos(angle),
+                                               y: 0, z: vertical / 9.80665 * gravity.z + lateral * sin(angle)),
+                        gravityG: gravity, rotationRadiansPerSecond: Vector3(x: sin(time), y: 0.5, z: 0),
+                        attitude: Quaternion(x: 0, y: 0, z: 0, w: 1),
+                        verticalAccelerationMetersPerSecondSquared: -vertical)
+                    if let measured = tracker.process(raw, calibration: calibration) {
+                        check(time >= duration + 2 && measured.event.startSeconds < measured.apexSeconds &&
+                              measured.apexSeconds < measured.event.endSeconds,
+                              "Remember an apex and finish after descent and return while moving")
+                        measurements.append(measured)
+                    }
+                }
+                check(measurements.count == 1 && abs(measurements[0].height - height) < 0.2,
+                      "Moving phone height \(height), duration \(duration): \(measurements.map(\.height))")
+            }
         }
 
         var handAtUpperLevel = HandSimulationDetector()
