@@ -218,12 +218,12 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
     func start() {
         guard summary == nil, analyzingSessionID == nil, hasRecordingSensors, !sensorCheckRunning else { return }
         UIDevice.current.isBatteryMonitoringEnabled = true
-        let testing = recordingMode == .test
+        let testing = recordingMode == .test || effectivePlacement == .hand
         let reusedCalibration = recalibrateNextSession ? nil : savedCalibration
         let calibration = checkedCalibration ?? reusedCalibration
         var sessionSetup = draftSetup.cleaned
         sessionSetup.placement = effectivePlacement
-        sessionSetup.sport = testing ? .groundTest : (sessionSetup.sport.isRiding ? sessionSetup.sport : .kite)
+        sessionSetup.sport = recordingMode == .test ? .groundTest : (sessionSetup.sport.isRiding ? sessionSetup.sport : .kite)
         sessionSetup = sessionSetup.cleaned
         let detectorVersion = testing ? HandSimulationDetector.version : RidingJumpDetector.version
         if sessionSetup.spotID == nil, let matching = spots.first(where: { $0.matches(sessionSetup) }) {
@@ -513,10 +513,14 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
                                                                       distanceMeters: nil)
                     pendingRides.append(flight)
                 }
+                if let reason = ridingDetector.lastRejection {
+                    try log.append("event", SessionEvent(name: "jumpRejected", batteryPercent: batteryPercent, detail: reason))
+                }
                 session.jumpAnalysis?.discontinuities = ridingDetector.discontinuities
             } else if session.handSimulationTest == true {
-                if let lift = handSimulation.processMotion(sample) {
-                    try recordGroundLift(lift.event, height: lift.height, session: &session, log: log, inertial: true)
+                if let lift = handSimulation.processMotion(sample, calibration: session.motionCalibration) {
+                    try recordGroundLift(lift.event, height: lift.height, session: &session, log: log, inertial: true,
+                                         apexSeconds: handSimulation.lastMotionApexSeconds)
                 }
             }
             summary = session
@@ -594,7 +598,7 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
     }
 
     private func recordGroundLift(_ event: JumpCandidate, height: Double, session: inout SessionSummary,
-                                  log: SessionLog, inertial: Bool = false) throws {
+                                  log: SessionLog, inertial: Bool = false, apexSeconds: Double? = nil) throws {
         let overlaps = session.jumpAnalysis?.candidates.contains {
             $0.startSeconds < event.endSeconds && $0.endSeconds > event.startSeconds
         }
@@ -604,7 +608,8 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
         let distance = LiveJumpEstimate.gpsDistance(start: event.startSeconds, end: event.endSeconds,
                                                    gps: recentFixes, motionClock: motionClock)
         let estimate = LiveJumpEstimate(heightMeters: height, airtimeSeconds: event.unloadingSeconds,
-                                        distanceMeters: distance, isHandLift: true, inertialLift: inertial)
+                                        distanceMeters: distance, isHandLift: true, inertialLift: inertial,
+                                        apexSeconds: apexSeconds)
         try storeEstimate(estimate, for: event, session: &session, log: log, speak: true)
     }
 
@@ -653,7 +658,14 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
         while let flight = pendingRides.first,
               finishing || elapsed >= flight.event.endSeconds + (pressureAvailable ? 3.0 : 0.8) {
             pendingRides.removeFirst()
-            let estimate = LiveJumpEstimate.riding(flight, altitude: recentAltitude, gps: recentFixes, motionClock: motionClock)
+            let handheld = session.setup?.placement == .hand
+            let estimate = LiveJumpEstimate.riding(flight, altitude: recentAltitude, gps: recentFixes,
+                                                  motionClock: motionClock, allowLevelLandingEstimate: !handheld)
+            if estimate.heightMeters == nil {
+                try log.append("event", SessionEvent(name: "jumpHeightUnavailable", batteryPercent: batteryPercent,
+                    detail: handheld && flight.levelLandingHeight != nil
+                        ? "handheldEndpointsUnknown" : "pressureOrTrajectoryInsufficient"))
+            }
             try storeEstimate(estimate, for: flight.event, session: &session, log: log, speak: !finishing)
         }
     }
@@ -664,7 +676,7 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
         try log.append("liveJumpEstimate", JumpEstimateEntry(startSeconds: event.startSeconds, endSeconds: event.endSeconds, estimate: estimate))
         session.liveJumpEstimates?[key] = estimate
         let phrase = estimate.heightMeters.flatMap(LiveJumpEstimate.spokenHeight)
-            .map { estimate.assumesLevelLanding == true ? "Примерно \($0)" : $0 }
+            .map { estimate.assumesLevelLanding == true || estimate.inertialLift == true ? "Примерно \($0)" : $0 }
             ?? (session.recordingMode == .battle ? "Прыжок" : nil)
         if speak, voiceEnabled, let phrase {
             let utterance = AVSpeechUtterance(string: phrase)

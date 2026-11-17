@@ -449,6 +449,7 @@ struct LiveJumpEstimate: Codable {
     var isHandLift: Bool?
     var inertialLift: Bool?
     var assumesLevelLanding: Bool?
+    var apexSeconds: Double?
 
     static func phoneToss(_ event: JumpCandidate) -> Self? {
         guard event.minimumLoadG.isFinite, (0...0.2).contains(event.minimumLoadG),
@@ -457,11 +458,12 @@ struct LiveJumpEstimate: Codable {
     }
 
     static func riding(_ flight: RidingJumpDetector.Flight, altitude: [AltitudeSample],
-                       gps: [RoutePoint], motionClock: Date?) -> Self {
+                       gps: [RoutePoint], motionClock: Date?, allowLevelLandingEstimate: Bool = true) -> Self {
         let event = flight.event
         let start = event.startSeconds, end = event.endSeconds
         let corroborated = ridingHeight(flight, altitude: altitude)
-        let approximate = corroborated == nil && !pressureShowsLevelChange(start: start, end: end, altitude: altitude)
+        let approximate = allowLevelLandingEstimate && corroborated == nil &&
+            !pressureShowsLevelChange(start: start, end: end, altitude: altitude)
             ? flight.levelLandingHeight : nil
         return Self(heightMeters: corroborated ?? approximate, airtimeSeconds: event.unloadingSeconds,
                     distanceMeters: gpsDistance(start: start, end: end, gps: gps, motionClock: motionClock),
@@ -586,19 +588,188 @@ struct LiveJumpEstimate: Codable {
     }
 }
 
-/// Pressure measures supported hand lifts. Motion only rejects free fall and
-/// supplies a conservative still-to-still fallback when pressure is unavailable.
+/// Measures a complete vertical excursion of the phone. A stable vertical
+/// velocity supplies an anchor even while the phone moves horizontally.
+struct MovingHeightDetector {
+    enum Phase { case searching, rising, descending, returning }
+
+    struct Measurement {
+        let event: JumpCandidate
+        let height: Double
+        let apexSeconds: Double
+    }
+
+    private struct Point {
+        let time: Double
+        let acceleration: Double
+        let velocity: Double
+        let load: Double
+        let spin: Double
+    }
+
+    private struct Anchor {
+        let time: Double
+        let lastTime: Double
+        let velocity: Double
+        let acceleration: Double
+    }
+
+    private struct Excursion {
+        var samples: [Point]
+        let bias: Double
+        var stoppedSince: Double?
+        var lastAnalysis = -Double.infinity
+        var liveVelocity = 0.0
+        var liveHeight = 0.0
+        var livePeak = 0.0
+        var hasDescended = false
+
+        mutating func append(_ point: Point) {
+            if let last = samples.last {
+                let dt = point.time - last.time
+                let next = liveVelocity + ((point.acceleration + last.acceleration) * 0.5 - bias) * dt
+                liveHeight += (liveVelocity + next) * 0.5 * dt
+                liveVelocity = next
+                livePeak = max(livePeak, liveHeight)
+                if livePeak >= 0.4 && liveVelocity < -0.15 { hasDescended = true }
+            }
+            samples.append(point)
+        }
+
+        func measurement() -> Measurement? {
+            guard let first = samples.first, let last = samples.last else { return nil }
+            let duration = last.time - first.time
+            guard duration >= 0.8, abs(liveVelocity) <= 0.45, hasDescended else { return nil }
+            // Confirm that an approximately level return is supported before
+            // applying endpoint drift corrections. A shelf ascent fails here.
+            let closure = liveHeight - liveVelocity * duration * 0.5
+            guard abs(closure) <= 0.4 else { return nil }
+            var velocity = 0.0
+            var height = 0.0
+            var peak = 0.0
+            var lowest = 0.0
+            var apex = first.time
+            for (before, after) in zip(samples, samples.dropFirst()) {
+                let dt = after.time - before.time
+                let next = velocity + ((before.acceleration + after.acceleration) * 0.5 - bias) * dt
+                height += (velocity + next) * 0.5 * dt
+                velocity = next
+                let elapsed = after.time - first.time
+                let fraction = elapsed / duration
+                let corrected = height - liveVelocity * elapsed * fraction * 0.5
+                    - closure * fraction * fraction * (3 - 2 * fraction)
+                lowest = min(lowest, corrected)
+                if corrected > peak {
+                    peak = corrected
+                    apex = after.time
+                }
+            }
+            let end = last.time - 0.2
+            guard (0.4...4).contains(peak), lowest >= -0.3,
+                  (0.15...0.85).contains((apex - first.time) / duration),
+                  stoppedSince != nil, end > apex else { return nil }
+            let event = JumpCandidate(startSeconds: first.time, endSeconds: end,
+                                      minimumLoadG: samples.map(\.load).min() ?? 1,
+                                      returnPeakG: samples.map(\.load).max() ?? 1,
+                                      maximumRotationRadiansPerSecond: samples.map(\.spin).max() ?? 0)
+            return Measurement(event: event, height: peak, apexSeconds: apex)
+        }
+    }
+
+    private(set) var phase = Phase.searching
+    private(set) var lastMeasurement: Measurement?
+    private var previous: Point?
+    private var recent: [Point] = []
+    private var verticalWindow: [Point] = []
+    private var anchor: Anchor?
+    private var excursion: Excursion?
+    private var estimatedBias: Double?
+
+    mutating func process(_ sample: MotionSample, calibration: MotionCalibration?) -> Measurement? {
+        let time = sample.elapsedSinceFirstSampleSeconds
+        let acceleration = calibration.map {
+            -$0.correctedVertical(sample.verticalAccelerationMetersPerSecondSquared, at: time)
+        } ?? sample.upwardAcceleration
+        let a = sample.accelerationG, g = sample.gravityG, r = sample.rotationRadiansPerSecond
+        let load = sqrt(pow(a.x + g.x, 2) + pow(a.y + g.y, 2) + pow(a.z + g.z, 2))
+        let spin = sqrt(r.x * r.x + r.y * r.y + r.z * r.z)
+        guard time.isFinite, time >= 0, acceleration.isFinite, load.isFinite, spin.isFinite else {
+            self = Self()
+            return nil
+        }
+        if let previous, time <= previous.time || time - previous.time > 0.05 {
+            self = Self()
+        }
+        let previousVelocity = previous?.velocity ?? 0
+        let dt = previous.map { time - $0.time } ?? 0
+        let velocity = previousVelocity + ((previous?.acceleration ?? acceleration) + acceleration) * dt * 0.5
+        let point = Point(time: time, acceleration: acceleration, velocity: velocity, load: load, spin: spin)
+        previous = point
+        recent.append(point)
+        recent.removeAll { time - $0.time > 3.5 }
+        verticalWindow.append(point)
+        verticalWindow.removeAll { time - $0.time > 0.4 }
+
+        let stable = verticalAnchor()
+        if estimatedBias == nil, let stable { estimatedBias = stable.acceleration }
+        if excursion == nil {
+            if let anchor, time - anchor.lastTime < 3, velocity - anchor.velocity > 0.15 {
+                let bias = calibration == nil ? (estimatedBias ?? anchor.acceleration) : 0
+                var track = Excursion(samples: [], bias: bias)
+                for sample in recent where sample.time >= anchor.time { track.append(sample) }
+                excursion = track
+                phase = .rising
+            } else if let stable, abs(stable.acceleration) < 0.15 || anchor == nil {
+                anchor = stable
+            }
+            return nil
+        }
+
+        guard let start = excursion?.samples.first?.time, time - start <= 18 else {
+            excursion = nil
+            anchor = stable
+            phase = .searching
+            return nil
+        }
+        excursion?.append(point)
+        if let track = excursion, track.livePeak >= 0.4, track.liveVelocity < -0.15 { phase = .descending }
+        guard let stable else {
+            excursion?.stoppedSince = nil
+            return nil
+        }
+        if excursion?.stoppedSince == nil { excursion?.stoppedSince = time }
+        guard let stopped = excursion?.stoppedSince, time - stopped >= 0.2,
+              let analyzed = excursion?.lastAnalysis, time - analyzed >= 0.2 else { return nil }
+        excursion?.lastAnalysis = time
+        guard let measured = excursion?.measurement() else { return nil }
+        phase = .returning
+        lastMeasurement = measured
+        excursion = nil
+        anchor = stable
+        return measured
+    }
+
+    private func verticalAnchor() -> Anchor? {
+        guard let first = verticalWindow.first, let last = verticalWindow.last,
+              verticalWindow.count > 20, last.time - first.time >= 0.35 else { return nil }
+        let count = Double(verticalWindow.count)
+        let meanVelocity = verticalWindow.reduce(0.0) { $0 + $1.velocity } / count
+        let meanAcceleration = verticalWindow.reduce(0.0) { $0 + $1.acceleration } / count
+        let variance = verticalWindow.reduce(0.0) { $0 + pow($1.velocity - meanVelocity, 2) } / count
+        guard variance < 0.08 * 0.08, abs(meanAcceleration) < 0.5 else { return nil }
+        return Anchor(time: first.time, lastTime: last.time, velocity: meanVelocity, acceleration: meanAcceleration)
+    }
+}
+
 struct HandSimulationDetector {
-    static let version = "hand-practice-5"
+    static let version = "hand-practice-6"
     private var quiet: [Double] = []
     private var baseline: Double?
     private var returnTolerance = 0.28
     private var previousTime: Double?
     private var lift: Lift?
-    private var previousMotion: Motion?
-    private var rest: Rest?
-    private var excursion: Excursion?
-    private var lowLoadSince: Double?
+    private var movingHeight = MovingHeightDetector()
+    var lastMotionApexSeconds: Double? { movingHeight.lastMeasurement?.apexSeconds }
 
     private struct Lift {
         let start: Double
@@ -607,151 +778,10 @@ struct HandSimulationDetector {
         var returnAltitude: Double?
     }
 
-    private struct Motion {
-        let time: Double
-        let upwardAcceleration: Double
-        let load: Double
-        let spin: Double
-    }
-
-    private struct Rest {
-        let start: Double
-        var sum = 0.0
-        var count = 0
-
-        mutating func add(_ acceleration: Double) {
-            sum += acceleration
-            count += 1
-        }
-
-        var mean: Double { sum / Double(count) }
-    }
-
-    private struct Excursion {
-        let baselineAcceleration: Double
-        var samples: [Motion]
-        var stoppedAt: Double?
-        var lastAnalysisAt = -Double.infinity
-
-        func estimate(endingAt end: Double) -> (event: JumpCandidate?, height: Double)? {
-            guard let first = samples.first, let last = samples.last else { return nil }
-            let duration = last.time - first.time
-            guard end - first.time >= 0.55, duration > 0 else { return nil }
-            var velocity = 0.0
-            var position = 0.0
-            var positions: [Double] = [0]
-            var previous = first
-            for sample in samples.dropFirst() {
-                let dt = sample.time - previous.time
-                let nextVelocity = velocity + ((previous.upwardAcceleration + sample.upwardAcceleration) * 0.5
-                                               - baselineAcceleration) * dt
-                position += (velocity + nextVelocity) * 0.5 * dt
-                positions.append(position)
-                velocity = nextVelocity
-                previous = sample
-            }
-
-            // Remove the measured velocity drift before testing the return to
-            // the original level. A movement that ends on a shelf must fail.
-            let closure = position - velocity * duration * 0.5
-            guard abs(velocity) <= 0.45, abs(closure) <= 0.4 else { return nil }
-            var peak = 0.0
-            var low = 0.0
-            var peakTime = first.time
-            for (sample, position) in zip(samples, positions) {
-                let elapsed = sample.time - first.time
-                let fraction = elapsed / duration
-                let height = position - velocity * elapsed * fraction * 0.5
-                    - closure * fraction * fraction * (3 - 2 * fraction)
-                if height > peak {
-                    peak = height
-                    peakTime = sample.time
-                }
-                low = min(low, height)
-            }
-            if abs(closure) <= 0.18, peak < 0.4, low >= -0.16 { return (nil, peak) }
-            guard (0.4...4).contains(peak), peakTime < end,
-                  abs(closure) <= max(0.18, peak * 0.20), low >= -max(0.16, peak * 0.20) else { return nil }
-            let event = JumpCandidate(startSeconds: first.time, endSeconds: end,
-                                      minimumLoadG: samples.map(\.load).min() ?? 1,
-                                      returnPeakG: samples.map(\.load).max() ?? 1,
-                                      maximumRotationRadiansPerSecond: samples.map(\.spin).max() ?? 0)
-            return (event, peak)
-        }
-    }
-
-    mutating func processMotion(_ sample: MotionSample) -> (event: JumpCandidate, height: Double)? {
-        let time = sample.elapsedSinceFirstSampleSeconds
-        let a = sample.accelerationG, g = sample.gravityG, r = sample.rotationRadiansPerSecond
-        let load = sqrt(pow(a.x + g.x, 2) + pow(a.y + g.y, 2) + pow(a.z + g.z, 2))
-        let spin = sqrt(r.x * r.x + r.y * r.y + r.z * r.z)
-        let magnitude = sqrt(a.x * a.x + a.y * a.y + a.z * a.z) * 9.80665
-        let upward = sample.upwardAcceleration
-        guard time.isFinite, time >= 0, upward.isFinite, load.isFinite, spin.isFinite, magnitude.isFinite else {
-            previousMotion = nil
-            rest = nil
-            excursion = nil
-            lowLoadSince = nil
-            return nil
-        }
-        let prior = previousMotion
-        let motion = Motion(time: time, upwardAcceleration: upward, load: load, spin: spin)
-        previousMotion = motion
-        if let prior, time <= prior.time || time - prior.time > 0.05 {
-            rest = nil
-            excursion = nil
-            lowLoadSince = nil
-        }
-        if load < 0.35 {
-            if lowLoadSince == nil { lowLoadSince = time }
-        } else {
-            lowLoadSince = nil
-        }
-        // A fast hand movement can briefly approach zero load at the top.
-        // Only sustained unloading cancels the measurement as a possible toss.
-        if let lowLoadSince, time - lowLoadSince >= 0.18 {
-            rest = nil
-            excursion = nil
-            return nil
-        }
-
-        let still = magnitude <= 0.30 && spin <= 0.35
-        if excursion == nil {
-            if still {
-                if rest == nil { rest = Rest(start: time) }
-                rest?.add(upward)
-            } else {
-                if let prior, let rest, prior.time - rest.start >= 0.35 {
-                    excursion = Excursion(baselineAcceleration: rest.mean, samples: [prior, motion])
-                }
-                rest = nil
-            }
-            return nil
-        }
-
-        guard let start = excursion?.samples.first?.time, time - start <= 22 else {
-            excursion = nil
-            rest = nil
-            return nil
-        }
-        excursion?.samples.append(motion)
-        guard still else {
-            excursion?.stoppedAt = nil
-            return nil
-        }
-        if excursion?.stoppedAt == nil { excursion?.stoppedAt = time }
-        guard let end = excursion?.stoppedAt, time - end >= 0.60,
-              let lastAnalysis = excursion?.lastAnalysisAt, time - lastAnalysis >= 0.2 else { return nil }
-        excursion?.lastAnalysisAt = time
-
-        guard let estimate = excursion?.estimate(endingAt: end) else { return nil }
-        // A pause at the top can last a while. Keep the excursion for a
-        // subsequent descent, unless this was only a small closed movement.
-        guard estimate.event != nil || time - end >= 1.2 else { return nil }
-        excursion = nil
-        rest = Rest(start: end)
-        rest?.add(upward)
-        return estimate.event.map { ($0, estimate.height) }
+    mutating func processMotion(_ sample: MotionSample, calibration: MotionCalibration? = nil)
+        -> (event: JumpCandidate, height: Double)? {
+        guard let measurement = movingHeight.process(sample, calibration: calibration) else { return nil }
+        return (measurement.event, measurement.height)
     }
 
     mutating func resetPressure() {

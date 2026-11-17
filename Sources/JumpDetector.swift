@@ -165,7 +165,7 @@ struct JumpDetector {
 /// Detects a push, ascent, descent and braking as separate phases. A kite jump
 /// can stay loaded in the air, so it never needs a free-fall interval.
 struct RidingJumpDetector {
-    static let version = "ride-5"
+    static let version = "ride-6"
 
     struct Point {
         let time: Double
@@ -244,6 +244,7 @@ struct RidingJumpDetector {
     }
 
     private(set) var discontinuities = 0
+    private(set) var lastRejection: String?
     private var previous: Motion?
     private var settledSince: Double?
     private var preparation: [Motion] = []
@@ -255,6 +256,7 @@ struct RidingJumpDetector {
     private var lastLanding = -Double.infinity
 
     mutating func process(_ sample: MotionSample, calibration: MotionCalibration?, moving: Bool) -> Flight? {
+        lastRejection = nil
         let time = sample.elapsedSinceFirstSampleSeconds
         let a = sample.accelerationG, g = sample.gravityG, r = sample.rotationRadiansPerSecond
         let load = (pow(a.x + g.x, 2) + pow(a.y + g.y, 2) + pow(a.z + g.z, 2)).squareRoot()
@@ -280,11 +282,16 @@ struct RidingJumpDetector {
         if let detected = detectShortFlight(Motion(time: time, vertical: raw, load: load, spin: spin)) {
             pendingShortFlight = detected
         }
-        if var flight = detectRidingFlight(from: last, to: motion, moving: moving) {
+        if let flight = detectRidingFlight(from: last, to: motion, moving: moving) {
             if let pendingShortFlight, pendingShortFlight.event.startSeconds <= flight.event.endSeconds,
                pendingShortFlight.event.endSeconds >= flight.event.startSeconds {
-                flight.levelLandingHeight = pendingShortFlight.levelLandingHeight
                 self.pendingShortFlight = nil
+                self.shortFlight = nil
+                lastLanding = pendingShortFlight.event.endSeconds
+                // The height and airtime must describe the same interval.
+                // Copying just the short estimate onto a wider event mixes
+                // two different trajectories.
+                return pendingShortFlight
             }
             if let shortFlight, shortFlight.start <= flight.event.endSeconds {
                 self.shortFlight = nil
@@ -419,6 +426,11 @@ struct RidingJumpDetector {
         track.trajectory.append(Point(time: now.time, height: track.height))
         track.peak = max(track.peak, track.height)
         track.minimumLoad = min(track.minimumLoad, now.load)
+        guard track.height >= -max(0.65, track.peak * 0.20) else {
+            lastRejection = "trajectoryBelowTakeoff"
+            arc = nil
+            return nil
+        }
         if let landing = track.landing {
             track.landingPeak = max(track.landingPeak, now.load)
             if track.velocity < initialVelocity - 0.10 && now.vertical < -1.0 {
@@ -436,8 +448,11 @@ struct RidingJumpDetector {
                 return Flight(event: event, trajectory: track.trajectory, settledHeight: track.height, residualVelocity: track.velocity)
             }
             if now.time - landing >= 0.50 {
-                track.landing = nil
-                track.landingPeak = 0
+                // Reusing this arc joins later gestures to an old takeoff and
+                // can turn a few movements into a multi-second false flight.
+                lastRejection = "unconfirmedLanding"
+                arc = nil
+                return nil
             }
         } else if now.time - takeoff >= 0.35, track.peak >= 0.20,
                   track.descent <= -0.65, initialVelocity <= -0.50, now.vertical >= 2.3 {

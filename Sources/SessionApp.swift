@@ -148,6 +148,10 @@ private struct RecordingView: View {
                         }.pickerStyle(.segmented)
                         if recorder.recordingMode == .battle {
                             ActivityFields(setup: $recorder.draftSetup, ridingOnly: true)
+                            if recorder.draftSetup.placement == .hand {
+                                Text("В руке измеряется подъём телефона до вершины и возврат.")
+                                    .font(.footnote).foregroundStyle(.secondary)
+                            }
                         }
                     }.padding(.vertical, 12)
                     if recorder.recordingMode == .battle {
@@ -325,7 +329,7 @@ private struct RecordingView: View {
             HStack(spacing: 0) {
                 recordingMetric("Топ высота", value: height, unit: "м")
                 Rectangle().fill(.white.opacity(0.25)).frame(width: 1, height: 56)
-                        recordingMetric(session.recordingMode == .test ? "Время подъёма" : "Топ зависание", value: airtime, unit: "с")
+                recordingMetric(session.handSimulationTest == true ? "Время цикла" : "Топ зависание", value: airtime, unit: "с")
             }
             Rectangle().fill(.white.opacity(0.25)).frame(height: 1)
             HStack(spacing: 0) {

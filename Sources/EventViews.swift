@@ -206,6 +206,10 @@ struct EventDetailView: View {
 
     private func diagnostics(_ candidate: JumpCandidate) -> some View {
         VStack(alignment: .leading, spacing: 12) {
+            if let apex = session.liveEstimate(for: candidate)?.apexSeconds {
+                LabeledContent("Вершина", value: eventTimeText(apex))
+                LabeledContent("Подъём до вершины", value: metric(apex - candidate.startSeconds, unit: "с"))
+            }
             if session.handSimulationTest != true {
                 LabeledContent(session.jumpAnalysis?.detectorVersion.hasPrefix("ride-") == true ? "Полёт" : "Разгрузка",
                                value: metric(candidate.unloadingSeconds, unit: "с", digits: 2))
