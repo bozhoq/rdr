@@ -13,11 +13,15 @@ struct RiderTotals: Codable {
             $0.durationSeconds.isFinite && $0.durationSeconds > 0 &&
             $0.handSimulationTest != true && $0.phoneTossTest != true && $0.recordingMode != .test
         }
-        let events = rides.flatMap { session in
-            (session.jumpAnalysis?.candidates ?? []).compactMap { session.liveEstimate(for: $0) }
-        }.filter {
-            $0.isPhoneToss != true && $0.isHandLift != true &&
-            $0.heightMeters.map { $0.isFinite && $0 > 0 } == true
+        var events: [LiveJumpEstimate] = []
+        for session in rides {
+            guard let analysis = session.jumpAnalysis else { continue }
+            for candidate in analysis.candidates {
+                guard let estimate = session.liveEstimate(for: candidate),
+                      estimate.isPhoneToss != true, estimate.isHandLift != true,
+                      let height = estimate.heightMeters, height.isFinite, height > 0 else { continue }
+                events.append(estimate)
+            }
         }
         sessions = rides.count
         jumps = events.count
