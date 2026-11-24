@@ -21,10 +21,12 @@ import FoundationXML
         }
         let arc = [altitude(1.1, 0), altitude(2.2, 0), altitude(3.25, 1), altitude(4.3, 2), altitude(5.35, 0.8), altitude(6.4, 0)]
         var jumpGPS = RouteFilter()
-        let fixes = [jumpGPS.accept(point(3.25), notBefore: origin), jumpGPS.accept(point(6, lon: 0.0002), notBefore: origin)].compactMap { $0 }
+        let fixes = (2...6).compactMap { i in
+            jumpGPS.accept(point(Double(i), lon: Double(i - 2) * 0.0001), notBefore: origin)
+        }
         let jump = LiveJumpEstimate.measure(event, altitude: arc, gps: fixes, motionClock: origin)
         check(jump?.heightMeters == 2 && abs((jump?.airtimeSeconds ?? 0) - 2.8) < 1e-9, "Report a bracketed peak and unloading interval")
-        check(abs((jump?.distanceMeters ?? 0) - 22.239) < 0.01, "Use only accepted GPS fixes near both boundaries")
+        check(abs((jump?.distanceMeters ?? 0) - 31.1346) < 0.01, "Interpolate position at exact takeoff and landing")
         check(LiveJumpEstimate.measure(event, altitude: arc, gps: fixes, motionClock: nil)?.distanceMeters == nil, "No jump distance without a common clock")
         check(LiveJumpEstimate.measure(event, altitude: Array(arc.dropLast()), gps: [], motionClock: nil) == nil, "A rise without a return cannot trigger the voice")
         var speedRoute = RouteFilter()
@@ -36,12 +38,24 @@ import FoundationXML
         check(LiveJumpEstimate.speedDistance(start: -0.5, end: 2, gps: speedFixes, motionClock: origin) == nil &&
               LiveJumpEstimate.speedDistance(start: 0.5, end: 3.5, gps: speedFixes.filter { $0.id != speedFixes[1].id && $0.id != speedFixes[2].id }, motionClock: origin) == nil,
               "Do not extrapolate speed or bridge a GPS gap")
+        var fastRoute = RouteFilter()
+        let fast = (0...4).compactMap { i in
+            fastRoute.accept(point(Double(i), accuracy: 12, speed: 8, speedAccuracy: 2), notBefore: origin)
+        }
+        check(LiveJumpEstimate.speedDistance(start: 0.5, end: 3.5, gps: fast, motionClock: origin) == 24,
+              "Larger absolute speed errors can still resolve fast travel")
+        check(LiveJumpEstimate.gpsDistance(start: 3, end: 5.8, gps: [fixes[0], fixes[4]], motionClock: origin) == nil &&
+              LiveJumpEstimate.distanceIssue(start: 3, end: 5.8, gps: [fixes[0], fixes[4]], motionClock: origin) == .insufficientCoverage,
+              "Sparse coordinates cannot resolve the flight endpoints")
         var noisyRoute = RouteFilter()
         let noise = (0...4).compactMap { i in
             noisyRoute.accept(point(Double(i), accuracy: 12, speed: 0.7, speedAccuracy: 1), notBefore: origin)
         }
         check(LiveJumpEstimate.speedDistance(start: 0.5, end: 3.5, gps: noise, motionClock: origin) == nil, "Indoor speed noise cannot produce jump distance")
 
+        check(LiveJumpEstimate.gpsDistance(start: 0.5, end: 3.5, gps: noise, motionClock: origin) == nil &&
+              LiveJumpEstimate.distanceIssue(start: 0.5, end: 3.5, gps: noise, motionClock: origin) == .lowAccuracy,
+              "Distinguish a weak horizontal signal from a gap")
         var interrupted = arc
         interrupted.remove(at: 3)
         check(LiveJumpEstimate.measure(event, altitude: interrupted, gps: [], motionClock: nil) == nil, "Reject a gap across the pressure peak")

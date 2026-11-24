@@ -306,11 +306,13 @@ enum DetectorTests {
               bodyEstimate.isHandLift != true, "One rider event uses the anchored height and actual flight interval")
         // Two smooth legs with known end heights. The analytic velocity and
         // acceleration both vanish at the floor approach, apex and final stop.
-        func approachTrace(_ height: Double, landing: Double, lateral: Bool) -> [MotionSample] {
+        func approachTrace(_ height: Double, landing: Double, lateral: Bool, hold: Double = 0) -> [MotionSample] {
             (0..<700).map { index in
                 let t = Double(index) / 100
-                let u = t - floor(t)
-                let displacement = t >= 2 && t < 3 ? height : t >= 3 && t < 4 ? landing - height : 0
+                let descent = 3 + hold
+                let rising = (2..<3).contains(t)
+                let u = rising ? t - 2 : min(1, max(0, t - descent))
+                let displacement = rising ? height : (descent..<(descent + 1)).contains(t) ? landing - height : 0
                 let up = displacement * (60*u - 180*u*u + 120*u*u*u)
                 let base = sample(t, 1 + up / 9.80665)
                 return MotionSample(elapsedSinceFirstSampleSeconds: t,
@@ -323,6 +325,12 @@ enum DetectorTests {
             var detector = ApproachJumpDetector()
             return trace.compactMap { detector.process($0, calibration: nil, moving: gps) }
         }
+        let held = approachFlights(approachTrace(2, landing: 0, lateral: true, hold: 2.45))
+        check(held.count == 1, "Allow settling samples to confirm a landing just inside the time limit")
+        let heldEstimate = LiveJumpEstimate.riding(held[0], altitude: [], gps: [], motionClock: nil)
+        check((4.2...4.6).contains(heldEstimate.reportedAirtime ?? 0) &&
+              heldEstimate.airtimeSeconds == heldEstimate.reportedAirtime,
+              "Measure the slow edges and plateau once and export the displayed interval")
         let diveTrace = approachTrace(2.5, landing: -0.8, lateral: true)
         let diving = approachFlights(diveTrace)
         check(diving.count == 1 && diving[0].crossedStartLevel &&
