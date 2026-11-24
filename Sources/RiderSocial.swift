@@ -33,7 +33,19 @@ struct RiderFeedEntry: Decodable, Identifiable {
     let post: RiderPost
     let author: String
     let username: String?
+    let avatar: Data?
     var id: UUID { post.id }
+}
+
+struct RiderComment: Decodable, Identifiable {
+    let id: UUID
+    let createdAt: TimeInterval
+    let text: String
+    let author: String
+    let username: String?
+    let mine: Bool
+
+    var date: Date { Date(timeIntervalSince1970: createdAt) }
 }
 
 struct RiderTopEntry: Decodable, Identifiable {
@@ -151,7 +163,9 @@ struct RiderPostDetail: View {
     let original: RiderPost
     let author: String
     let username: String?
+    var avatar: Data?
     var editable = false
+    var openComments = false
     @State private var busy = false
     @State private var confirmDelete = false
     @State private var error: String?
@@ -159,38 +173,20 @@ struct RiderPostDetail: View {
     private var post: RiderPost { editable ? social.posts.first { $0.id == original.id } ?? original : original }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(author).font(.headline)
-                    if let username, !username.isEmpty { Text("@" + username).font(.subheadline).foregroundStyle(.secondary) }
+        ScrollViewReader { scroll in
+            ScrollView {
+                VStack(spacing: 12) {
+                    postContent
+                    commentsSection
+                        .id("post-comments")
                 }
-                RiderPostSquare(post: post).clipShape(RoundedRectangle(cornerRadius: 16))
-                if !post.caption.isEmpty { Text(post.caption).textSelection(.enabled) }
-                if let location = post.location {
-                    if let url = location.mapURL {
-                        Link(destination: url) { Label(location.name, systemImage: "mappin") }
-                    } else {
-                        Label(location.name, systemImage: "mappin")
-                    }
-                }
-                Text(post.date, format: .dateTime.day().month().year()).font(.caption).foregroundStyle(.secondary)
-                if editable {
-                    if post.published == true {
-                        Label("Опубликовано", systemImage: "checkmark.circle").font(.footnote)
-                    } else if RiderCommunity.endpoint != nil {
-                        Button("Опубликовать") { update(deleting: false) }
-                            .buttonStyle(.borderedProminent)
-                        Text("В ленте будут видны фото, подпись и выбранная геометка.")
-                            .font(.footnote).foregroundStyle(.secondary)
-                    } else {
-                        Text("Сохранено на этом iPhone").font(.footnote).foregroundStyle(.secondary)
-                    }
-                    if let error { Text(error).font(.footnote).foregroundStyle(.secondary) }
-                }
+                .padding(16)
             }
-            .lagoonCard()
-            .padding(16)
+            .task {
+                guard openComments else { return }
+                await Task.yield()
+                scroll.scrollTo("post-comments", anchor: .top)
+            }
         }
         .background(RiderTheme.canvas.ignoresSafeArea())
         .navigationTitle("Публикация")
@@ -210,6 +206,49 @@ struct RiderPostDetail: View {
         .disabled(busy)
     }
 
+    private var postContent: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            RiderPostHeader(author: author, username: username, avatar: avatar)
+            RiderPostSquare(post: post).clipShape(RoundedRectangle(cornerRadius: 16))
+            if !post.caption.isEmpty { Text(post.caption).textSelection(.enabled) }
+            if let location = post.location {
+                if let url = location.mapURL {
+                    Link(destination: url) { Label(location.name, systemImage: "mappin") }
+                } else {
+                    Label(location.name, systemImage: "mappin")
+                }
+            }
+            Text(post.date, format: .dateTime.day().month().year()).font(.caption).foregroundStyle(.secondary)
+            if editable {
+                if post.published == true {
+                    Label("Опубликовано", systemImage: "checkmark.circle").font(.footnote)
+                } else if RiderCommunity.endpoint != nil {
+                    Button("Опубликовать") { update(deleting: false) }
+                        .buttonStyle(.borderedProminent)
+                    Text("В ленте будут видны фото, подпись и выбранная геометка.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                } else {
+                    Text("Сохранено на этом iPhone").font(.footnote).foregroundStyle(.secondary)
+                }
+                if let error { Text(error).font(.footnote).foregroundStyle(.secondary) }
+            }
+        }
+        .lagoonCard()
+    }
+
+    @ViewBuilder private var commentsSection: some View {
+        if RiderCommunity.endpoint != nil && (!editable || post.published == true) {
+            RiderCommentsView(postID: post.id)
+        } else {
+            VStack(alignment: .leading, spacing: 7) {
+                Text("Комментарии").font(.headline)
+                Text("Комментарии откроются после публикации поста в общей ленте.")
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
+            .lagoonCard()
+        }
+    }
+
     private func update(deleting: Bool) {
         guard !busy else { return }
         busy = true
@@ -222,6 +261,143 @@ struct RiderPostDetail: View {
                 else { try await social.publish(current) }
             } catch {
                 self.error = deleting ? "Не удалось удалить публикацию." : "Сначала опубликуйте профиль в разделе «Райдеры». Проверьте подключение и повторите."
+            }
+        }
+    }
+}
+
+private struct RiderPostHeader: View {
+    let author: String
+    let username: String?
+    let avatar: Data?
+
+    var body: some View {
+        HStack(spacing: 10) {
+            RiderAvatar(photo: avatar ?? Data(), size: 38).accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(author).font(.headline)
+                if let username, !username.isEmpty {
+                    Text("@" + username).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+    }
+}
+
+private struct RiderCommentsView: View {
+    let postID: UUID
+    @State private var comments: [RiderComment]?
+    @State private var loading = false
+    @State private var sending = false
+    @State private var draft = ""
+    @State private var draftID = UUID()
+    @State private var error: String?
+
+    private var trimmed: String { draft.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Комментарии").font(.headline).accessibilityAddTraits(.isHeader)
+            if let comments {
+                if comments.isEmpty {
+                    Text("Пока нет комментариев").font(.subheadline).foregroundStyle(.secondary)
+                }
+                ForEach(comments) { comment in
+                    commentRow(comment)
+                }
+            } else if loading {
+                ProgressView("Загружаем комментарии")
+            } else if error != nil {
+                Button("Обновить комментарии") { Task { await load() } }
+            }
+            if let error { Text(error).font(.footnote).foregroundStyle(.secondary) }
+            HStack(alignment: .bottom, spacing: 8) {
+                TextField("Написать комментарий", text: $draft, axis: .vertical)
+                    .lineLimit(1...4)
+                    .textFieldStyle(.roundedBorder)
+                    .onChange(of: draft) { _, value in
+                        if value.count > 500 { draft = String(value.prefix(500)) }
+                    }
+                Button(action: submit) {
+                    Image(systemName: "arrow.up").font(.body.bold())
+                        .frame(width: 32, height: 32)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(trimmed.isEmpty || loading || sending)
+                .accessibilityLabel("Отправить комментарий")
+            }
+        }
+        .lagoonCard()
+        .task(id: postID) { await load() }
+    }
+
+    private func commentRow(_ comment: RiderComment) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(comment.author).font(.subheadline.weight(.semibold))
+                    if let username = comment.username, !username.isEmpty {
+                        Text("@" + username).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                Spacer(minLength: 5)
+                if comment.mine {
+                    Menu {
+                        Button("Удалить комментарий", role: .destructive) {
+                            change { try await RiderCommunity.deleteComment(comment.id, for: postID) }
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis").padding(4)
+                    }
+                    .accessibilityLabel("Действия с комментарием")
+                    .disabled(sending)
+                }
+            }
+            Text(comment.text).font(.subheadline).textSelection(.enabled)
+            Text(comment.date, format: .dateTime.day().month().hour().minute())
+                .font(.caption2).foregroundStyle(.secondary)
+            Divider()
+        }
+    }
+
+    @MainActor private func load() async {
+        guard !loading, !sending else { return }
+        loading = true
+        defer { loading = false }
+        do {
+            let refreshed = try await RiderCommunity.comments(for: postID)
+            guard !Task.isCancelled else { return }
+            comments = refreshed
+            error = nil
+        } catch {
+            if !Task.isCancelled { self.error = "Не удалось загрузить комментарии." }
+        }
+    }
+
+    private func submit() {
+        let text = trimmed
+        guard !text.isEmpty else { return }
+        let id = draftID
+        change {
+            let result = try await RiderCommunity.submitComment(text, id: id, for: postID)
+            if draft.trimmingCharacters(in: .whitespacesAndNewlines) == text { draft = "" }
+            draftID = UUID()
+            return result
+        }
+    }
+
+    private func change(_ action: @escaping @MainActor () async throws -> [RiderComment]) {
+        guard !loading, !sending else { return }
+        sending = true
+        error = nil
+        Task {
+            defer { sending = false }
+            do { comments = try await action() }
+            catch RiderCommunity.Rejection.forbidden {
+                error = "Опубликуй профиль в разделе «Райдеры», чтобы комментировать."
+            } catch {
+                self.error = "Не удалось сохранить изменение. Попробуй ещё раз."
             }
         }
     }
@@ -342,6 +518,7 @@ struct RiderFeedView: View {
     @EnvironmentObject private var social: RiderSocialStore
     @AppStorage("rider.profileName") private var name = "Райдер"
     @AppStorage("rider.username") private var username = ""
+    @AppStorage("rider.profilePhoto") private var avatar = Data()
     @State private var selection = Feed.following
     @State private var entries: [RiderFeedEntry]?
     @State private var failed = false
@@ -364,11 +541,7 @@ struct RiderFeedView: View {
                 if !social.posts.isEmpty {
                     Section("Мои посты на iPhone") {
                         ForEach(social.posts) { post in
-                            NavigationLink {
-                                RiderPostDetail(original: post, author: name, username: username, editable: true)
-                            } label: {
-                                RiderPostSquare(post: post)
-                            }
+                            RiderFeedCard(post: post, author: name, username: username, avatar: avatar, editable: true)
                         }
                     }
                 }
@@ -378,17 +551,7 @@ struct RiderFeedView: View {
                         .foregroundStyle(.secondary)
                 }
                 ForEach(entries) { entry in
-                    NavigationLink {
-                        RiderPostDetail(original: entry.post, author: entry.author, username: entry.username)
-                    } label: {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text(entry.author).font(.headline)
-                            RiderPostSquare(post: entry.post).clipShape(RoundedRectangle(cornerRadius: 12))
-                            if let location = entry.post.location {
-                                Label(location.name, systemImage: "mappin").font(.caption).foregroundStyle(.secondary)
-                            }
-                        }.padding(.vertical, 3)
-                    }
+                    RiderFeedCard(post: entry.post, author: entry.author, username: entry.username, avatar: entry.avatar)
                 }
             } else if failed {
                 Button("Повторить загрузку") { Task { await load(feed) } }
@@ -413,6 +576,45 @@ struct RiderFeedView: View {
         } catch {
             if !Task.isCancelled, feed == selection { failed = true }
         }
+    }
+}
+
+private struct RiderFeedCard: View {
+    let post: RiderPost
+    let author: String
+    let username: String?
+    let avatar: Data?
+    var editable = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            RiderPostHeader(author: author, username: username, avatar: avatar)
+            NavigationLink {
+                RiderPostDetail(original: post, author: author, username: username, avatar: avatar, editable: editable)
+            } label: {
+                RiderPostSquare(post: post).clipShape(RoundedRectangle(cornerRadius: 12))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Открыть пост \(author)")
+            if !post.caption.isEmpty {
+                Text(post.caption).font(.subheadline).lineLimit(2)
+            }
+            if let location = post.location {
+                Label(location.name, systemImage: "mappin").font(.caption).foregroundStyle(.secondary)
+            }
+            NavigationLink {
+                RiderPostDetail(original: post, author: author, username: username,
+                                avatar: avatar, editable: editable, openComments: true)
+            } label: {
+                Label("Комментировать", systemImage: "bubble")
+                    .font(.footnote.weight(.semibold)).foregroundStyle(RiderTheme.accent)
+            }
+            .buttonStyle(.borderless)
+        }
+        .lagoonCard()
+        .listRowInsets(EdgeInsets(top: 5, leading: 10, bottom: 5, trailing: 10))
+        .listRowSeparator(.hidden)
+        .listRowBackground(Color.clear)
     }
 }
 
@@ -444,17 +646,9 @@ struct RiderTopsView: View {
         let isLocal = RiderCommunity.endpoint == nil || (failed && loadedFilter == filter)
         let entries = isLocal ? localRows(spot: spot, filter: filter) : (loadedFilter == filter ? remote : nil)
         return List {
-            Section {
-                Picker("Период", selection: $period) {
-                    ForEach(RiderTopPeriod.allCases) { Text($0.title).tag($0) }
-                }.pickerStyle(.menu)
-                Picker("Показатель", selection: $score) {
-                    ForEach(RiderTopMetric.allCases) { Text($0.title).tag($0) }
-                }.pickerStyle(.menu)
-                Button { choosingSpot = true } label: {
-                    LabeledContent("Спот", value: spot?.name ?? "Все споты")
-                }
-            }
+            filters(spot: spot)
+                .listRowBackground(Color.clear)
+                .listRowInsets(EdgeInsets(top: 5, leading: 10, bottom: 5, trailing: 10))
             if let entries {
                 Section(isLocal ? "Мои рекорды" : "Таблица лидеров") {
                     if isLocal {
@@ -478,7 +672,7 @@ struct RiderTopsView: View {
                 ProgressView("Загружаем рейтинг")
             }
         }
-        .navigationTitle("Топы")
+        .toolbar(.hidden, for: .navigationBar)
         .scrollContentBackground(.hidden).background(RiderTheme.canvas)
         .sheet(isPresented: $choosingSpot) {
             RiderTopSpotPicker(spots: recorder.spots, selection: $spotID)
@@ -487,13 +681,50 @@ struct RiderTopsView: View {
         .refreshable { await load(filter) }
     }
 
+    private func filters(spot: RiderSpot?) -> some View {
+        HStack(alignment: .top, spacing: 7) {
+            Menu {
+                Picker("Период", selection: $period) {
+                    ForEach(RiderTopPeriod.allCases) { Text($0.title).tag($0) }
+                }
+            } label: { filterLabel(period.title) }
+                .accessibilityLabel("Период, \(period.title)")
+            Menu {
+                Picker("Показатель", selection: $score) {
+                    ForEach(RiderTopMetric.allCases) { Text($0.title).tag($0) }
+                }
+            } label: { filterLabel(score.title) }
+                .accessibilityLabel("Показатель, \(score.title)")
+            Button { choosingSpot = true } label: {
+                filterLabel(spot?.name ?? "Все споты")
+            }
+            .accessibilityLabel("Спот, \(spot?.name ?? "Все споты")")
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func filterLabel(_ title: String) -> some View {
+        HStack(spacing: 4) {
+            Text(title).font(.caption.weight(.semibold)).lineLimit(2).minimumScaleFactor(0.85)
+            Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold))
+                .accessibilityHidden(true)
+        }
+        .foregroundStyle(RiderTheme.accent)
+        .padding(.horizontal, 6)
+        .frame(maxWidth: .infinity, minHeight: 44)
+        .background(RiderTheme.surface, in: RoundedRectangle(cornerRadius: 10))
+        .overlay { RoundedRectangle(cornerRadius: 10).strokeBorder(RiderTheme.border).allowsHitTesting(false) }
+        .contentShape(Rectangle())
+    }
+
     private func podiumRow(_ entry: RiderTopEntry, place: Int) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+        let medal = place == 1 ? RiderTheme.gold : place == 2 ? RiderTheme.silver : RiderTheme.bronze
+        return VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 10) {
                 Text(String(place)).font(.subheadline.weight(.bold).monospacedDigit())
                     .frame(width: 26, height: 26)
-                    .foregroundStyle(place == 1 ? .white : RiderTheme.accent)
-                    .background(place == 1 ? RiderTheme.action : RiderTheme.canvas, in: Circle())
+                    .foregroundStyle(medal)
+                    .background(medal.opacity(0.16), in: Circle())
                     .accessibilityLabel("Место \(place)")
                 RiderAvatar(photo: entry.avatar ?? Data(), size: 42).accessibilityHidden(true)
                 riderName(entry)
@@ -502,10 +733,10 @@ struct RiderTopsView: View {
                     .font(.title3.bold().monospacedDigit()).multilineTextAlignment(.trailing)
             }
             if let kite = entry.kite {
-                Label(kite, systemImage: "wind").accessibilityLabel("Кайт \(kite)")
+                equipmentLabel(kite, glyph: .kite).accessibilityLabel("Кайт \(kite)")
             }
             if let board = entry.board {
-                Label(board, systemImage: "water.waves").accessibilityLabel("Доска \(board)")
+                equipmentLabel(board, glyph: .board).accessibilityLabel("Доска \(board)")
             }
             if entry.kite == nil && entry.board == nil {
                 Text("Снаряжение не указано")
@@ -514,6 +745,17 @@ struct RiderTopsView: View {
         .font(.footnote)
         .lagoonCard()
         .listRowBackground(Color.clear)
+    }
+
+    private func equipmentLabel(_ name: String, glyph: EquipmentGlyph.Kind) -> some View {
+        Label {
+            Text(name)
+        } icon: {
+            EquipmentGlyph(kind: glyph)
+                .stroke(RiderTheme.accent, style: StrokeStyle(lineWidth: 1.2, lineCap: .round, lineJoin: .round))
+                .frame(width: 18, height: 18)
+                .accessibilityHidden(true)
+        }
     }
 
     private func leaderboardRow(_ entry: RiderTopEntry, place: Int) -> some View {
@@ -557,6 +799,35 @@ struct RiderTopsView: View {
         } catch {
             if !Task.isCancelled { failed = true; loadedFilter = filter }
         }
+    }
+}
+
+struct EquipmentGlyph: Shape {
+    enum Kind: Equatable { case kite, board }
+    let kind: Kind
+
+    func path(in rect: CGRect) -> Path {
+        func point(_ x: CGFloat, _ y: CGFloat) -> CGPoint {
+            CGPoint(x: rect.minX + rect.width * x, y: rect.minY + rect.height * y)
+        }
+        var shape = Path()
+        if kind == .kite {
+            shape.move(to: point(0.08, 0.64))
+            shape.addQuadCurve(to: point(0.92, 0.64), control: point(0.5, -0.37))
+            shape.addQuadCurve(to: point(0.08, 0.64), control: point(0.5, 0.26))
+            shape.move(to: point(0.08, 0.64))
+            shape.addLine(to: point(0.5, 0.92))
+            shape.addLine(to: point(0.92, 0.64))
+        } else {
+            let inset = CGRect(x: rect.minX + rect.width * 0.36, y: rect.minY + rect.height * 0.06,
+                               width: rect.width * 0.28, height: rect.height * 0.88)
+            shape.addRoundedRect(in: inset, cornerSize: CGSize(width: rect.width * 0.14, height: rect.height * 0.14))
+            for y in [CGFloat(0.36), CGFloat(0.64)] {
+                shape.move(to: point(0.37, y))
+                shape.addLine(to: point(0.63, y))
+            }
+        }
+        return shape
     }
 }
 

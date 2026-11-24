@@ -24,6 +24,24 @@ private struct Tabs: View {
     @State private var riderPath: [RiderDestination] = []
     @StateObject private var social = RiderSocialStore()
 
+    private static let rideIcon: UIImage = {
+        let size = CGSize(width: 31, height: 25)
+        return UIGraphicsImageRenderer(size: size).image { renderer in
+            let ctx = renderer.cgContext
+            ctx.setStrokeColor(UIColor.black.cgColor)
+            ctx.setLineWidth(1.7)
+            ctx.setLineJoin(.round)
+            ctx.setLineCap(.round)
+            ctx.addPath(EquipmentGlyph(kind: .kite).path(in: CGRect(x: 0, y: 1, width: 21, height: 23)).cgPath)
+            ctx.move(to: CGPoint(x: 26, y: 20))
+            ctx.addLine(to: CGPoint(x: 26, y: 5))
+            ctx.move(to: CGPoint(x: 22, y: 9))
+            ctx.addLine(to: CGPoint(x: 26, y: 5))
+            ctx.addLine(to: CGPoint(x: 30, y: 9))
+            ctx.strokePath()
+        }.withRenderingMode(.alwaysTemplate)
+    }()
+
     private enum Tab: Hashable {
         case feed, spot, record, tops, rider
     }
@@ -47,7 +65,7 @@ private struct Tabs: View {
                     selectedTab = .rider
                 }
             }
-            .tabItem { Label("Запись", systemImage: "waveform") }
+            .tabItem { Label { Text("Каталка") } icon: { Image(uiImage: Self.rideIcon) } }
             .tag(Tab.record)
 
             NavigationStack { RiderTopsView(recorder: recorder) }
@@ -280,14 +298,21 @@ private struct RecordingView: View {
                     }
                 }.lagoonCard()
 
-                Button(action: requestRecording) {
-                    Text("Начать запись").font(.headline)
+                Button(action: recorder.start) {
+                    Text("Начать каталку").font(.headline)
                         .frame(maxWidth: .infinity).padding(.vertical, 10)
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(RiderTheme.action)
                 .controlSize(.large)
                 .disabled(device == .watch || (!recorder.automaticConditions && !recorder.manualWindValid) || !recorder.hasRecordingSensors || recorder.analyzingSessionID != nil)
+
+                Button {
+                    recorder.checkSensors()
+                    showingSensorCheck = true
+                } label: {
+                    Label("Калибровать датчики", systemImage: "scope").frame(maxWidth: .infinity)
+                }.buttonStyle(.bordered).disabled(device == .watch)
 
                 if !recorder.hasRecordingSensors { Text("Датчики записи пока недоступны.").foregroundStyle(.secondary) }
                 if recorder.analyzingSessionID != nil { ProgressView("Разбираем сохранённую сессию…") }
@@ -300,52 +325,74 @@ private struct RecordingView: View {
         }
     }
 
-    private func requestRecording() {
-        showingSensorCheck = true
-    }
-
     private var sensorCheck: some View {
         NavigationStack {
-            Form {
-                Section("Калибровка") {
-                    Text("Положите телефон плашмя на неподвижную поверхность на 5 секунд. После проверки закрепите его на груди и начните запись.")
-                    if recorder.sensorCheckRunning {
-                        ProgressView("Проверяем датчики 5 секунд")
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    Text("Положите iPhone горизонтально и оставьте на 5 секунд.")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    if let sensors = recorder.checkedSensors {
+                        VStack(spacing: 20) {
+                            sensorProgress("Акселерометр", icon: "waveform.path.ecg", available: sensors.accelerometer && sensors.deviceMotion,
+                                           percent: recorder.motionCheckPercent)
+                            sensorProgress("Гироскоп", icon: "gyroscope", available: sensors.gyroscope && sensors.deviceMotion,
+                                           percent: recorder.motionCheckPercent)
+                            sensorProgress("Барометр", icon: "barometer", available: sensors.barometer,
+                                           percent: min(100, recorder.pressureCheckSamples * 100 / 3))
+                        }.lagoonCard()
+                    }
+                    if let message = recorder.sensorCheckMessage {
+                        Text(message).font(.callout).foregroundStyle(.secondary)
                     } else if recorder.checkedCalibration != nil {
-                        Label("Калибровка готова", systemImage: "checkmark.circle")
-                    } else if let message = recorder.sensorCheckMessage {
-                        Text(message).foregroundStyle(.secondary)
+                        Label("Калибровка сохранена", systemImage: "checkmark.circle.fill")
+                            .foregroundStyle(RiderTheme.accent)
                     }
-                    Button("Проверить снова", action: recorder.checkSensors).disabled(recorder.sensorCheckRunning)
-                }
-                if let sensors = recorder.checkedSensors {
-                    Section("Датчики iPhone") {
-                        LabeledContent("Акселерометр", value: sensors.accelerometer ? "Есть" : "Недоступен")
-                        LabeledContent("Гироскоп", value: sensors.gyroscope ? "Есть" : "Недоступен")
-                        LabeledContent("Движение", value: sensorStatus(sensors.deviceMotion, response: sensors.motionResponded))
-                        LabeledContent("Барометр", value: sensorStatus(sensors.barometer, response: sensors.pressureResponded))
-                        locationControls
+                    if !recorder.sensorCheckRunning {
+                        Button("Проверить снова", action: recorder.checkSensors).buttonStyle(.bordered)
                     }
-                }
-                Button("Начать запись") {
-                    recorder.start()
-                    showingSensorCheck = false
-                }
-                .disabled(!recorder.readyToStart || !recorder.hasRecordingSensors)
+                    Button {
+                        recorder.start()
+                        if recorder.live != nil { showingSensorCheck = false }
+                    } label: {
+                        Text("Начать каталку").font(.headline).frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent).controlSize(.large).tint(RiderTheme.action)
+                    .disabled(!recorder.hasRecordingSensors || (!recorder.automaticConditions && !recorder.manualWindValid))
+                }.padding(20)
             }
-            .navigationTitle("Проверка датчиков")
+            .background(RiderTheme.canvas.ignoresSafeArea())
+            .navigationTitle("Калибровка")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Отмена") { showingSensorCheck = false } } }
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Закрыть") { showingSensorCheck = false } } }
         }
         .tint(RiderTheme.accent)
-        .onAppear(perform: recorder.checkSensors)
     }
 
-    private func sensorStatus(_ available: Bool, response: Bool?) -> String {
-        guard available else { return "Недоступен" }
-        guard let response else { return "Проверяется" }
-        return response ? "Есть данные" : "Нет ответа"
+    private func sensorProgress(_ name: String, icon: String, available: Bool, percent: Int) -> some View {
+        VStack(spacing: 8) {
+            HStack {
+                Label(name, systemImage: icon).font(.headline)
+                Spacer()
+                if available {
+                    Text("\(percent)%").font(.headline.monospacedDigit())
+                        .contentTransition(.numericText())
+                        .foregroundStyle(RiderTheme.accent)
+                } else { Text("Недоступен").font(.caption).foregroundStyle(.secondary) }
+            }
+            if available {
+                ProgressView(value: Double(percent), total: 100)
+                    .tint(RiderTheme.accent)
+                    .animation(.easeOut(duration: 0.12), value: percent)
+                if !recorder.sensorCheckRunning && percent < 100 {
+                    Text(percent == 0 ? "Нет данных" : "Проверка не завершена")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+        .accessibilityElement(children: .combine)
     }
+
 
     private func recording(_ session: SessionSummary) -> some View {
         let minutes = Int(session.durationSeconds / 60)
@@ -1040,6 +1087,9 @@ enum RiderTheme {
     static let border = adaptive(light: 0xB5E4DE, dark: 0x285554)
     static let accent = adaptive(light: 0x00797C, dark: 0x64EDDD)
     static let action = Color(uiColor: rgb(0x00797C))
+    static let gold = adaptive(light: 0x916108, dark: 0xFFD768)
+    static let silver = adaptive(light: 0x5B6776, dark: 0xD9E5F0)
+    static let bronze = adaptive(light: 0x914719, dark: 0xEBA978)
     static let foam = Color(uiColor: rgb(0xDDFCF6))
     static let lagoon = LinearGradient(
         colors: [Color(uiColor: rgb(0x006E86)), Color(uiColor: rgb(0x008B85))],

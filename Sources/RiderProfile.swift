@@ -85,7 +85,27 @@ enum RiderCommunity {
         return try JSONDecoder().decode([RiderTopEntry].self, from: data)
     }
 
-    fileprivate enum Rejection: Error { case conflict }
+    static func comments(for post: UUID) async throws -> [RiderComment] {
+        let data = try await requestData(commentPath(post), method: "GET", body: nil)
+        return try JSONDecoder().decode([RiderComment].self, from: data)
+    }
+
+    static func submitComment(_ text: String, id: UUID, for post: UUID) async throws -> [RiderComment] {
+        let data = try await requestData(commentPath(post, id), method: "PUT", body: JSONEncoder().encode(["text": text]))
+        return try JSONDecoder().decode([RiderComment].self, from: data)
+    }
+
+    static func deleteComment(_ id: UUID, for post: UUID) async throws -> [RiderComment] {
+        let data = try await requestData(commentPath(post, id), method: "DELETE", body: nil)
+        return try JSONDecoder().decode([RiderComment].self, from: data)
+    }
+
+    private static func commentPath(_ post: UUID, _ id: UUID? = nil) -> String {
+        let path = "posts/\(post.uuidString.lowercased())/comments"
+        return id.map { path + "/" + $0.uuidString.lowercased() } ?? path
+    }
+
+    enum Rejection: Error { case conflict, forbidden }
 
     private static func requestData(_ path: String, method: String, body: Data?) async throws -> Data {
         guard let base = endpoint else { throw URLError(.unsupportedURL) }
@@ -125,6 +145,7 @@ enum RiderCommunity {
         let (data, response) = try await URLSession.shared.data(for: req)
         let statusCode = (response as? HTTPURLResponse)?.statusCode
         if statusCode == 409 { throw Rejection.conflict }
+        if statusCode == 403 { throw Rejection.forbidden }
         guard statusCode == 200 else { throw URLError(.badServerResponse) }
         return data
     }
@@ -303,7 +324,8 @@ struct RiderProfileView: View {
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: 3), spacing: 3) {
                     ForEach(social.posts) { post in
                         NavigationLink {
-                            RiderPostDetail(original: post, author: name, username: username, editable: true)
+                            RiderPostDetail(original: post, author: name, username: username,
+                                            avatar: photo, editable: true)
                         } label: {
                             RiderPostSquare(post: post)
                         }.buttonStyle(.plain)

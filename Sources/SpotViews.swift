@@ -107,10 +107,10 @@ private struct FavoriteWindRow: View {
                         } label: {
                             VStack(alignment: .leading, spacing: 5) {
                                 Text(window.spot.name).font(.headline)
-                                Text(timeLabel(window) + " · " + metric(window.weather.meanWind, unit: "м/с"))
-                                    .font(.subheadline).foregroundStyle(RiderTheme.accent)
-                                if let gust = window.weather.maxGust {
-                                    Text("Порывы до " + metric(gust, unit: "м/с")).font(.caption)
+                                Text(timeLabel(window, relativeTo: context.date)).font(.subheadline)
+                                ViewThatFits(in: .horizontal) {
+                                    HStack(spacing: 9) { windValues(window.weather) }
+                                    VStack(alignment: .leading, spacing: 5) { windValues(window.weather) }
                                 }
                                 if window.weather.thunder {
                                     Label("В прогнозе гроза", systemImage: "cloud.bolt.rain").font(.caption)
@@ -118,7 +118,7 @@ private struct FavoriteWindRow: View {
                             }
                         }
                     } else {
-                        Text("Сегодня и завтра в загруженных прогнозах нет окна с ветром от 4 м/с")
+                        Text("Сегодня и завтра нет окна от часа с ветром от 4 м/с")
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -128,16 +128,45 @@ private struct FavoriteWindRow: View {
         }
     }
 
-    private func timeLabel(_ window: SpotForecast.FavoriteWindow) -> String {
+    @ViewBuilder private func windValues(_ weather: SpotForecast.WindowSummary) -> some View {
+        ForecastWindPill(text: "Ветер " + metric(weather.meanWind, unit: "м/с"), level: weather.windLevel)
+        if let gust = weather.maxGust, let level = weather.gustLevel {
+            ForecastWindPill(text: "Порывы до " + metric(gust, unit: "м/с"), level: level)
+        }
+    }
+
+    private func timeLabel(_ window: SpotForecast.FavoriteWindow, relativeTo now: Date) -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "ru_RU")
         formatter.timeZone = window.timezone
-        formatter.dateFormat = "dd.MM HH:mm"
-        let start = formatter.string(from: window.start)
         formatter.dateFormat = "HH:mm"
-        return start + "–" + formatter.string(from: window.end)
+        let start = formatter.string(from: window.start)
+        let end = formatter.string(from: window.end)
+        return "\(window.dayTitle(relativeTo: now)), \(start)–\(end)"
+    }
+}
+
+private struct ForecastWindPill: View {
+    let text: String
+    let level: SpotForecast.WindLevel
+
+    var body: some View {
+        Text(text)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(level == .calm ? Color.secondary : Color.black)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(fill, in: Capsule())
     }
 
+    private var fill: Color {
+        switch level {
+        case .calm: return RiderTheme.canvas
+        case .light: return Color(red: 0.80, green: 0.95, blue: 0.82)
+        case .medium: return Color(red: 0.69, green: 0.91, blue: 0.36)
+        case .strong: return Color(red: 1.0, green: 0.61, blue: 0.59)
+        }
+    }
 }
 
 private struct SpotGroups<Row: View>: View {
@@ -607,7 +636,7 @@ private struct BestSpotsToday: View {
                 let weather = item.weather
                 VStack(alignment: .leading, spacing: 8) {
                     Text(item.spot.name).font(.headline)
-                    windPill(weather.windLevel.description, level: weather.windLevel == .calm ? .calm : .light)
+                    ForecastWindPill(text: weather.windLevel.description, level: weather.windLevel == .calm ? .calm : .light)
                     ViewThatFits(in: .horizontal) {
                         HStack(spacing: 12) { windMetrics(weather) }
                         VStack(alignment: .leading, spacing: 6) { windMetrics(weather) }
@@ -758,27 +787,9 @@ private struct BestSpotsToday: View {
     private func windMetric(_ label: String, speed: Double?, level: SpotForecast.WindLevel) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(label).font(.caption).foregroundStyle(.secondary)
-            windPill(metric(speed, unit: "м/с"), level: level).monospacedDigit()
+            ForecastWindPill(text: metric(speed, unit: "м/с"), level: level).monospacedDigit()
         }
         .accessibilityElement(children: .combine)
-    }
-
-    private func windPill(_ text: String, level: SpotForecast.WindLevel) -> some View {
-        Text(text)
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(level == .calm ? Color.secondary : Color.black)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(windFill(level), in: Capsule())
-    }
-
-    private func windFill(_ level: SpotForecast.WindLevel) -> Color {
-        switch level {
-        case .calm: return RiderTheme.canvas
-        case .light: return Color(red: 0.80, green: 0.95, blue: 0.82)
-        case .medium: return Color(red: 0.69, green: 0.91, blue: 0.36)
-        case .strong: return Color(red: 1.0, green: 0.61, blue: 0.59)
-        }
     }
 
     private func nearbyRegion(_ fix: CLLocation, within radius: Double) -> String? {

@@ -715,6 +715,12 @@ struct SpotForecast: Decodable {
         let end: Date
         let timezone: TimeZone
         let weather: WindowSummary
+
+        func dayTitle(relativeTo now: Date) -> String {
+            var calendar = Calendar(identifier: .gregorian)
+            calendar.timeZone = timezone
+            return calendar.isDate(start, inSameDayAs: now) ? "Сегодня" : "Завтра"
+        }
     }
 
     static func nearestWindWindow(after now: Date, forecasts: [(RiderSpot, SpotForecast)]) -> FavoriteWindow? {
@@ -739,9 +745,11 @@ struct SpotForecast: Decodable {
             for window in Window.allCases {
                 guard let end = calendar.date(bySettingHour: window.endHour, minute: 0, second: 0, of: day), end > now else { continue }
                 let readings = dayHours.filter { window.forecastHours.contains(calendar.component(.hour, from: $0.time)) }
-                guard let first = readings.first, first.time < end,
+                guard let first = readings.first else { continue }
+                let start = max(now, first.time)
+                guard end.timeIntervalSince(start) >= 3600,
                       let weather = WindowSummary(readings), weather.windLevel != .calm else { continue }
-                return FavoriteWindow(spot: spot, start: max(now, first.time), end: end, timezone: zone, weather: weather)
+                return FavoriteWindow(spot: spot, start: start, end: end, timezone: zone, weather: weather)
             }
         }
         return nil
@@ -932,6 +940,8 @@ struct LiveJumpEstimate: Codable {
     var assumesLevelLanding: Bool?
     var apexSeconds: Double?
     var pushRiseMeters: Double?
+    var approachExcursion: Bool?
+    var crossedStartLevel: Bool?
     var floorPeakMeters: Double?
     var floorReferenceMeters: Double?
 
@@ -946,6 +956,22 @@ struct LiveJumpEstimate: Codable {
                        motionPeak: VerticalTrajectory.Peak? = nil) -> Self {
         let event = flight.event
         let start = event.startSeconds, end = event.endSeconds
+        if let peak = flight.approachPeak {
+            // Short arcs can be measured using motion alone. At longer durations
+            // independent pressure around the apex must corroborate the integrated rise.
+            let before = altitude.filter { (start - 2.8...start).contains($0.elapsedSinceFirstSampleSeconds) }.suffix(2)
+            let nearApex = altitude.filter {
+                (start...end).contains($0.elapsedSinceFirstSampleSeconds) && abs($0.elapsedSinceFirstSampleSeconds - peak.time) <= 1.1
+            }
+            let baseline = before.map(\.relativeAltitudeMeters).reduce(0, +) / Double(max(1, before.count))
+            let corroborated = before.count == 2 && before.allSatisfy { abs($0.relativeAltitudeMeters - baseline) <= 0.3 } &&
+                nearApex.contains { abs($0.relativeAltitudeMeters - baseline - peak.height) <= max(0.5, 0.25 * peak.height) }
+            let measured: Double? = end - start <= 4.5 || corroborated ? peak.height : nil
+            return Self(heightMeters: measured, airtimeSeconds: end - start,
+                        distanceMeters: gpsDistance(start: start, end: end, gps: gps, motionClock: motionClock),
+                        inertialLift: true, apexSeconds: peak.time, approachExcursion: true,
+                        crossedStartLevel: flight.crossedStartLevel)
+        }
         let corroborated = ridingHeight(flight, altitude: altitude)
         // For long arcs require independent pressure support before accepting drift-prone integration.
         let anchored = motionPeak.flatMap { peak -> VerticalTrajectory.Peak? in
@@ -1078,6 +1104,47 @@ struct LiveJumpEstimate: Codable {
         let spokenWhole = feminine.map { whole < 10 ? $0 : cardinal.split(separator: " ").dropLast().joined(separator: " ") + " " + $0 } ?? cardinal
         let fractions = ["", "одна десятая", "две десятых", "три десятых", "четыре десятых", "пять десятых", "шесть десятых", "семь десятых", "восемь десятых", "девять десятых"]
         return "\(spokenWhole) \(endsInOne ? "целая" : "целых") \(fractions[digit]) метра"
+    }
+}
+
+/// Resolve overlapping observations once, after delayed pressure samples arrive.
+struct RideJumpQueue {
+    private var flights: [(flight: RidingJumpDetector.Flight, gpsApproach: Bool)] = []
+    private var lastEnd = -Double.infinity
+
+    mutating func add(_ flight: RidingJumpDetector.Flight, gpsApproach: Bool) {
+        guard flight.event.startSeconds >= lastEnd else { return }
+        flights.append((flight, gpsApproach))
+        flights.sort { $0.flight.event.startSeconds < $1.flight.event.startSeconds }
+    }
+
+    mutating func resolve(through time: Double, finishing: Bool, vertical: [VerticalTrajectory.Sample],
+                          altitude: [AltitudeSample], gps: [RoutePoint], motionClock: Date?)
+        -> [(JumpCandidate, LiveJumpEstimate)] {
+        var results: [(JumpCandidate, LiveJumpEstimate)] = []
+        while let first = flights.first {
+            let end = first.flight.event.endSeconds
+            let group = flights.prefix { $0.flight.event.startSeconds < end }
+            let last = group.map { $0.flight.event.endSeconds }.max() ?? end
+            guard finishing || time >= last + 3 else { break }
+            var best: (event: JumpCandidate, estimate: LiveJumpEstimate, priority: Int)?
+            for item in group {
+                let flight = item.flight
+                let peak = flight.approachPeak == nil ? VerticalTrajectory.flightPeak(
+                    flight.event, samples: vertical, levelLandingCheck: flight.levelLandingHeight) : nil
+                let estimate = LiveJumpEstimate.riding(flight, altitude: altitude, gps: gps, motionClock: motionClock, motionPeak: peak)
+                guard let height = estimate.heightMeters, height.isFinite, height >= ApproachJumpDetector.minimumHeight else { continue }
+                let priority = flight.crossedStartLevel ? 3 : flight.approachPeak != nil ? 1 : (item.gpsApproach ? 2 : 0)
+                if best == nil || priority > best!.priority { best = (flight.event, estimate, priority) }
+            }
+            flights.removeFirst(group.count)
+            if let best {
+                results.append((best.event, best.estimate))
+                lastEnd = best.event.endSeconds
+                flights.removeAll { $0.flight.event.startSeconds < lastEnd }
+            }
+        }
+        return results
     }
 }
 

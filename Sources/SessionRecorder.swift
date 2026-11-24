@@ -57,11 +57,13 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
     private var calibrationSamples: [MotionSample] = []
     private var recentAltitude: [AltitudeSample] = []
     private var recentFixes: [RoutePoint] = []
-    private var pendingRides: [RidingJumpDetector.Flight] = []
+    private var approachDetector = ApproachJumpDetector()
+    private var pendingRides = RideJumpQueue()
     private var motionClock: Date?
     private let gearPresetsKey = "rider.gearPresets"
     private let calibrationKey = "rider.calibrationByPlacement"
-    private let sensorCheckKey = "rider.completedSensorCheck"
+    @Published private(set) var motionCheckPercent = 0
+    @Published private(set) var pressureCheckSamples = 0
     private var checkTask: Task<Void, Never>?
     private var checkID: UUID?
     private var checkOrigin: TimeInterval?
@@ -73,9 +75,6 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
     }
     var locationAuthorized: Bool { authorization == .authorizedWhenInUse || authorization == .authorizedAlways }
     var hasRecordingSensors: Bool { motionAvailable || pressureAvailable || locationAuthorized }
-    var readyToStart: Bool {
-        !sensorCheckRunning && checkedSensors != nil && (!motionAvailable || checkedCalibration != nil)
-    }
     var usableFix: CLLocation? {
         guard locationAuthorized, let fix = previewFix, abs(fix.timestamp.timeIntervalSinceNow) <= 45 else { return nil }
         return fix
@@ -222,6 +221,8 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
         checkOrigin = nil
         calibrationSamples.removeAll()
         checkedCalibration = nil
+        motionCheckPercent = 0
+        pressureCheckSamples = 0
         sensorCheckMessage = nil
         checkedSensors = sensorInventory
         sensorCheckRunning = true
@@ -239,6 +240,8 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
                 guard let sample = Self.motionSample(motion, elapsed: motion.timestamp - origin) else { return }
                 if self.checkedSensors?.motionResponded != true { self.checkedSensors?.motionResponded = true }
                 self.calibrationSamples.append(sample)
+                let progress = min(99, Int(sample.elapsedSinceFirstSampleSeconds * 20))
+                if progress != self.motionCheckPercent { self.motionCheckPercent = progress }
                 if sample.elapsedSinceFirstSampleSeconds >= 5.0 {
                     self.finishSensorCheck(id)
                 }
@@ -247,13 +250,17 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
         if pressureAvailable {
             altimeter.startRelativeAltitudeUpdates(to: .main) { [weak self] data, error in
                 guard let self, self.checkID == id else { return }
-                if data != nil || error != nil {
-                    self.checkedSensors?.pressureResponded = data != nil && error == nil
+                if let data, error == nil, data.pressure.doubleValue.isFinite, data.pressure.doubleValue > 0 {
+                    self.pressureCheckSamples += 1
+                    self.checkedSensors?.pressureResponded = true
+                    if self.pressureCheckSamples >= 3 { self.altimeter.stopRelativeAltitudeUpdates() }
+                } else if error != nil {
+                    self.checkedSensors?.pressureResponded = false
                     self.altimeter.stopRelativeAltitudeUpdates()
                 }
             }
         }
-        checkTask = Task { [weak self] in
+        checkTask = Task { @MainActor [weak self] in
             do { try await Task.sleep(for: .seconds(8)) } catch { return }
             self?.finishSensorCheck(id)
         }
@@ -275,11 +282,15 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
                 let calibration = try MotionCalibration.measure(calibrationSamples)
                 checkedCalibration = MotionCalibration(completedAtSeconds: 0, frequencyHz: calibration.frequencyHz,
                                                        verticalOffset: calibration.verticalOffset, verticalNoise: calibration.verticalNoise)
+                motionCheckPercent = 100
+                if let checkedCalibration { saveCalibration(checkedCalibration, placement: effectivePlacement) }
             } catch let failure as MotionCalibration.Failure {
                 sensorCheckMessage = failure.message
             } catch {
                 sensorCheckMessage = "Поправку движения не удалось измерить."
             }
+        } else {
+            sensorCheckMessage = "Датчики движения не ответили. Можно начать каталку с доступными датчиками."
         }
         stopSensorCheck()
     }
@@ -303,9 +314,10 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
     }
 
     func start() {
-        guard summary == nil, analyzingSessionID == nil, hasRecordingSensors, readyToStart, automaticConditions || manualWindValid else { return }
+        guard summary == nil, analyzingSessionID == nil, hasRecordingSensors, automaticConditions || manualWindValid else { return }
+        stopSensorCheck()
         UIDevice.current.isBatteryMonitoringEnabled = true
-        let calibration = checkedCalibration
+        let calibration = checkedCalibration ?? savedCalibration
         var sessionSetup = draftSetup.forRecording
         if !gearPresets.contains(where: { $0.matches(sessionSetup) }) {
             sessionSetup.clearEquipment()
@@ -336,7 +348,7 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
             motionCalibration: calibration,
             liveJumpEstimates: [:],
             handSimulationTest: false,
-            reusedMotionCalibration: false,
+            reusedMotionCalibration: checkedCalibration == nil && calibration != nil,
             recordingMode: .battle,
             sensors: sensors
         )
@@ -364,8 +376,6 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
         }
 
         live = session
-        if let checkedCalibration { saveCalibration(checkedCalibration, placement: effectivePlacement) }
-        if checkedSensors != nil { UserDefaults.standard.set(true, forKey: sensorCheckKey) }
         checkedSensors = nil
         checkedCalibration = nil
         automaticSpotOverride = nil
@@ -386,7 +396,8 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
         resetCalibration()
         recentAltitude.removeAll()
         recentFixes.removeAll()
-        pendingRides.removeAll()
+        approachDetector = ApproachJumpDetector()
+        pendingRides = RideJumpQueue()
         motionClock = session.startedAt
 
         if session.gpsEnabledAtStart {
@@ -611,17 +622,18 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
             let moving: Bool
             if let latest = recentFixes.last, let speed = latest.speed, let motionClock {
                 let age = motionClock.addingTimeInterval(elapsed).timeIntervalSince(latest.sample.timestamp)
-                moving = speed >= 2 && (0...2).contains(age)
+                moving = speed >= 2 && speed - (latest.sample.speedAccuracyMetersPerSecond ?? .infinity) >= 1.3 && (0...2).contains(age)
             } else {
                 moving = false
             }
+            if let excursion = approachDetector.process(sample, calibration: session.motionCalibration, moving: moving) {
+                let evidence = approachDetector.approach(before: excursion.event.startSeconds)
+                pendingRides.add(excursion, gpsApproach: evidence.gps)
+            }
             if let flight = ridingDetector.process(sample, calibration: session.motionCalibration, moving: moving) {
-                try log.append("jumpCandidate", flight.event)
-                session.jumpAnalysis?.candidates.append(flight.event)
-                let key = SessionReview.key(for: flight.event, version: RidingJumpDetector.version)
-                session.liveJumpEstimates?[key] = LiveJumpEstimate(heightMeters: nil, airtimeSeconds: flight.event.unloadingSeconds,
-                                                                  distanceMeters: nil)
-                pendingRides.append(flight)
+                // Look before the push so the takeoff itself cannot provide the approach.
+                let evidence = approachDetector.approach(before: flight.event.startSeconds - 0.30)
+                if evidence.allowed { pendingRides.add(flight, gpsApproach: evidence.gps) }
             }
             if let reason = ridingDetector.lastRejection {
                 try log.append("event", SessionEvent(name: "jumpRejected", batteryPercent: batteryPercent, detail: reason))
@@ -760,19 +772,12 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
 
     private func resolveJumps(_ session: inout SessionSummary, log: SessionLog, finishing: Bool = false) throws {
         let elapsed = ProcessInfo.processInfo.systemUptime - (motionTimeOrigin ?? ProcessInfo.processInfo.systemUptime)
-        let pressureAvailable = session.altitude?.supported == true && session.altitude?.stoppedWithError == false
-        while let flight = pendingRides.first,
-              finishing || elapsed >= flight.event.endSeconds + (pressureAvailable ? 3.0 : 2.0) {
-            pendingRides.removeFirst()
-            let peak = VerticalTrajectory.flightPeak(flight.event, samples: verticalSamples,
-                                                   levelLandingCheck: flight.levelLandingHeight)
-            let estimate = LiveJumpEstimate.riding(flight, altitude: recentAltitude, gps: recentFixes,
-                                                   motionClock: motionClock, motionPeak: peak)
-            if estimate.heightMeters == nil {
-                try log.append("event", SessionEvent(name: "jumpHeightUnavailable", batteryPercent: batteryPercent,
-                                                     detail: "pressureOrTrajectoryInsufficient"))
-            }
-            try storeEstimate(estimate, for: flight.event, session: &session, log: log, speak: !finishing)
+        let confirmed = pendingRides.resolve(through: elapsed, finishing: finishing, vertical: verticalSamples,
+                                             altitude: recentAltitude, gps: recentFixes, motionClock: motionClock)
+        for (event, estimate) in confirmed {
+            try log.append("jumpCandidate", event)
+            session.jumpAnalysis?.candidates.append(event)
+            try storeEstimate(estimate, for: event, session: &session, log: log, speak: !finishing)
         }
     }
 

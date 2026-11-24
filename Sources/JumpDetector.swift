@@ -165,7 +165,7 @@ struct JumpDetector {
 /// Detects a push, ascent, descent and braking as separate phases. A kite jump
 /// can stay loaded in the air, so it never needs a free-fall interval.
 struct RidingJumpDetector {
-    static let version = "ride-9"
+    static let version = "ride-10"
 
     struct Point {
         let time: Double
@@ -178,6 +178,8 @@ struct RidingJumpDetector {
         let settledHeight: Double
         let residualVelocity: Double
         var levelLandingHeight: Double? = nil
+        var approachPeak: VerticalTrajectory.Peak? = nil
+        var crossedStartLevel = false
     }
 
     private struct Motion {
@@ -491,6 +493,143 @@ struct RidingJumpDetector {
         }
         arc = track
         return nil
+    }
+}
+
+/// A level approach can be moving horizontally. Local averages of integrated vertical
+/// speed before launch and after recovery keep session-long IMU drift out of the height.
+struct ApproachJumpDetector {
+    static let minimumHeight = 0.50
+    private struct Point {
+        let time, acceleration, velocity, position, lateralSeconds, lastGPSTime, load, spin: Double
+    }
+    private struct Anchor { let point: Point; let speed: Double }
+    private var points: [Point] = []
+    private var baseline: Anchor?
+    private var active: Anchor?
+    private var lastCheck = -Double.infinity
+    private var lastEnd = -Double.infinity
+
+    func approach(before time: Double) -> (allowed: Bool, gps: Bool) {
+        guard let right = points.last(where: { $0.time <= time - 0.10 }) else { return (false, false) }
+        let gps = right.time - right.lastGPSTime <= 1.5
+        guard let left = points.last(where: { $0.time <= time - 1.15 }) ?? points.first,
+              left.time < right.time else { return (gps, gps) }
+        return (gps || right.lateralSeconds - left.lateralSeconds >= 0.32, gps)
+    }
+
+    mutating func process(_ sample: MotionSample, calibration: MotionCalibration?, moving: Bool) -> RidingJumpDetector.Flight? {
+        let t = sample.elapsedSinceFirstSampleSeconds
+        let raw = sample.verticalAccelerationMetersPerSecondSquared
+        let up = -(calibration?.correctedVertical(raw, at: t) ?? raw)
+        let a = sample.accelerationG, g = sample.gravityG, r = sample.rotationRadiansPerSecond
+        let horizontalSquared = (a.x*a.x + a.y*a.y + a.z*a.z) * 9.80665 * 9.80665 - raw*raw
+        let load = sqrt(pow(a.x + g.x, 2) + pow(a.y + g.y, 2) + pow(a.z + g.z, 2))
+        let spin = sqrt(r.x*r.x + r.y*r.y + r.z*r.z)
+        guard t.isFinite, t >= 0, up.isFinite, horizontalSquared.isFinite, load.isFinite, spin.isFinite else {
+            self = Self()
+            return nil
+        }
+        if let p = points.last, t <= p.time || t - p.time > 0.05 { self = Self() }
+        let p = points.last
+        let dt = t - (p?.time ?? t)
+        let velocity = (p?.velocity ?? 0) + 0.5 * ((p?.acceleration ?? up) + up) * dt
+        let position = (p?.position ?? 0) + 0.5 * ((p?.velocity ?? 0) + velocity) * dt
+        let lateral = (p?.lateralSeconds ?? 0) + (horizontalSquared >= 0.85 * 0.85 ? dt : 0)
+        points.append(Point(time: t, acceleration: up, velocity: velocity, position: position,
+                            lateralSeconds: lateral, lastGPSTime: moving ? t : p?.lastGPSTime ?? -.infinity,
+                            load: load, spin: spin))
+        if let first = points.first, t - first.time > 23 { points.removeAll { t - $0.time > 20 } }
+        guard t - lastCheck >= 0.045 else { return nil }
+        lastCheck = t
+        let lo = points.lastIndex(where: { $0.time < t - 0.34 }).map { $0 + 1 } ?? 0
+        let window = points[lo...]
+        guard let first = window.first, t - first.time >= 0.28, window.count >= 5 else { return nil }
+        let stable = (window.map(\.velocity).max()! - window.map(\.velocity).min()! < 0.38 &&
+                      abs(velocity - first.velocity) < 0.22)
+        let center = points[(lo + points.count - 1) / 2]
+        let anchor = Anchor(point: center, speed: (position - first.position) / (t - first.time))
+        guard let origin = active else {
+            if let b = baseline, b.point.time >= lastEnd, t - b.point.time <= 1.1,
+               velocity - b.speed >= 0.78, approach(before: b.point.time).allowed {
+                active = b
+                baseline = nil
+            } else if stable { baseline = anchor }
+            return nil
+        }
+        let start = origin.point.time
+        if t - start > (approach(before: start).gps ? 15.5 : 4.5) {
+            active = nil
+            baseline = stable ? anchor : nil
+            return nil
+        }
+        guard let index = points.lastIndex(where: { $0.time <= start }) else { return nil }
+        let track = points[index...]
+        func rawHeight(_ x: Point) -> Double {
+            x.position - origin.point.position - origin.speed * (x.time - start)
+        }
+        func complete(_ apex: Point, height: Double, end: Double, crossed: Bool) -> RidingJumpDetector.Flight {
+            let flight = track.prefix { $0.time <= end }
+            let event = JumpCandidate(startSeconds: start, endSeconds: end, minimumLoadG: flight.map(\.load).min() ?? 1,
+                                      returnPeakG: track.filter { $0.time >= apex.time }.map(\.load).max() ?? 1,
+                                      maximumRotationRadiansPerSecond: flight.map(\.spin).max() ?? 0)
+            return .init(event: event, trajectory: [], settledHeight: 0, residualVelocity: 0,
+                         approachPeak: .init(height: height, time: apex.time), crossedStartLevel: crossed)
+        }
+
+        // Remember the first descending crossing. The samples following it confirm
+        // the sign change and never extend the measured interval into a fall.
+        if let last = track.last, rawHeight(last) < 0,
+           let positive = track.lastIndex(where: { rawHeight($0) > 0 }), positive < track.endIndex - 1 {
+            let above = track[positive], below = track[positive + 1]
+            let crossing = above.time + rawHeight(above) / (rawHeight(above) - rawHeight(below)) * (below.time - above.time)
+            let airborne = track[...positive]
+            if t - crossing >= 0.08, let apex = airborne.max(by: { rawHeight($0) < rawHeight($1) }),
+               rawHeight(apex) >= Self.minimumHeight, crossing - apex.time >= 0.15,
+               airborne.contains(where: { $0.time >= apex.time && $0.velocity < origin.speed - 0.58 }),
+               !airborne.contains(where: { $0.time < apex.time && rawHeight($0) < -0.25 }) {
+                let result = complete(apex, height: rawHeight(apex), end: crossing, crossed: true)
+                lastEnd = crossing
+                active = nil
+                baseline = nil
+                return result
+            }
+        }
+
+        // A soft return can touch the starting level without a sign change.
+        // The second velocity anchor bounds drift independently of the height.
+        let duration = center.time - start
+        guard stable, duration >= 0.65, abs(anchor.speed - origin.speed) <= 0.75 else { return nil }
+        let drift = anchor.speed - origin.speed
+        func height(_ p: Point) -> Double {
+            let elapsed = p.time - start
+            return rawHeight(p) - 0.5 * drift * elapsed * elapsed / duration
+        }
+        let closure = height(center)
+        guard abs(closure) <= 0.42 else { return nil }
+        func corrected(_ p: Point) -> Double {
+            let f = (p.time - start) / duration
+            return height(p) - closure * f*f * (3 - 2*f)
+        }
+        let path = track.prefix { $0.time <= center.time }
+        guard let apex = path.max(by: { corrected($0) < corrected($1) }) else { return nil }
+        let peak = corrected(apex)
+        if peak < 0.45, abs(center.velocity - origin.speed) < 0.3,
+           !path.contains(where: { $0.velocity - origin.speed >= 1.3 }) {
+            active = nil
+            baseline = anchor
+            return nil
+        }
+        guard peak >= Self.minimumHeight, abs(closure) <= max(0.18, min(0.42, 0.19 * peak)),
+              !path.contains(where: { corrected($0) < -0.25 }),
+              apex.time - start >= 0.15, center.time - apex.time >= 0.15,
+              path.contains(where: { $0.time <= apex.time && $0.velocity - origin.speed >= 0.78 }),
+              path.contains(where: { $0.time >= apex.time && $0.velocity - anchor.speed <= -0.58 }) else { return nil }
+        let result = complete(apex, height: peak, end: center.time, crossed: false)
+        lastEnd = center.time
+        active = nil
+        baseline = anchor
+        return result
     }
 }
 
