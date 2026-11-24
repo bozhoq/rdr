@@ -27,6 +27,21 @@ import FoundationXML
         check(abs((jump?.distanceMeters ?? 0) - 22.239) < 0.01, "Use only accepted GPS fixes near both boundaries")
         check(LiveJumpEstimate.measure(event, altitude: arc, gps: fixes, motionClock: nil)?.distanceMeters == nil, "No jump distance without a common clock")
         check(LiveJumpEstimate.measure(event, altitude: Array(arc.dropLast()), gps: [], motionClock: nil) == nil, "A rise without a return cannot trigger the voice")
+        var speedRoute = RouteFilter()
+        let speedFixes = (0...5).compactMap { i in
+            speedRoute.accept(point(Double(i), accuracy: 12, speed: Double(i + 3), speedAccuracy: 0.3), notBefore: origin)
+        }
+        check(abs((LiveJumpEstimate.speedDistance(start: 0.5, end: 3.5, gps: speedFixes, motionClock: origin) ?? 0) - 15) < 0.001,
+              "Integrate GPS horizontal speed with interpolation at both flight boundaries")
+        check(LiveJumpEstimate.speedDistance(start: -0.5, end: 2, gps: speedFixes, motionClock: origin) == nil &&
+              LiveJumpEstimate.speedDistance(start: 0.5, end: 3.5, gps: speedFixes.filter { $0.id != speedFixes[1].id && $0.id != speedFixes[2].id }, motionClock: origin) == nil,
+              "Do not extrapolate speed or bridge a GPS gap")
+        var noisyRoute = RouteFilter()
+        let noise = (0...4).compactMap { i in
+            noisyRoute.accept(point(Double(i), accuracy: 12, speed: 0.7, speedAccuracy: 1), notBefore: origin)
+        }
+        check(LiveJumpEstimate.speedDistance(start: 0.5, end: 3.5, gps: noise, motionClock: origin) == nil, "Indoor speed noise cannot produce jump distance")
+
         var interrupted = arc
         interrupted.remove(at: 3)
         check(LiveJumpEstimate.measure(event, altitude: interrupted, gps: [], motionClock: nil) == nil, "Reject a gap across the pressure peak")
@@ -268,6 +283,14 @@ import FoundationXML
         let entry: [[String: Any]] = [["id": spot.id.uuidString, "name": spot.name,
                                       "latitude": spot.latitude, "longitude": spot.longitude,
                                       "mapLink": "https://yandex.ru/maps/-/test", "source": "https://example.org/spot"]]
+        var beach = spot
+        beach.name = "Общий пляж"
+        beach.accessPoints = [.init(id: nearby.id, name: nearby.name, latitude: nearby.latitude, longitude: nearby.longitude)]
+        let mergedBeach = StarterSpots.merge(saved: [nearby], catalogue: [beach])
+        var historic = SessionSetup()
+        historic.selectSpot(nearby)
+        check(mergedBeach.count == 1 && mergedBeach[0].matches(historic) && mergedBeach[0].matchesName(nearby.name),
+              "Catalogued access points resolve to one beach for saved sessions and search")
         let starter = StarterSpots.decode(entry).first
         check(starter?.source?.absoluteString == "https://example.org/spot" && starter?.id == spot.id && starter?.yandexURL?.absoluteString == "https://yandex.ru/maps/-/test",
               "Decode the bundled starter catalogue and original map link")

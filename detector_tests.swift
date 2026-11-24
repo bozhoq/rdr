@@ -357,6 +357,43 @@ enum DetectorTests {
                   "Apply the 0.50 m cutoff before rounding and saving")
         }
 
+        // A repeatable pressure-supported ride with a second lift while still airborne.
+        func secondGust(moving: Bool, gap: Bool = false) -> [RidingJumpDetector.Flight] {
+            var tracker = ApproachJumpDetector()
+            var observations: [AltitudeSample] = []
+            var result: [RidingJumpDetector.Flight] = []
+            func leg(_ t: Double, from: Double, duration: Double, rise: Double) -> (Double, Double) {
+                let u = min(1, max(0, (t - from) / duration))
+                let h = rise * u*u*u * (10 - 15*u + 6*u*u)
+                let a = rise * (60*u - 180*u*u + 120*u*u*u) / (duration * duration)
+                return (h, a)
+            }
+            func motion(_ t: Double) -> (Double, Double) {
+                let a = leg(t, from: 3, duration: 2, rise: 1.25)
+                let b = leg(t, from: 6.5, duration: 2, rise: 1.20)
+                let c = leg(t, from: 9.5, duration: 3, rise: -2.80)
+                return (a.0 + b.0 + c.0, a.1 + b.1 + c.1)
+            }
+            for i in 0...1650 {
+                let t = Double(i) / 100, up = motion(t).1
+                let base = sample(t, 1 + up / 9.80665)
+                let m = MotionSample(elapsedSinceFirstSampleSeconds: t, accelerationG: .init(x: moving ? 0.15 : 0, y: 0, z: base.accelerationG.z),
+                                     gravityG: base.gravityG, rotationRadiansPerSecond: base.rotationRadiansPerSecond,
+                                     attitude: base.attitude, verticalAccelerationMetersPerSecondSquared: -up)
+                if !(gap && (7...7.2).contains(t)) { _ = tracker.process(m, calibration: nil, moving: false) }
+                if i >= 200 && i % 100 == 0 {
+                    observations.append(pressure(t - 2, motion(t - 2).0))
+                    result += tracker.pressureFlights(observations)
+                }
+            }
+            return result
+        }
+        let long = secondGust(moving: true)
+        check(long.count == 1 && long[0].pressureAssisted && abs((long[0].approachPeak?.height ?? 0) - 2.45) < 0.15 &&
+              (7...10).contains(long[0].event.unloadingSeconds), "Keep the second gust and plateau in one flight through return")
+        check(secondGust(moving: false).isEmpty && secondGust(moving: true, gap: true).isEmpty,
+              "Pressure cannot bypass a missing approach or a discontinuity")
+
         let historicalSetup = SessionSetup(sport: .groundTest, placement: .hand)
         check(historicalSetup.forRecording.sport == .kite && historicalSetup.forRecording.placement == .chest &&
               historicalSetup.placement == .hand, "Migrate copied settings without changing the historical session")
