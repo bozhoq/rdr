@@ -304,6 +304,59 @@ enum DetectorTests {
         check(bodyEstimate.inertialLift == true && bodyEstimate.heightMeters == bodyPeak?.height &&
               bodyEstimate.apexSeconds == bodyPeak?.time && bodyEstimate.airtimeSeconds == 1 &&
               bodyEstimate.isHandLift != true, "One rider event uses the anchored height and actual flight interval")
+        // Two smooth legs with known end heights. The analytic velocity and
+        // acceleration both vanish at the floor approach, apex and final stop.
+        func approachTrace(_ height: Double, landing: Double, lateral: Bool) -> [MotionSample] {
+            (0..<700).map { index in
+                let t = Double(index) / 100
+                let u = t - floor(t)
+                let displacement = t >= 2 && t < 3 ? height : t >= 3 && t < 4 ? landing - height : 0
+                let up = displacement * (60*u - 180*u*u + 120*u*u*u)
+                let base = sample(t, 1 + up / 9.80665)
+                return MotionSample(elapsedSinceFirstSampleSeconds: t,
+                    accelerationG: Vector3(x: lateral && t < 1.8 ? 0.21 * cos(t * 3) : 0, y: 0, z: base.accelerationG.z),
+                    gravityG: base.gravityG, rotationRadiansPerSecond: base.rotationRadiansPerSecond,
+                    attitude: base.attitude, verticalAccelerationMetersPerSecondSquared: -up)
+            }
+        }
+        func approachFlights(_ trace: [MotionSample], gps: Bool = false) -> [RidingJumpDetector.Flight] {
+            var detector = ApproachJumpDetector()
+            return trace.compactMap { detector.process($0, calibration: nil, moving: gps) }
+        }
+        let diveTrace = approachTrace(2.5, landing: -0.8, lateral: true)
+        let diving = approachFlights(diveTrace)
+        check(diving.count == 1 && diving[0].crossedStartLevel &&
+              abs((diving[0].approachPeak?.height ?? 0) - 2.5) < 0.08 &&
+              (3.60...3.70).contains(diving[0].event.endSeconds),
+              "Finish at the descending zero crossing, even if the phone stays 80 cm below it")
+        check(approachFlights(Array(diveTrace.prefix(320))).isEmpty, "An apex alone cannot finish a jump")
+        check(approachFlights(approachTrace(2.5, landing: -0.8, lateral: false)).isEmpty,
+              "Vertical jumping in place cannot supply a horizontal approach")
+        check(approachFlights(approachTrace(0.38, landing: 0, lateral: true)).isEmpty &&
+              approachFlights(approachTrace(0, landing: 0, lateral: true)).isEmpty,
+              "Skip small lifts and horizontal movement alone")
+        check(approachFlights(approachTrace(1.2, landing: 0, lateral: false), gps: true).count == 1,
+              "A steady GPS approach works without lateral acceleration")
+        check(approachFlights(approachTrace(2, landing: 1.1, lateral: true)).isEmpty,
+              "Remaining well above launch cannot confirm a return")
+        let gappedApproach = diveTrace.filter { !(2.95...3.10).contains($0.elapsedSinceFirstSampleSeconds) }
+        check(approachFlights(gappedApproach).isEmpty, "Do not bridge missing motion around the apex")
+        var queue = RideJumpQueue()
+        for flight in diving + diving { queue.add(flight, gpsApproach: false) }
+        check(queue.resolve(through: 3.8, finishing: false, vertical: [], altitude: [], gps: [], motionClock: nil).isEmpty,
+              "Hold overlapping candidates until the final observation")
+        let mergedReturns = queue.resolve(through: 8, finishing: false, vertical: [], altitude: [], gps: [], motionClock: nil)
+        check(mergedReturns.count == 1 && mergedReturns[0].1.crossedStartLevel == true,
+              "One accepted result and one announcement per return")
+        for (height, accepted) in [(0.499, false), (0.5, true)] {
+            var floorQueue = RideJumpQueue()
+            var f = diving[0]
+            f.approachPeak = .init(height: height, time: 3)
+            floorQueue.add(f, gpsApproach: false)
+            check(floorQueue.resolve(through: 8, finishing: true, vertical: [], altitude: [], gps: [], motionClock: nil).isEmpty != accepted,
+                  "Apply the 0.50 m cutoff before rounding and saving")
+        }
+
         let historicalSetup = SessionSetup(sport: .groundTest, placement: .hand)
         check(historicalSetup.forRecording.sport == .kite && historicalSetup.forRecording.placement == .chest &&
               historicalSetup.placement == .hand, "Migrate copied settings without changing the historical session")

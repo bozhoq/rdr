@@ -27,6 +27,12 @@ CREATE TABLE IF NOT EXISTS posts(
     created_at REAL NOT NULL, caption TEXT NOT NULL, location TEXT, photo BLOB NOT NULL
 );
 CREATE INDEX IF NOT EXISTS posts_by_owner ON posts(owner, created_at DESC);
+CREATE TABLE IF NOT EXISTS post_comments(
+    id TEXT PRIMARY KEY, post TEXT NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+    author TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+    created_at REAL NOT NULL, body TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS comments_by_post ON post_comments(post, created_at DESC);
 CREATE TABLE IF NOT EXISTS records(
     owner TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
     session_id TEXT NOT NULL, spot_id TEXT, spot_name TEXT, started_at REAL NOT NULL,
@@ -171,8 +177,22 @@ def feed(db, owner, following):
         author = json.loads(document)
         entries.append({"post": {"id": post_id, "createdAt": created_at, "caption": caption, "published": True,
                                  "location": json.loads(location) if location else None},
-                        "author": author["name"], "username": author.get("username")})
+                        "author": author["name"], "username": author.get("username"),
+                        "avatar": author.get("avatar")})
     return entries
+
+
+def comments(db, post_id, owner):
+    query = """SELECT c.id,c.author,c.created_at,c.body,p.document
+        FROM post_comments c JOIN profiles p ON p.id=c.author
+        WHERE c.post=? ORDER BY c.created_at DESC,c.id LIMIT 100"""
+    output = []
+    for comment_id, author_id, created_at, body, document in db.execute(query, (post_id,)):
+        profile = json.loads(document)
+        output.append({"id": comment_id, "createdAt": created_at, "text": body,
+                       "author": profile["name"], "username": profile.get("username"),
+                       "mine": author_id == owner})
+    return output
 
 
 def top_rows(db, raw):
@@ -274,6 +294,7 @@ def application(env, start_response):
 
     path, method = env.get("PATH_INFO", ""), env.get("REQUEST_METHOD", "")
     photo_path = re.fullmatch(r"/posts/([a-fA-F0-9-]{36})/photo", path)
+    comment_path = re.fullmatch(r"/posts/([a-fA-F0-9-]{36})/comments(?:/([a-fA-F0-9-]{36}))?", path)
     if method == "GET" and photo_path:
         try:
             post_id = identifier(photo_path[1])
@@ -358,6 +379,38 @@ def application(env, start_response):
                 except (ValueError, RecursionError):
                     return send("400 Bad Request", {"error": "invalid filters"})
                 return send("200 OK", rows)
+            elif comment_path:
+                try:
+                    post_id = identifier(comment_path[1])
+                    comment_id = identifier(comment_path[2]) if comment_path[2] else None
+                    if (method, comment_id is not None) not in (("GET", False), ("PUT", True), ("DELETE", True)):
+                        return send("405 Method Not Allowed", {"error": "invalid comment method"})
+                    if method == "PUT":
+                        raw = read_json(env, 8192)
+                        if not isinstance(raw, dict) or not isinstance(raw.get("text"), str):
+                            raise ValueError("invalid comment")
+                        body = raw["text"].strip()
+                        if not 1 <= len(body) <= 2000:
+                            raise ValueError("invalid comment length")
+                except (ValueError, RecursionError):
+                    return send("400 Bad Request", {"error": "invalid comment"})
+                if method != "GET":
+                    db.execute("BEGIN IMMEDIATE")
+                if not db.execute("SELECT 1 FROM posts WHERE id=?", (post_id,)).fetchone():
+                    return send("404 Not Found", {"error": "unknown post"})
+                if method == "PUT":
+                    if not db.execute("SELECT 1 FROM profiles WHERE id=?", (owner,)).fetchone():
+                        return send("403 Forbidden", {"error": "publish a profile first"})
+                    changed = db.execute("""INSERT INTO post_comments VALUES (?,?,?,?,?)
+                        ON CONFLICT(id) DO UPDATE SET body=excluded.body
+                        WHERE post_comments.author=excluded.author AND post_comments.post=excluded.post""",
+                        (comment_id, post_id, owner, time.time(), body))
+                    if not changed.rowcount:
+                        return send("409 Conflict", {"error": "comment ID is taken"})
+                elif method == "DELETE":
+                    db.execute("DELETE FROM post_comments WHERE id=? AND post=? AND author=?",
+                               (comment_id, post_id, owner))
+                return send("200 OK", comments(db, post_id, owner))
             elif path.startswith("/posts/") and method in ("PUT", "DELETE"):
                 try:
                     post_id = identifier(path.removeprefix("/posts/"))

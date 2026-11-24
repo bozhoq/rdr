@@ -348,6 +348,16 @@ import FoundationXML
               nextDay?.spot.id == nearby.id && nextDay?.start == midnight.addingTimeInterval(31 * 3600) &&
               SpotForecast.nearestWindWindow(after: late, forecasts: [(spot, weakForecast)]) == nil,
               "Use remaining hours in an active window and look at the next local day")
+        let exactlyAnHour = midnight.addingTimeInterval(9 * 3600)
+        let enoughWind = SpotForecast.nearestWindWindow(after: exactlyAnHour, forecasts: favoriteForecasts)
+        let tooLate = SpotForecast.nearestWindWindow(after: exactlyAnHour.addingTimeInterval(1),
+                                                     forecasts: favoriteForecasts)
+        check(enoughWind?.spot.id == spot.id && enoughWind?.dayTitle(relativeTo: exactlyAnHour) == "Сегодня" &&
+              tooLate?.spot.id == nearby.id && tooLate?.start == midnight.addingTimeInterval(16 * 3600),
+              "Keep an hour-long favorite window and skip an active window with less than an hour left")
+        let tomorrowTitle = SpotForecast.nearestWindWindow(after: late, forecasts: [(nearby, tomorrowWind)])
+        check(tomorrowTitle?.dayTitle(relativeTo: late) == "Завтра",
+              "Show a relative day for a favorite forecast in the spot timezone")
         let missingForecast = try windowForecast { hour in hour == 17 ? 7 : nil }
         let partial = missingForecast.windowSummaries(relativeTo: late)
         check(partial.count == 1 && partial[.evening]?.hours == 1 && partial[.evening]?.windLevel == .light,
