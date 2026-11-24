@@ -21,8 +21,21 @@ struct SessionApp: App {
 private struct Tabs: View {
     @ObservedObject var recorder: SessionRecorder
     @State private var selectedTab = Tab.record
+    @AppStorage("rider.profilePhoto") private var profilePhoto = Data()
+    @State private var tabAvatar: UIImage?
     @State private var riderPath: [RiderDestination] = []
     @StateObject private var social = RiderSocialStore()
+
+    private static func avatarIcon(_ data: Data) -> UIImage? {
+        guard !data.isEmpty, let image = UIImage(data: data), image.size.width > 0, image.size.height > 0 else { return nil }
+        let side: CGFloat = 26
+        let scale = side / min(image.size.width, image.size.height)
+        let size = CGSize(width: image.size.width * scale, height: image.size.height * scale)
+        return UIGraphicsImageRenderer(size: CGSize(width: side, height: side)).image { _ in
+            UIBezierPath(ovalIn: CGRect(x: 0, y: 0, width: side, height: side)).addClip()
+            image.draw(in: CGRect(x: (side - size.width) / 2, y: (side - size.height) / 2, width: size.width, height: size.height))
+        }.withRenderingMode(.alwaysOriginal)
+    }
 
     private static let rideIcon: UIImage = {
         let size = CGSize(width: 31, height: 25)
@@ -86,9 +99,19 @@ private struct Tabs: View {
                         }
                     }
             }
-            .tabItem { Label("Райдер", systemImage: "person.crop.circle") }
+            .tabItem {
+                Label {
+                    Text("Райдер")
+                } icon: {
+                    if let tabAvatar { Image(uiImage: tabAvatar).renderingMode(.original) }
+                    else { Image(systemName: "person.crop.circle") }
+                }
+            }
             .tag(Tab.rider)
 
+        }
+        .onChange(of: profilePhoto, initial: true) { _, data in
+            tabAvatar = Self.avatarIcon(data)
         }
         .environmentObject(social)
         .tint(RiderTheme.accent)

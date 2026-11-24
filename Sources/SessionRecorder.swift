@@ -81,7 +81,8 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
     }
     func nearestSpot(to fix: CLLocation) -> RiderSpot? {
         spots.filter { $0.areaOnly != true }.map { spot in
-            (spot, fix.distance(from: CLLocation(latitude: spot.latitude, longitude: spot.longitude)))
+            (spot, min(fix.distance(from: CLLocation(latitude: spot.latitude, longitude: spot.longitude)),
+                       spot.accessPoints?.map { fix.distance(from: CLLocation(latitude: $0.latitude, longitude: $0.longitude)) }.min() ?? .infinity))
         }.filter { $0.1 <= 1500 }.min(by: { $0.1 < $1.1 })?.0
     }
     func locateSpot() {
@@ -124,6 +125,9 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
             try? JSONDecoder().decode([RiderSpot].self, from: $0)
         } ?? []
         spots = StarterSpots.merge(saved: saved, catalogue: StarterSpots.load())
+        let catalog = spots
+        favoriteSpots = Set(favoriteSpots.map { old in catalog.first(where: { $0.includes(old) })?.id ?? old })
+        if let place = catalog.first(where: { $0.accessPoints != nil && $0.matches(draftSetup) }) { draftSetup.selectSpot(place) }
         if let data = UserDefaults.standard.data(forKey: gearPresetsKey),
            let presets = try? JSONDecoder().decode([GearPreset].self, from: data) { gearPresets = presets }
         reloadHistory()
@@ -618,7 +622,7 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
                 -$0.correctedVertical(sample.verticalAccelerationMetersPerSecondSquared, at: elapsed)
             } ?? sample.upwardAcceleration
             verticalSamples.append(.init(time: elapsed, acceleration: vertical))
-            if verticalSamples.count >= 3200 { verticalSamples.removeFirst(800) }
+            if verticalSamples.count >= 4800 { verticalSamples.removeFirst(800) }
             let moving: Bool
             if let latest = recentFixes.last, let speed = latest.speed, let motionClock {
                 let age = motionClock.addingTimeInterval(elapsed).timeIntervalSince(latest.sample.timestamp)
@@ -692,7 +696,7 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
                     guard altitude.add(sample) else { return }
                     try log.append("altitude", sample)
                     self.recentAltitude.append(sample)
-                    self.recentAltitude.removeAll { sample.elapsedSinceFirstSampleSeconds - $0.elapsedSinceFirstSampleSeconds > 24 }
+                    self.recentAltitude.removeAll { sample.elapsedSinceFirstSampleSeconds - $0.elapsedSinceFirstSampleSeconds > 36 }
                     if self.recentAltitude.count > 128 { self.recentAltitude.removeFirst() }
                 } else { return }
                 session.altitude = altitude
@@ -730,7 +734,7 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
             session.locationCount += 1
             if let accepted = routeFilter.accept(sample, notBefore: session.startedAt) {
                 recentFixes.append(accepted)
-                recentFixes.removeAll { sample.timestamp.timeIntervalSince($0.sample.timestamp) > 24 }
+                recentFixes.removeAll { sample.timestamp.timeIntervalSince($0.sample.timestamp) > 36 }
                 if recentFixes.count > 128 { recentFixes.removeFirst() }
             }
             session.gpsMetrics = routeFilter.metrics
@@ -772,8 +776,11 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
 
     private func resolveJumps(_ session: inout SessionSummary, log: SessionLog, finishing: Bool = false) throws {
         let elapsed = ProcessInfo.processInfo.systemUptime - (motionTimeOrigin ?? ProcessInfo.processInfo.systemUptime)
+        for flight in approachDetector.pressureFlights(recentAltitude) {
+            pendingRides.add(flight, gpsApproach: approachDetector.approach(before: flight.event.startSeconds).gps)
+        }
         let confirmed = pendingRides.resolve(through: elapsed, finishing: finishing, vertical: verticalSamples,
-                                             altitude: recentAltitude, gps: recentFixes, motionClock: motionClock)
+                                             altitude: recentAltitude, gps: recentFixes, motionClock: motionClock, holdingFrom: approachDetector.holdingFrom)
         for (event, estimate) in confirmed {
             try log.append("jumpCandidate", event)
             session.jumpAnalysis?.candidates.append(event)
@@ -878,7 +885,13 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
 
     private func reloadHistory() {
         do {
-            history = try store.history()
+            history = try store.history().map { saved in
+                var session = saved
+                if let spot = spots.first(where: { $0.accessPoints != nil && $0.matches(saved.setup) }) {
+                    session.setup?.selectSpot(spot)
+                }
+                return session
+            }
         } catch {
             errorMessage = "Не удалось прочитать историю. \(error.localizedDescription)"
         }

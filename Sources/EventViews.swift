@@ -167,8 +167,8 @@ struct EventDetailView: View {
                         if let estimate = session.liveEstimate(for: candidate) {
                             LabeledContent(estimate.isHandLift == true ? "Подъём телефона" : estimate.isPhoneToss == true ? "Высота подброса" : "Высота",
                                            value: estimate.heightMeters.map { "≈ \(metric($0, unit: "м"))" } ?? "—")
-                            LabeledContent(session.handSimulationTest == true || estimate.isHandLift == true || estimate.approachExcursion == true ? "Время выше исходного уровня" : estimate.isPhoneToss == true ? "Полёт телефона" : "Зависание",
-                                           value: "≈ \(metric(estimate.airtimeSeconds, unit: "с"))")
+                            LabeledContent(session.handSimulationTest == true || estimate.isHandLift == true || (estimate.approachExcursion == true && estimate.estimatedFlightStart == nil) ? "Время выше исходного уровня" : estimate.isPhoneToss == true ? "Полёт телефона" : "Зависание",
+                                           value: "≈ \(metric(estimate.estimatedFlightStart == nil ? estimate.airtimeSeconds : estimate.reportedAirtime, unit: "с"))")
                             LabeledContent("Дистанция", value: metric(estimate.distanceMeters, unit: "м"))
                             Text(estimateExplanation(estimate)).font(.footnote).foregroundStyle(.secondary)
                             if estimate.isHandLift != true, estimate.approachExcursion != true, estimate.heightMeters != nil, session.jumpAnalysis?.detectorVersion.hasPrefix("ride-") == true {
@@ -200,6 +200,9 @@ struct EventDetailView: View {
     }
 
     private func estimateExplanation(_ estimate: LiveJumpEstimate) -> String {
+        if estimate.pressureAssisted == true {
+            return "Долгое зависание. Барометр подтвердил подъём и снижение, датчики движения уточнили высоту и время возврата."
+        }
         if estimate.approachExcursion == true {
             return estimate.crossedStartLevel == true
                 ? "Подъём телефона от уровня подхода до вершины. Конец — первое пересечение уровня старта на снижении."
@@ -231,6 +234,13 @@ struct EventDetailView: View {
                 LabeledContent("Подъём телефона до отрыва", value: metric(push, unit: "м", digits: 2))
                 LabeledContent("От отрыва до вершины", value: metric(flight, unit: "м", digits: 2))
                 LabeledContent("Весь подъём телефона", value: metric(push + flight, unit: "м", digits: 2))
+            }
+            if let estimate = session.liveEstimate(for: candidate), let start = estimate.estimatedFlightStart, let end = estimate.estimatedFlightEnd {
+                LabeledContent("Начало подъёма", value: eventTimeText(start))
+                LabeledContent("Возврат", value: eventTimeText(end))
+                if estimate.distanceMeters != nil {
+                    LabeledContent("Дистанция", value: estimate.distanceFromSpeed == true ? "По скорости GPS" : "По координатам GPS")
+                }
             }
             if let apex = session.liveEstimate(for: candidate)?.apexSeconds {
                 LabeledContent("Вершина", value: eventTimeText(apex))

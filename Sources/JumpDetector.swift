@@ -165,7 +165,7 @@ struct JumpDetector {
 /// Detects a push, ascent, descent and braking as separate phases. A kite jump
 /// can stay loaded in the air, so it never needs a free-fall interval.
 struct RidingJumpDetector {
-    static let version = "ride-10"
+    static let version = "ride-11"
 
     struct Point {
         let time: Double
@@ -180,6 +180,8 @@ struct RidingJumpDetector {
         var levelLandingHeight: Double? = nil
         var approachPeak: VerticalTrajectory.Peak? = nil
         var crossedStartLevel = false
+        var flightWindow: ClosedRange<Double>?
+        var pressureAssisted = false
     }
 
     private struct Motion {
@@ -509,6 +511,9 @@ struct ApproachJumpDetector {
     private var active: Anchor?
     private var lastCheck = -Double.infinity
     private var lastEnd = -Double.infinity
+    private var lastPressureCheck = -Double.infinity
+    private var lastPressureLanding = -Double.infinity
+    private(set) var holdingFrom: Double?
 
     func approach(before time: Double) -> (allowed: Bool, gps: Bool) {
         guard let right = points.last(where: { $0.time <= time - 0.10 }) else { return (false, false) }
@@ -539,7 +544,7 @@ struct ApproachJumpDetector {
         points.append(Point(time: t, acceleration: up, velocity: velocity, position: position,
                             lateralSeconds: lateral, lastGPSTime: moving ? t : p?.lastGPSTime ?? -.infinity,
                             load: load, spin: spin))
-        if let first = points.first, t - first.time > 23 { points.removeAll { t - $0.time > 20 } }
+        if let first = points.first, t - first.time > 36 { points.removeAll { t - $0.time > 32 } }
         guard t - lastCheck >= 0.045 else { return nil }
         lastCheck = t
         let lo = points.lastIndex(where: { $0.time < t - 0.34 }).map { $0 + 1 } ?? 0
@@ -568,13 +573,17 @@ struct ApproachJumpDetector {
         func rawHeight(_ x: Point) -> Double {
             x.position - origin.point.position - origin.speed * (x.time - start)
         }
-        func complete(_ apex: Point, height: Double, end: Double, crossed: Bool) -> RidingJumpDetector.Flight {
+        func complete(_ apex: Point, height: Double, end: Double, crossed: Bool, level: (Point) -> Double) -> RidingJumpDetector.Flight {
             let flight = track.prefix { $0.time <= end }
             let event = JumpCandidate(startSeconds: start, endSeconds: end, minimumLoadG: flight.map(\.load).min() ?? 1,
                                       returnPeakG: track.filter { $0.time >= apex.time }.map(\.load).max() ?? 1,
                                       maximumRotationRadiansPerSecond: flight.map(\.spin).max() ?? 0)
+            let band = max(0.03, min(0.08, height * 0.035))
+            let launch = flight.last { $0.time < apex.time && level($0) <= band }?.time ?? start
+            let landing = crossed ? end : flight.last { $0.time >= apex.time && level($0) > band }?.time ?? end
             return .init(event: event, trajectory: [], settledHeight: 0, residualVelocity: 0,
-                         approachPeak: .init(height: height, time: apex.time), crossedStartLevel: crossed)
+                         approachPeak: .init(height: height, time: apex.time), crossedStartLevel: crossed,
+                         flightWindow: launch...max(launch, landing))
         }
 
         // Remember the first descending crossing. The samples following it confirm
@@ -588,7 +597,7 @@ struct ApproachJumpDetector {
                rawHeight(apex) >= Self.minimumHeight, crossing - apex.time >= 0.15,
                airborne.contains(where: { $0.time >= apex.time && $0.velocity < origin.speed - 0.58 }),
                !airborne.contains(where: { $0.time < apex.time && rawHeight($0) < -0.25 }) {
-                let result = complete(apex, height: rawHeight(apex), end: crossing, crossed: true)
+                let result = complete(apex, height: rawHeight(apex), end: crossing, crossed: true, level: rawHeight)
                 lastEnd = crossing
                 active = nil
                 baseline = nil
@@ -625,11 +634,100 @@ struct ApproachJumpDetector {
               apex.time - start >= 0.15, center.time - apex.time >= 0.15,
               path.contains(where: { $0.time <= apex.time && $0.velocity - origin.speed >= 0.78 }),
               path.contains(where: { $0.time >= apex.time && $0.velocity - anchor.speed <= -0.58 }) else { return nil }
-        let result = complete(apex, height: peak, end: center.time, crossed: false)
+        let result = complete(apex, height: peak, end: center.time, crossed: false, level: corrected)
         lastEnd = center.time
         active = nil
         baseline = anchor
         return result
+    }
+}
+
+// Pressure supplies the broad ascent/return window for a supported or two-stage jump.
+// Motion resolves the endpoints and height. The pressure peak alone is never a jump.
+extension ApproachJumpDetector {
+    mutating func pressureFlights(_ altitude: [AltitudeSample]) -> [RidingJumpDetector.Flight] {
+        guard let latest = points.last?.time else { return [] }
+        var found: [RidingJumpDetector.Flight] = []
+        for sample in altitude where sample.elapsedSinceFirstSampleSeconds > lastPressureCheck &&
+            sample.elapsedSinceFirstSampleSeconds <= latest - 1.0 {
+            let time = sample.elapsedSinceFirstSampleSeconds
+            let interval = altitude.filter { (time - 27...time).contains($0.elapsedSinceFirstSampleSeconds) }
+            lastPressureCheck = time
+            holdingFrom = nil
+            guard interval.count >= 3 else { continue }
+            for i in 1..<(interval.count - 1) {
+                let origin = interval[i]
+                let start = origin.elapsedSinceFirstSampleSeconds
+                let base = origin.relativeAltitudeMeters
+                guard start >= lastPressureLanding, start >= (points.first?.time ?? latest) + 1.1,
+                      abs(base - interval[i-1].relativeAltitudeMeters) <= 0.45,
+                      interval[i+1].relativeAltitudeMeters - base >= 0.22 else { continue }
+                let span = interval[i...]
+                guard zip(span, span.dropFirst()).allSatisfy({ pair in
+                    let dt = pair.1.elapsedSinceFirstSampleSeconds - pair.0.elapsedSinceFirstSampleSeconds
+                    return dt > 0 && dt <= 2.2
+                }), let peak = span.max(by: { $0.relativeAltitudeMeters < $1.relativeAltitudeMeters }) else { continue }
+                let rise = peak.relativeAltitudeMeters - base
+                guard rise >= 0.70, span.dropFirst(2).dropLast(2).allSatisfy({
+                    $0.relativeAltitudeMeters - base >= max(0.22, 0.20 * rise)
+                }) else { continue }
+                if sample.relativeAltitudeMeters - base > max(0.28, 0.32 * rise) {
+                    if approach(before: start + 0.6).allowed { holdingFrom = min(holdingFrom ?? start, start - 1) }
+                    continue
+                }
+                guard time - start >= 4, peak.elapsedSinceFirstSampleSeconds < time,
+                      interval[interval.count - 2].relativeAltitudeMeters >= base - 0.8,
+                      let flight = reconstruct(start: start, returnTime: time, pressurePeak: peak, rise: rise) else { continue }
+                found.append(flight)
+                lastPressureLanding = flight.event.endSeconds
+                holdingFrom = nil
+                break
+            }
+        }
+        if latest - lastPressureCheck > 5 { holdingFrom = nil }
+        return found
+    }
+
+    private func reconstruct(start: Double, returnTime: Double, pressurePeak: AltitudeSample, rise: Double) -> RidingJumpDetector.Flight? {
+        let begin = start - 0.60, finish = returnTime + 0.45
+        func at(_ t: Double) -> Point? { points.first { $0.time >= t } }
+        guard let origin = at(begin), let before = at(begin - 0.45),
+              let end = at(finish), let after = at(finish + 0.45),
+              origin.time > before.time, after.time > end.time else { return nil }
+        let duration = end.time - origin.time
+        let initialSpeed = (origin.position - before.position) / (origin.time - before.time)
+        let finalSpeed = (after.position - end.position) / (after.time - end.time)
+        let bias = (finalSpeed - initialSpeed) / duration
+        guard duration > 0, duration <= 28, abs(bias) <= 0.22 else { return nil }
+        func height(_ p: Point) -> Double {
+            let t = p.time - origin.time
+            return p.position - origin.position - initialSpeed * t - 0.5 * bias * t * t
+        }
+        func speed(_ p: Point) -> Double { p.velocity - initialSpeed - bias * (p.time - origin.time) }
+        let path = points.filter { (origin.time...end.time).contains($0.time) }
+        guard let apex = path.max(by: { height($0) < height($1) }) else { return nil }
+        let h = height(apex)
+        guard (Self.minimumHeight...35).contains(h), (0.28...2.0).contains(h / rise),
+              abs(apex.time - pressurePeak.elapsedSinceFirstSampleSeconds) <= max(3.2, 0.37 * duration) else { return nil }
+        let ascending = path.prefix { $0.time < apex.time }
+        let descending = path.dropFirst(ascending.count + 1)
+        let band = min(0.10, max(0.04, h * 0.04))
+        guard !ascending.contains(where: { height($0) < -0.35 }),
+              let launch = ascending.first(where: { height($0) > band }), abs(launch.time - start) <= 2.3,
+              approach(before: launch.time).allowed,
+              ascending.contains(where: { $0.time >= launch.time && speed($0) > 0.38 }),
+              descending.contains(where: { speed($0) < -0.40 }) else { return nil }
+        let crossed = descending.first { height($0) <= 0 }
+        let tolerance = max(0.16, min(0.36, h * 0.12))
+        guard crossed != nil || abs(height(end)) <= tolerance,
+              let land = crossed ?? descending.first(where: { height($0) <= tolerance }),
+              (3.4...25).contains(land.time - launch.time) else { return nil }
+        let flight = path.filter { (launch.time...land.time).contains($0.time) }
+        let event = JumpCandidate(startSeconds: launch.time, endSeconds: land.time, minimumLoadG: flight.map(\.load).min() ?? 1,
+                                  returnPeakG: descending.map(\.load).max() ?? 1, maximumRotationRadiansPerSecond: flight.map(\.spin).max() ?? 0)
+        return .init(event: event, trajectory: [], settledHeight: height(end), residualVelocity: finalSpeed - initialSpeed,
+                     approachPeak: .init(height: h, time: apex.time), crossedStartLevel: crossed != nil,
+                     flightWindow: launch.time...land.time, pressureAssisted: true)
     }
 }
 

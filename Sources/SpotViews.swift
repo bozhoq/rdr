@@ -186,8 +186,13 @@ private struct SpotGroups<Row: View>: View {
             DisclosureGroup(region) {
                 let areas = Dictionary(grouping: regions[region] ?? [], by: { $0.locality ?? "Другие споты" })
                 ForEach(areas.keys.sorted(), id: \.self) { area in
-                    DisclosureGroup(area) {
-                        ForEach(areas[area] ?? []) { spot in row(spot) }
+                    let places = areas[area] ?? []
+                    if places.count == 1, let only = places.first, only.name.caseInsensitiveCompare(area) == .orderedSame {
+                        row(only)
+                    } else {
+                        DisclosureGroup(area) {
+                            ForEach(places) { spot in row(spot) }
+                        }
                     }
                 }
             }
@@ -208,7 +213,7 @@ struct SpotChoice: View {
                 SpotGroups(spots: spots) { spot in
                     Button(spot.name) { setup.selectSpot(spot); dismiss() }
                 }
-                let recentNames = recent.filter { candidate in !spots.contains { $0.name.caseInsensitiveCompare(candidate) == .orderedSame } }
+                let recentNames = recent.filter { candidate in !spots.contains { $0.matchesName(candidate) } }
                 if !recentNames.isEmpty {
                     Section("Недавние") {
                         ForEach(recentNames, id: \.self) { name in Button(name) { saveName(name) } }
@@ -228,7 +233,7 @@ struct SpotChoice: View {
 
     private func saveName(_ name: String) {
         let cleaned = String(name.trimmingCharacters(in: .whitespacesAndNewlines).prefix(100))
-        if let saved = spots.first(where: { $0.name.caseInsensitiveCompare(cleaned) == .orderedSame }) {
+        if let saved = spots.first(where: { $0.matchesName(cleaned) }) {
             setup.selectSpot(saved)
         } else { setup.setSpotName(cleaned) }
         dismiss()
@@ -265,6 +270,7 @@ struct SpotEditor: View {
         if let original, candidate.latitude == original.latitude, candidate.longitude == original.longitude {
             candidate.mapLink = original.mapLink
         }
+        candidate.accessPoints = original?.accessPoints
         candidate.region = original?.region
         candidate.locality = original?.locality
         candidate.areaOnly = original?.areaOnly
@@ -345,7 +351,19 @@ private struct SpotDetailView: View {
                 titleCard
                 SpotRecords(recorder: recorder, sessions: sessions)
                 SpotWeather(spot: spot, editShore: { editing = true })
-                SpotGallery(spotID: spot.id)
+                SpotGallery(spotID: spot.id, relatedIDs: (spot.accessPoints ?? []).map(\.id).filter { $0 != spot.id })
+                if let points = spot.accessPoints {
+                    DisclosureGroup("Точки на споте") {
+                        ForEach(points) { point in
+                            VStack(alignment: .leading, spacing: 4) {
+                                if let route = RiderSpot(name: point.name, latitude: String(point.latitude), longitude: String(point.longitude))?.routeWebURL {
+                                    Link(point.name, destination: route)
+                                }
+                                if let notes = point.notes, !notes.isEmpty { Text(notes).font(.footnote) }
+                            }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 4)
+                        }
+                    }.lagoonCard()
+                }
                 if let notes = spot.notes, !notes.isEmpty {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("О споте").font(.headline)
@@ -867,8 +885,14 @@ private struct SpotWeather: View {
                             ForEach(Array(hours.prefix(24))) { hour in
                                 VStack(spacing: 6) {
                                     Text(clock.string(from: hour.time)).font(.caption.weight(.medium))
-                                    Text(metric(hour.speed * SessionWind.metersPerSecondPerKnot, unit: "м/с")).font(.headline).foregroundStyle(RiderTheme.accent)
-                                    Text("Порывы \(metric(hour.gust.map { $0 * SessionWind.metersPerSecondPerKnot }, unit: "м/с"))").font(.caption2)
+                                    let wind = hour.speed * SessionWind.metersPerSecondPerKnot
+                                    ForecastWindPill(text: "Ветер " + metric(wind, unit: "м/с"), level: .average(wind))
+                                    if let knots = hour.gust {
+                                        let gust = knots * SessionWind.metersPerSecondPerKnot
+                                        ForecastWindPill(text: "Порывы " + metric(gust, unit: "м/с"), level: .gust(gust))
+                                    } else {
+                                        Text("Порывы —").font(.caption).foregroundStyle(.secondary)
+                                    }
                                     Label(hour.condition.name, systemImage: hour.condition.icon).font(.caption2)
                                     Text(SpotForecast.compass(hour.direction) + " " + SpotForecast.windArrow(hour.direction) + " · " + metric(hour.temperature, unit: "°C", digits: 0))
                                         .font(.caption2).foregroundStyle(.secondary)
@@ -920,6 +944,7 @@ private struct SpotWeather: View {
 
 private struct SpotGallery: View {
     let spotID: UUID
+    let relatedIDs: [UUID]
     @State private var chosen: [PhotosPickerItem] = []
     @State private var items: [URL] = []
     @State private var photoError = false
@@ -990,7 +1015,8 @@ private struct SpotGallery: View {
     }
 
     private func reload() {
-        items = ((try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? [])
+        let folders = [directory] + relatedIDs.map { directory.deletingLastPathComponent().appendingPathComponent($0.uuidString, isDirectory: true) }
+        items = folders.flatMap { (try? FileManager.default.contentsOfDirectory(at: $0, includingPropertiesForKeys: nil)) ?? [] }
             .filter { $0.pathExtension == "jpg" }.sorted { $0.lastPathComponent > $1.lastPathComponent }
     }
 

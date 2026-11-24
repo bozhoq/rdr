@@ -356,8 +356,16 @@ struct BoardSelection: Codable, Hashable {
 }
 
 struct RiderSpot: Codable, Identifiable, Hashable {
+    struct AccessPoint: Codable, Identifiable, Hashable {
+        let id: UUID
+        var name: String
+        var latitude: Double
+        var longitude: Double
+        var notes: String?
+    }
+    var accessPoints: [AccessPoint]?
     let id: UUID
-    let name: String
+    var name: String
     let latitude: Double
     let longitude: Double
     let notes: String?
@@ -388,8 +396,17 @@ struct RiderSpot: Codable, Identifiable, Hashable {
 
     func matches(_ setup: SessionSetup?) -> Bool {
         guard let setup else { return false }
-        if let id = setup.spotID { return self.id == id }
-        return name.caseInsensitiveCompare(setup.spot.trimmingCharacters(in: .whitespacesAndNewlines)) == .orderedSame
+        if let id = setup.spotID { return includes(id) }
+        return matchesName(setup.spot)
+    }
+
+    func includes(_ other: UUID) -> Bool {
+        id == other || accessPoints?.contains { $0.id == other } == true
+    }
+
+    func matchesName(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return ([name] + (accessPoints ?? []).map(\.name)).contains { $0.caseInsensitiveCompare(trimmed) == .orderedSame }
     }
 
     var yandexURL: URL? {
@@ -446,6 +463,7 @@ enum StarterSpots {
     static let infoKey = "RiderStarterSpots"
 
     private struct Entry: Decodable {
+        let accessPoints: [RiderSpot.AccessPoint]?
         let id: UUID
         let name: String
         let latitude: Double
@@ -469,6 +487,7 @@ enum StarterSpots {
         return entries.compactMap { entry in
             var spot = RiderSpot(id: entry.id, name: entry.name, latitude: String(entry.latitude), longitude: String(entry.longitude),
                       notes: entry.notes ?? "", mapLink: entry.mapLink.flatMap { URL(string: $0) })
+            spot?.accessPoints = entry.accessPoints
             spot?.region = entry.region
             spot?.locality = entry.locality
             spot?.areaOnly = entry.areaOnly
@@ -479,7 +498,9 @@ enum StarterSpots {
 
     static func merge(saved: [RiderSpot], catalogue: [RiderSpot]) -> [RiderSpot] {
         let byID = Dictionary(catalogue.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        var result = saved.map { old in
+        let groups = catalogue.filter { $0.accessPoints != nil }
+        let retained = saved.filter { old in !groups.contains { $0.id != old.id && $0.includes(old.id) } }
+        var result = retained.map { old in
             var spot = old
             if let entry = byID[old.id] {
                 spot.region = entry.region
@@ -490,10 +511,25 @@ enum StarterSpots {
             return spot
         }
         for entry in catalogue where !result.contains(where: { spot in
-            spot.id == entry.id || spot.name.caseInsensitiveCompare(entry.name) == .orderedSame ||
+            if entry.accessPoints != nil { return spot.id == entry.id }
+            return spot.id == entry.id || spot.name.caseInsensitiveCompare(entry.name) == .orderedSame ||
                 (abs(spot.latitude - entry.latitude) < 0.0001 && abs(spot.longitude - entry.longitude) < 0.0001)
         }) {
             result.append(entry)
+        }
+        for entry in groups {
+            guard let i = result.firstIndex(where: { $0.id == entry.id }) else { continue }
+            if result[i].accessPoints == nil { result[i].name = entry.name }
+            let prior = result[i].accessPoints ?? []
+            result[i].accessPoints = entry.accessPoints?.map { point in
+                var p = prior.first(where: { $0.id == point.id }) ?? point
+                if let savedPoint = saved.first(where: { $0.id == point.id && $0.accessPoints == nil }) {
+                    p.latitude = savedPoint.latitude
+                    p.longitude = savedPoint.longitude
+                    p.notes = savedPoint.notes
+                }
+                return p
+            }
         }
         return result.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
     }
@@ -940,8 +976,15 @@ struct LiveJumpEstimate: Codable {
     var assumesLevelLanding: Bool?
     var apexSeconds: Double?
     var pushRiseMeters: Double?
+    var estimatedFlightStart: Double?
+    var estimatedFlightEnd: Double?
+    var distanceFromSpeed: Bool?
+    var pressureAssisted: Bool?
     var measuredFlightSeconds: Double?
-    var reportedAirtime: Double? { approachExcursion == true ? measuredFlightSeconds : airtimeSeconds }
+    var reportedAirtime: Double? {
+        if let start = estimatedFlightStart, let end = estimatedFlightEnd, end > start { return end - start }
+        return approachExcursion == true ? measuredFlightSeconds : airtimeSeconds
+    }
     var approachExcursion: Bool?
     var crossedStartLevel: Bool?
     var floorPeakMeters: Double?
@@ -968,10 +1011,11 @@ struct LiveJumpEstimate: Codable {
             let baseline = before.map(\.relativeAltitudeMeters).reduce(0, +) / Double(max(1, before.count))
             let corroborated = before.count == 2 && before.allSatisfy { abs($0.relativeAltitudeMeters - baseline) <= 0.3 } &&
                 nearApex.contains { abs($0.relativeAltitudeMeters - baseline - peak.height) <= max(0.5, 0.25 * peak.height) }
-            let measured: Double? = end - start <= 4.5 || corroborated ? peak.height : nil
+            let measured: Double? = flight.pressureAssisted || end - start <= 4.5 || corroborated ? peak.height : nil
             return Self(heightMeters: measured, airtimeSeconds: end - start,
                         distanceMeters: nil,
-                        inertialLift: true, apexSeconds: peak.time, approachExcursion: true,
+                        inertialLift: true, apexSeconds: peak.time, estimatedFlightStart: flight.flightWindow?.lowerBound,
+                        estimatedFlightEnd: flight.flightWindow?.upperBound, pressureAssisted: flight.pressureAssisted, approachExcursion: true,
                         crossedStartLevel: flight.crossedStartLevel)
         }
         let corroborated = ridingHeight(flight, altitude: altitude)
@@ -1072,6 +1116,29 @@ struct LiveJumpEstimate: Codable {
                     distanceMeters: gpsDistance(start: start, end: end, gps: gps, motionClock: motionClock))
     }
 
+    /// Integrate horizontal speed between the actual takeoff and return times.
+    /// Speeds on both sides must bracket the interval in one continuous GPS segment.
+    static func speedDistance(start: Double, end: Double, gps: [RoutePoint], motionClock: Date?) -> Double? {
+        guard let motionClock, start.isFinite, end.isFinite, end > start else { return nil }
+        let from = motionClock.addingTimeInterval(start), to = motionClock.addingTimeInterval(end)
+        guard let first = gps.lastIndex(where: { $0.sample.timestamp <= from }),
+              let last = gps.firstIndex(where: { $0.sample.timestamp >= to }), first < last else { return nil }
+        let fixes = gps[first...last]
+        var meters = 0.0, uncertainty = 0.0
+        for (a, b) in zip(fixes, fixes.dropFirst()) {
+            let t0 = a.sample.timestamp.timeIntervalSince(from), t1 = b.sample.timestamp.timeIntervalSince(from)
+            let dt = t1 - t0, lo = max(0, t0), hi = min(end - start, t1)
+            guard dt > 0, dt <= 2.2, hi > lo, a.segment == b.segment, a.speedSegment == b.speedSegment,
+                  let v0 = a.speed, let v1 = b.speed, (0...60).contains(v0), (0...60).contains(v1),
+                  let e0 = a.sample.speedAccuracyMetersPerSecond, let e1 = b.sample.speedAccuracyMetersPerSecond,
+                  (0...1.25).contains(e0), (0...1.25).contains(e1) else { return nil }
+            let mean = v0 + (v1 - v0) * ((lo + hi) / 2 - t0) / dt
+            meters += mean * (hi - lo)
+            uncertainty += max(0.15, max(e0, e1)) * (hi - lo)
+        }
+        return meters >= 1 && uncertainty <= meters * 0.35 ? meters : nil
+    }
+
     static func gpsDistance(start: Double, end: Double, gps: [RoutePoint], motionClock: Date?) -> Double? {
         if let motionClock {
             let fixes = gps.filter { $0.sample.horizontalAccuracyMeters <= 5 }
@@ -1121,14 +1188,14 @@ struct RideJumpQueue {
     }
 
     mutating func resolve(through time: Double, finishing: Bool, vertical: [VerticalTrajectory.Sample],
-                          altitude: [AltitudeSample], gps: [RoutePoint], motionClock: Date?)
+                          altitude: [AltitudeSample], gps: [RoutePoint], motionClock: Date?, holdingFrom: Double? = nil)
         -> [(JumpCandidate, LiveJumpEstimate)] {
         var results: [(JumpCandidate, LiveJumpEstimate)] = []
         while let first = flights.first {
             let end = first.flight.event.endSeconds
             let group = flights.prefix { $0.flight.event.startSeconds < end }
             let last = group.map { $0.flight.event.endSeconds }.max() ?? end
-            guard finishing || time >= last + 3 else { break }
+            guard finishing || (time >= last + 3 && !(holdingFrom.map { last >= $0 } ?? false)) else { break }
             var best: (event: JumpCandidate, estimate: LiveJumpEstimate, priority: Int)?
             for item in group {
                 let flight = item.flight
@@ -1136,16 +1203,18 @@ struct RideJumpQueue {
                     flight.event, samples: vertical, levelLandingCheck: flight.levelLandingHeight) : nil
                 let estimate = LiveJumpEstimate.riding(flight, altitude: altitude, gps: gps, motionClock: motionClock, motionPeak: peak)
                 guard let height = estimate.heightMeters, height.isFinite, height >= ApproachJumpDetector.minimumHeight else { continue }
-                let priority = flight.crossedStartLevel ? 3 : flight.approachPeak != nil ? 1 : (item.gpsApproach ? 2 : 0)
+                let priority = flight.pressureAssisted ? 4 : flight.crossedStartLevel ? 3 : flight.approachPeak != nil ? 1 : (item.gpsApproach ? 2 : 0)
                 if best == nil || priority > best!.priority { best = (flight.event, estimate, priority) }
             }
-            if var chosen = best, chosen.estimate.approachExcursion == true, let apex = chosen.estimate.apexSeconds,
-               let physical = group.first(where: {
-                   $0.flight.approachPeak == nil && ($0.flight.event.startSeconds...$0.flight.event.endSeconds).contains(apex)
-               })?.flight.event {
-                chosen.estimate.measuredFlightSeconds = physical.unloadingSeconds
-                chosen.estimate.distanceMeters = LiveJumpEstimate.gpsDistance(start: physical.startSeconds, end: physical.endSeconds,
-                                                                              gps: gps, motionClock: motionClock)
+            if var chosen = best {
+                let start = chosen.estimate.estimatedFlightStart ?? chosen.event.startSeconds
+                let end = chosen.estimate.estimatedFlightEnd ?? chosen.event.endSeconds
+                if let path = LiveJumpEstimate.speedDistance(start: start, end: end, gps: gps, motionClock: motionClock) {
+                    chosen.estimate.distanceMeters = path
+                    chosen.estimate.distanceFromSpeed = true
+                } else {
+                    chosen.estimate.distanceMeters = LiveJumpEstimate.gpsDistance(start: start, end: end, gps: gps, motionClock: motionClock)
+                }
                 best = chosen
             }
             flights.removeFirst(group.count)

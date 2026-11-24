@@ -502,7 +502,10 @@ private struct RiderPostLocationChoice: View {
                     dismiss()
                 }
             }
-            ForEach(spots.filter { search.isEmpty || $0.name.localizedCaseInsensitiveContains(search) }) { spot in
+            ForEach(spots.filter { spot in
+                search.isEmpty || spot.name.localizedCaseInsensitiveContains(search) ||
+                    spot.accessPoints?.contains(where: { $0.name.localizedCaseInsensitiveContains(search) }) == true
+            }) { spot in
                 Button(spot.name) {
                     selection = RiderPostLocation(name: spot.name, latitude: spot.latitude, longitude: spot.longitude)
                     dismiss()
@@ -843,7 +846,7 @@ private struct RiderTopSpotPicker: View {
         let terms = query.split(whereSeparator: \.isWhitespace)
         return spots.filter { spot in
             let labels: [String?] = [spot.name, spot.locality, spot.region]
-            let combined = labels.compactMap { $0 }.joined(separator: " ")
+            let combined = (labels.compactMap { $0 } + (spot.accessPoints ?? []).map(\.name)).joined(separator: " ")
                 .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: locale)
             return terms.allSatisfy { combined.contains($0) }
         }.sorted {
