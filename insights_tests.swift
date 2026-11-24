@@ -173,8 +173,8 @@ import FoundationXML
         let midnight = ISO8601DateFormatter().date(from: "2025-04-03T00:00:00+03:00")!
         let timestamps = (0..<48).map { midnight.timeIntervalSince1970 + Double($0 * 3600) }
         let knots = (0..<48).map { (7...20).contains($0) ? Double($0) : 90.0 }
-        let raw: [String: Any] = ["timezone": "Europe/Moscow", "hourly": ["time": timestamps, "wind_speed_10m": knots]]
-        let ranked = try JSONDecoder().decode(SpotForecast.self, from: JSONSerialization.data(withJSONObject: raw))
+        let forecastPayload: [String: Any] = ["timezone": "Europe/Moscow", "hourly": ["time": timestamps, "wind_speed_10m": knots]]
+        let ranked = try JSONDecoder().decode(SpotForecast.self, from: JSONSerialization.data(withJSONObject: forecastPayload))
         let late = midnight.addingTimeInterval(23 * 3600)
         let day = ranked.daySummary(today: late)
         check(day?.hours == 14 && abs((day?.meanWind ?? 0) - 13.5 * SessionWind.metersPerSecondPerKnot) < 0.00001 &&
