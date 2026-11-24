@@ -270,40 +270,7 @@ struct RiderProfileView: View {
             guard RiderCommunity.endpoint != nil else { return }
             if let state = try? await RiderCommunity.request("riders"), !Task.isCancelled { mine = state.mine }
         }
-        .sheet(isPresented: $editing) {
-            NavigationStack {
-                Form {
-                    TextField("Имя", text: $name)
-                        .onChange(of: name) { _, value in if value.count > 50 { name = String(value.prefix(50)) } }
-                    Section {
-                        TextField("@юзернейм", text: $draftUsername)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                    } footer: {
-                        Text("3–24 строчные латинские буквы, цифры или _.")
-                    }
-                    TextField("О себе", text: $bio, axis: .vertical)
-                        .lineLimit(3...5)
-                        .onChange(of: bio) { _, value in if value.count > 160 { bio = String(value.prefix(160)) } }
-                    if RiderCommunity.endpoint != nil {
-                        NavigationLink("Публичный профиль") {
-                            RiderCommunityView(totals: totals, records: RiderJumpScore.records(in: recorder.history),
-                                               didLoad: { mine = $0.mine })
-                        }
-                    }
-                }
-                .navigationTitle("Профиль")
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .confirmationAction) {
-                        Button("Готово") {
-                            username = cleanedUsername
-                            editing = false
-                        }.disabled(!usernameValid)
-                    }
-                }
-            }
-        }
+        .sheet(isPresented: $editing) { profileEditor(totals) }
         .task(id: picked) {
             guard let picked else { return }
             guard let data = try? await picked.loadTransferable(type: Data.self),
@@ -314,6 +281,41 @@ struct RiderProfileView: View {
                   ] as CFDictionary), let jpg = UIImage(cgImage: thumb).jpegData(compressionQuality: 0.65),
                   jpg.count <= 96_000, !Task.isCancelled else { return }
             photo = jpg
+        }
+    }
+
+    private func profileEditor(_ totals: RiderTotals) -> some View {
+        NavigationStack {
+            Form {
+                TextField("Имя", text: $name)
+                    .onChange(of: name) { _, value in if value.count > 50 { name = String(value.prefix(50)) } }
+                Section {
+                    TextField("@юзернейм", text: $draftUsername)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                } footer: {
+                    Text("3–24 строчные латинские буквы, цифры или _.")
+                }
+                TextField("О себе", text: $bio, axis: .vertical)
+                    .lineLimit(3...5)
+                    .onChange(of: bio) { _, value in if value.count > 160 { bio = String(value.prefix(160)) } }
+                if RiderCommunity.endpoint != nil {
+                    NavigationLink("Публичный профиль") {
+                        RiderCommunityView(totals: totals, records: RiderJumpScore.records(in: recorder.history),
+                                           didLoad: { mine = $0.mine })
+                    }
+                }
+            }
+            .navigationTitle("Профиль")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Готово") {
+                        username = cleanedUsername
+                        editing = false
+                    }.disabled(!usernameValid)
+                }
+            }
         }
     }
 
@@ -372,9 +374,9 @@ struct RiderProfileView: View {
     }
 
     private var posts: some View {
-        let publications = (social.posts.map { ProfilePublication(post: $0) } +
-                            social.reposts.map { ProfilePublication(post: $0.post, repost: $0) })
-            .sorted { $0.post.date > $1.post.date }
+        var publications = social.posts.map { ProfilePublication(post: $0) }
+        publications.append(contentsOf: social.reposts.map { ProfilePublication(post: $0.post, repost: $0) })
+        publications.sort { $0.post.createdAt > $1.post.createdAt }
         return LazyVStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text("Посты").font(.title3.bold()).accessibilityAddTraits(.isHeader)

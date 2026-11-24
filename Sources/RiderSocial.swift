@@ -762,12 +762,15 @@ struct RiderFeedCard: View {
         .listRowBackground(Color.clear)
         .sheet(isPresented: $sharing) { shareMenu }
         .sheet(isPresented: $showingReactions) { reactionsSheet }
-        .task(id: post.publicURL) {
-            guard editable, post.publicURL != nil, social.reactions[post.contentID] == nil,
-                  let reaction = try? await RiderCommunity.postDetails(post.contentID).reaction,
-                  !Task.isCancelled, !changingReaction, social.reactions[post.contentID] == nil else { return }
-            social.reactions[post.contentID] = reaction
-        }
+        .task(id: post.publicURL) { await loadInitialReaction() }
+    }
+
+    @MainActor private func loadInitialReaction() async {
+        let id = post.contentID
+        guard editable, post.publicURL != nil, social.reactions[id] == nil else { return }
+        guard let response = try? await RiderCommunity.postDetails(id),
+              !Task.isCancelled, !changingReaction, social.reactions[id] == nil else { return }
+        social.reactions[id] = response.reaction
     }
 
     private var header: some View {
