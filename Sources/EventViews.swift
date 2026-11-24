@@ -171,6 +171,12 @@ struct EventDetailView: View {
                                            value: "≈ \(metric(estimate.airtimeSeconds, unit: "с"))")
                             LabeledContent("Дистанция", value: metric(estimate.distanceMeters, unit: "м"))
                             Text(estimateExplanation(estimate)).font(.footnote).foregroundStyle(.secondary)
+                            if estimate.heightMeters != nil, session.jumpAnalysis?.detectorVersion == RidingJumpDetector.version {
+                                Text(session.setup?.placement == .board
+                                     ? "Отсчёт — поверхность в месте отрыва. Датчик на доске измеряет подъём точки крепления."
+                                     : "Высота над поверхностью в месте отрыва оценена по движению крепления. На груди она совпадает с подъёмом доски при одинаковой позе в момент отрыва и на вершине. Подтягивание ног меняет просвет под доской.")
+                                    .font(.footnote).foregroundStyle(.secondary)
+                            }
                         } else {
                             TossHeightReadout(candidate: candidate, label: label(for: candidate))
                         }
