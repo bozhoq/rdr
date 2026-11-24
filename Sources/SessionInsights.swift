@@ -1,5 +1,65 @@
 import Foundation
 
+struct RiderTotals: Codable {
+    let sessions: Int
+    let jumps: Int
+    let height: Double?
+    let airtime: Double?
+    let seconds: Double
+
+    init(_ history: [SessionSummary]) {
+        let rides = history.filter {
+            $0.status != .recording && $0.setup?.sport.isRiding == true &&
+            $0.durationSeconds.isFinite && $0.durationSeconds > 0 &&
+            $0.handSimulationTest != true && $0.phoneTossTest != true && $0.recordingMode != .test
+        }
+        let events = rides.flatMap { session in
+            (session.jumpAnalysis?.candidates ?? []).compactMap { session.liveEstimate(for: $0) }
+        }.filter {
+            $0.isPhoneToss != true && $0.isHandLift != true &&
+            $0.heightMeters.map { $0.isFinite && $0 > 0 } == true
+        }
+        sessions = rides.count
+        jumps = events.count
+        height = events.compactMap(\.heightMeters).max()
+        airtime = events.map(\.airtimeSeconds).filter { $0.isFinite && $0 > 0 }.max()
+        seconds = rides.reduce(0) { $0 + $1.durationSeconds }
+    }
+
+    var timeOnWater: String {
+        let minutes = Int(min(seconds / 60, Double(Int32.max)))
+        let hours = minutes / 60
+        return hours > 0 ? "\(hours) ч \(minutes % 60) мин" : "\(minutes) мин"
+    }
+}
+
+struct RiderAchievement: Identifiable {
+    let id: String
+    let title: String
+    let icon: String
+    let goal: String
+    let value: Double
+    let target: Double
+
+    var unlocked: Bool { value >= target }
+    var progress: Double { min(1, max(0, value / target)) }
+
+    static func milestones(_ totals: RiderTotals) -> [Self] {
+        let sessions = Double(totals.sessions)
+        let hours = totals.seconds / 3600
+        let height = totals.height ?? 0
+        return [
+            Self(id: "first-session", title: "Первый галс", icon: "wind", goal: "1 каталка", value: sessions, target: 1),
+            Self(id: "ten-hours", title: "Гидрик прижился", icon: "water.waves", goal: "10 часов на воде", value: hours, target: 10),
+            Self(id: "fifty-hours", title: "Прописка на споте", icon: "clock.fill", goal: "50 часов на воде", value: hours, target: 50),
+            Self(id: "five-meters", title: "Заглянул в окна второго этажа", icon: "arrow.up.right", goal: "Прыжок от 5 м", value: height, target: 5),
+            Self(id: "ten-meters", title: "Там, где крыши", icon: "arrow.up.to.line", goal: "Прыжок от 10 м", value: height, target: 10),
+            Self(id: "three-seconds", title: "Забыл приземлиться", icon: "timer", goal: "Зависание от 3 с", value: totals.airtime ?? 0, target: 3),
+            Self(id: "fifty-jumps", title: "Земля, приём", icon: "bolt.fill", goal: "50 прыжков с высотой", value: Double(totals.jumps), target: 50)
+        ]
+    }
+}
+
 enum SessionSport: String, Codable, CaseIterable {
     case unclassified, kite, snowkite, kitefoil, wing, windsurf, groundTest
     var title: String {
@@ -118,6 +178,50 @@ struct SessionSetup: Codable {
     }
 }
 
+struct GearPreset: Codable, Identifiable {
+    let id: UUID
+    let name: String
+    private let kite: String
+    private let kiteArea: Double?
+    private let board: String
+    private let boardDetails: BoardSelection?
+
+    static func canSave(_ setup: SessionSetup) -> Bool {
+        !setup.cleaned.kite.isEmpty && !setup.cleaned.boardTitle.isEmpty
+    }
+
+    init?(name: String, setup: SessionSetup) {
+        let title = String(name.trimmingCharacters(in: .whitespacesAndNewlines).prefix(50))
+        let setup = setup.forRecording
+        guard !title.isEmpty, Self.canSave(setup) else { return nil }
+        id = UUID()
+        self.name = title
+        kite = setup.kite
+        kiteArea = setup.kiteAreaSquareMeters
+        board = setup.board
+        boardDetails = setup.boardDetails
+    }
+
+    var subtitle: String {
+        let setup = applying(to: SessionSetup())
+        return "\(setup.kiteTitle) / \(setup.boardTitle)"
+    }
+
+    func applying(to setup: SessionSetup) -> SessionSetup {
+        var next = setup
+        next.selectKite(kite, area: kiteArea)
+        next.board = board
+        next.boardDetails = boardDetails
+        return next
+    }
+
+    func matches(_ setup: SessionSetup) -> Bool {
+        let setup = setup.cleaned
+        return kite.caseInsensitiveCompare(setup.kite) == .orderedSame && kiteArea == setup.kiteAreaSquareMeters &&
+            (boardDetails?.title ?? board).caseInsensitiveCompare(setup.boardTitle) == .orderedSame
+    }
+}
+
 struct BoardSelection: Codable, Hashable {
     let brand: String
     let model: String
@@ -149,6 +253,7 @@ struct RiderSpot: Codable, Identifiable, Hashable {
     var areaOnly: Bool?
     var source: URL?
     var mapLink: URL?
+    var waterBearing: Int?
 
     init?(id: UUID = UUID(), name: String, latitude: String, longitude: String, notes: String = "", windyLink: String = "", mapLink: URL? = nil) {
         let cleaned = String(name.trimmingCharacters(in: .whitespacesAndNewlines).prefix(100))
@@ -207,6 +312,19 @@ struct RiderSpot: Codable, Identifiable, Hashable {
                           URLQueryItem(name: "rtext", value: "~\(latitude),\(longitude)"),
                           URLQueryItem(name: "rtt", value: "auto")]
         return url.url
+    }
+}
+
+enum SpotRoadTravel {
+    static func durationLabel(_ seconds: TimeInterval) -> String? {
+        guard seconds.isFinite, (0...604800).contains(seconds) else { return nil }
+        if seconds < 60 { return "1 мин" }
+        let minutes = Int((seconds / 60).rounded())
+        let hours = minutes / 60
+        let remainder = minutes % 60
+        if hours == 0 { return "\(minutes) мин" }
+        if remainder == 0 { return "\(hours) ч" }
+        return "\(hours) ч \(remainder) мин"
     }
 }
 
@@ -362,12 +480,25 @@ struct SpotForecast: Decodable {
         return ["↓","↙","←","↖","↑","↗","→","↘"][Int((direction / 45).rounded()) % 8]
     }
 
+    static func shoreWind(from direction: Double?, waterBearing: Int?) -> String? {
+        guard let direction, (0...360).contains(direction),
+              let waterBearing, (0..<360).contains(waterBearing) else { return nil }
+        // A wind direction is where it blows from. Wind from the open-water side blows toward shore.
+        let difference = abs(direction - Double(waterBearing))
+        let angle = min(difference, 360 - difference)
+        switch angle {
+        case ..<67.5: return "К берегу"
+        case ...112.5: return "Вдоль берега"
+        default: return "От берега"
+        }
+    }
+
     enum WindLevel: Equatable {
         case calm, light, medium, strong
 
         static func average(_ speed: Double) -> Self {
             switch speed {
-            case ..<6: return .calm
+            case ..<4: return .calm
             case ..<8: return .light
             case ..<10: return .medium
             default: return .strong
@@ -381,11 +512,24 @@ struct SpotForecast: Decodable {
 
         var description: String {
             switch self {
-            case .calm: return "Подходящего ветра нет"
+            case .calm: return "Штиль"
             case .light: return "Обнаружен лайтвинд"
             case .medium: return "Обнаружен средний ветер"
             case .strong: return "Обнаружен сильный ветер"
             }
+        }
+    }
+
+    enum RankingDay: Int {
+        case today = 0
+        case tomorrow = 1
+
+        var title: String {
+            self == .today ? "Лучший спот на сегодня" : "Лучший спот на завтра"
+        }
+
+        static func forEveningSwitch(at date: Date, calendar: Calendar = .current) -> Self {
+            calendar.component(.hour, from: date) >= 20 ? .tomorrow : .today
         }
     }
 
@@ -412,6 +556,17 @@ struct SpotForecast: Decodable {
 
         var windLevel: WindLevel { .average(meanWind) }
         var gustLevel: WindLevel? { maxGust.map(WindLevel.gust) }
+
+        fileprivate init?(_ hours: [Hour]) {
+            guard !hours.isEmpty else { return nil }
+            let scale = SessionWind.metersPerSecondPerKnot
+            let temperatures = hours.compactMap(\.temperature)
+            meanWind = hours.reduce(0) { $0 + $1.speed } * scale / Double(hours.count)
+            maxGust = hours.compactMap(\.gust).max().map { $0 * scale }
+            meanTemperature = temperatures.isEmpty ? nil : temperatures.reduce(0, +) / Double(temperatures.count)
+            thunder = hours.contains { [95, 96, 99].contains($0.weatherCode ?? -1) }
+            self.hours = hours.count
+        }
     }
 
     struct RankedSpot: Identifiable {
@@ -426,33 +581,63 @@ struct SpotForecast: Decodable {
         var id: Window { window }
     }
 
-    func windowSummaries(today now: Date) -> [Window: WindowSummary] {
+    func windowSummaries(for day: RankingDay = .today, relativeTo now: Date) -> [Window: WindowSummary] {
         guard let zone = TimeZone(identifier: timezone) else { return [:] }
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = zone
-        let today = allHours.filter { calendar.isDate($0.time, inSameDayAs: now) }
-        let byHour = Dictionary(grouping: today) { calendar.component(.hour, from: $0.time) }
-        let scale = SessionWind.metersPerSecondPerKnot
+        guard let target = calendar.date(byAdding: .day, value: day.rawValue, to: now) else { return [:] }
+        let readings = allHours.filter { calendar.isDate($0.time, inSameDayAs: target) }
+        let byHour = Dictionary(grouping: readings) { calendar.component(.hour, from: $0.time) }
         var summaries: [Window: WindowSummary] = [:]
         for window in Window.allCases {
-            let hours = window.forecastHours.flatMap { byHour[$0] ?? [] }
-            guard !hours.isEmpty else { continue }
-            let temperatures = hours.compactMap(\.temperature)
-            summaries[window] = WindowSummary(
-                meanWind: hours.reduce(0) { $0 + $1.speed } * scale / Double(hours.count),
-                maxGust: hours.compactMap(\.gust).max().map { $0 * scale },
-                meanTemperature: temperatures.isEmpty ? nil : temperatures.reduce(0, +) / Double(temperatures.count),
-                thunder: hours.contains { [95, 96, 99].contains($0.weatherCode ?? -1) },
-                hours: hours.count
-            )
+            summaries[window] = WindowSummary(window.forecastHours.flatMap { byHour[$0] ?? [] })
         }
         return summaries
     }
 
-    static func rankings(today now: Date, forecasts: [(RiderSpot, SpotForecast)]) -> [Ranking] {
+    struct FavoriteWindow {
+        let spot: RiderSpot
+        let start: Date
+        let end: Date
+        let timezone: TimeZone
+        let weather: WindowSummary
+    }
+
+    static func nearestWindWindow(after now: Date, forecasts: [(RiderSpot, SpotForecast)]) -> FavoriteWindow? {
+        forecasts.compactMap { spot, forecast in
+            forecast.nextWindWindow(for: spot, after: now)
+        }.min {
+            if $0.start != $1.start { return $0.start < $1.start }
+            if $0.weather.meanWind != $1.weather.meanWind { return $0.weather.meanWind > $1.weather.meanWind }
+            if $0.weather.hours != $1.weather.hours { return $0.weather.hours > $1.weather.hours }
+            return $0.spot.name < $1.spot.name
+        }
+    }
+
+    private func nextWindWindow(for spot: RiderSpot, after now: Date) -> FavoriteWindow? {
+        guard let zone = TimeZone(identifier: timezone) else { return nil }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = zone
+        guard let tomorrow = calendar.date(byAdding: .day, value: 1, to: now) else { return nil }
+        let remaining = hours(near: now)
+        for day in [now, tomorrow] {
+            let dayHours = remaining.filter { calendar.isDate($0.time, inSameDayAs: day) }
+            for window in Window.allCases {
+                guard let end = calendar.date(bySettingHour: window.endHour, minute: 0, second: 0, of: day), end > now else { continue }
+                let readings = dayHours.filter { window.forecastHours.contains(calendar.component(.hour, from: $0.time)) }
+                guard let first = readings.first, first.time < end,
+                      let weather = WindowSummary(readings), weather.windLevel != .calm else { continue }
+                return FavoriteWindow(spot: spot, start: max(now, first.time), end: end, timezone: zone, weather: weather)
+            }
+        }
+        return nil
+    }
+
+    static func rankings(for day: RankingDay = .today, relativeTo now: Date,
+                         forecasts: [(RiderSpot, SpotForecast)]) -> [Ranking] {
         var byWindow: [Window: [RankedSpot]] = [:]
         for (spot, forecast) in forecasts {
-            for (window, summary) in forecast.windowSummaries(today: now) {
+            for (window, summary) in forecast.windowSummaries(for: day, relativeTo: now) {
                 byWindow[window, default: []].append(RankedSpot(spot: spot, weather: summary))
             }
         }

@@ -10,6 +10,7 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
     @Published private(set) var history: [SessionSummary] = []
     @Published private(set) var favoriteSpots = Set((UserDefaults.standard.stringArray(forKey: "rider.favoriteSpots") ?? []).compactMap(UUID.init(uuidString:)))
     @Published private(set) var spots: [RiderSpot] = []
+    @Published private(set) var gearPresets: [GearPreset] = []
     @Published private(set) var authorization: CLAuthorizationStatus = .notDetermined
     @Published private(set) var motionIsRecent = false
     @Published var errorMessage: String?
@@ -58,6 +59,7 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
     private var recentFixes: [RoutePoint] = []
     private var pendingRides: [RidingJumpDetector.Flight] = []
     private var motionClock: Date?
+    private let gearPresetsKey = "rider.gearPresets"
     private let calibrationKey = "rider.calibrationByPlacement"
     private let sensorCheckKey = "rider.completedSensorCheck"
     private var checkTask: Task<Void, Never>?
@@ -129,6 +131,8 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
             try? JSONDecoder().decode([RiderSpot].self, from: $0)
         } ?? []
         spots = StarterSpots.merge(saved: saved, catalogue: StarterSpots.load())
+        if let data = UserDefaults.standard.data(forKey: gearPresetsKey),
+           let presets = try? JSONDecoder().decode([GearPreset].self, from: data) { gearPresets = presets }
         reloadHistory()
     }
 
@@ -140,6 +144,28 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
         guard live == nil else { return }
         draftSetup = setup.forRecording
         if let data = try? JSONEncoder().encode(draftSetup) { UserDefaults.standard.set(data, forKey: "rider.sessionSetup") }
+    }
+
+    func saveGearPreset(named name: String) -> Bool {
+        guard live == nil, let preset = GearPreset(name: name, setup: draftSetup),
+              !gearPresets.contains(where: { $0.name.caseInsensitiveCompare(preset.name) == .orderedSame || $0.matches(draftSetup) })
+        else { return false }
+        return persistGearPresets(gearPresets + [preset])
+    }
+
+    func useGearPreset(_ preset: GearPreset) {
+        reuseSetup(preset.applying(to: draftSetup))
+    }
+
+    func deleteGearPreset(_ preset: GearPreset) {
+        _ = persistGearPresets(gearPresets.filter { $0.id != preset.id })
+    }
+
+    private func persistGearPresets(_ presets: [GearPreset]) -> Bool {
+        guard let data = try? JSONEncoder().encode(presets) else { return false }
+        UserDefaults.standard.set(data, forKey: gearPresetsKey)
+        gearPresets = presets
+        return true
     }
 
     func saveSpot(_ spot: RiderSpot) -> Bool {
