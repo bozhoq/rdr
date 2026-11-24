@@ -350,10 +350,10 @@ import FoundationXML
         let at1728 = midnight.addingTimeInterval(17 * 3600 + 28 * 60)
         let atThirteen = midnight.addingTimeInterval(13 * 3600)
         check(SpotForecast.RankingDay.today.visibleWindows(at: at1728, calendar: localCalendar) == [.evening] &&
-              SpotForecast.RankingDay.today.visibleWindows(at: beforeMorning, calendar: localCalendar).isEmpty,
-              "Show only the current window using the phone clock")
-        check(SpotForecast.RankingDay.today.visibleWindows(at: atThirteen.addingTimeInterval(-1), calendar: localCalendar) == [.lateMorning] &&
-              SpotForecast.RankingDay.today.visibleWindows(at: atThirteen, calendar: localCalendar) == [.afternoon],
+              SpotForecast.RankingDay.today.visibleWindows(at: beforeMorning, calendar: localCalendar) == windows,
+              "Keep current and future windows using the phone clock")
+        check(SpotForecast.RankingDay.today.visibleWindows(at: atThirteen.addingTimeInterval(-1), calendar: localCalendar) == [.lateMorning, .afternoon, .evening] &&
+              SpotForecast.RankingDay.today.visibleWindows(at: atThirteen, calendar: localCalendar) == [.afternoon, .evening],
               "Switch windows exactly at the boundary")
         check(SpotForecast.RankingDay.tomorrow.visibleWindows(at: atEight, calendar: localCalendar) == windows,
               "Keep every window for tomorrow once the evening cutoff passes")

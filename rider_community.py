@@ -8,6 +8,7 @@ import re
 import sqlite3
 import time
 from uuid import UUID
+from html import escape
 from contextlib import closing
 from urllib.parse import urlencode
 from urllib.request import urlopen
@@ -33,6 +34,33 @@ CREATE TABLE IF NOT EXISTS post_comments(
     created_at REAL NOT NULL, body TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS comments_by_post ON post_comments(post, created_at DESC);
+CREATE TABLE IF NOT EXISTS post_equipment(
+    post TEXT PRIMARY KEY REFERENCES posts(id) ON DELETE CASCADE, document TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS shakas(
+    post TEXT NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+    owner TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+    created_at REAL NOT NULL, PRIMARY KEY(post, owner)
+);
+CREATE TABLE IF NOT EXISTS reposts(
+    id TEXT PRIMARY KEY, post TEXT NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+    owner TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+    created_at REAL NOT NULL, UNIQUE(owner, post)
+);
+CREATE TABLE IF NOT EXISTS follow_activity(
+    owner TEXT NOT NULL, target TEXT NOT NULL, created_at REAL NOT NULL,
+    PRIMARY KEY(owner, target),
+    FOREIGN KEY(owner, target) REFERENCES follows(owner, target) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS direct_messages(
+    id TEXT PRIMARY KEY,
+    sender TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+    recipient TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+    created_at REAL NOT NULL, body TEXT NOT NULL,
+    post TEXT REFERENCES posts(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS direct_sender ON direct_messages(sender, recipient, created_at);
+CREATE INDEX IF NOT EXISTS direct_recipient ON direct_messages(recipient, sender, created_at);
 CREATE TABLE IF NOT EXISTS records(
     owner TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
     session_id TEXT NOT NULL, spot_id TEXT, spot_name TEXT, started_at REAL NOT NULL,
@@ -163,23 +191,97 @@ def post_fields(raw, target):
                                        and not (number(lat, -90, 90) and number(lon, -180, 180))):
             raise ValueError("invalid geotag")
         location = json.dumps({"name": name, "latitude": lat, "longitude": lon}, ensure_ascii=False)
-    return caption.strip(), location, image
+    equipment = raw.get("equipment")
+    if equipment is not None:
+        if not isinstance(equipment, dict):
+            raise ValueError("invalid equipment")
+        fields = ("name", "kite", "board")
+        if any(not isinstance(equipment.get(key), str) or not 1 <= len(equipment[key].strip()) <= 120 for key in fields):
+            raise ValueError("invalid equipment")
+        equipment = json.dumps({key: equipment[key].strip() for key in fields}, ensure_ascii=False)
+    return caption.strip(), location, image, equipment
 
 
-def feed(db, owner, following):
-    relation = "EXISTS" if following else "NOT EXISTS"
-    query = f"""SELECT p.id,p.created_at,p.caption,p.location,r.document
-        FROM posts p JOIN profiles r ON r.id=p.owner
-        WHERE p.owner<>? AND {relation}(SELECT 1 FROM follows f WHERE f.owner=? AND f.target=p.owner)
-        ORDER BY p.created_at DESC,p.id LIMIT 40"""
+def rider_card(owner, document):
+    rider = json.loads(document)
+    return {"id": owner, "name": rider["name"], "username": rider.get("username"), "avatar": rider.get("avatar")}
+
+
+def reactions(db, post_id, owner):
+    count, mine = db.execute("SELECT count(*),max(owner=?) FROM shakas WHERE post=?", (owner, post_id)).fetchone()
+    recent = db.execute("""SELECT r.id,r.document FROM shakas s JOIN profiles r ON r.id=s.owner
+        WHERE s.post=? ORDER BY s.created_at DESC,s.owner LIMIT 3""", (post_id,))
+    return {"total": count, "mine": bool(mine), "people": [rider_card(*row) for row in recent]}
+
+
+def feed(db, owner, mode, post_id=None):
+    filters = {
+        "following": """e.owner<>? AND EXISTS(SELECT 1 FROM follows WHERE owner=? AND target=e.owner)""",
+        "recommended": """e.owner<>? AND NOT EXISTS(SELECT 1 FROM follows WHERE owner=? AND target=e.owner)""",
+        "my-reposts": "e.owner=? AND e.id<>e.source",
+        "single": "e.id=?",
+    }
+    params = (owner, owner) if mode in ("following", "recommended") else (post_id or owner,)
+    query = """WITH entries(id,source,owner,created_at) AS (
+        SELECT id,id,owner,created_at FROM posts
+        UNION ALL SELECT id,post,owner,created_at FROM reposts
+    )
+    SELECT e.id,p.id,e.created_at,p.caption,p.location,g.document,
+           e.owner,r.document,p.owner,src.document,
+           EXISTS(SELECT 1 FROM follows WHERE owner=? AND target=e.owner),
+           EXISTS(SELECT 1 FROM reposts WHERE owner=? AND post=p.id)
+    FROM entries e JOIN posts p ON p.id=e.source JOIN profiles r ON r.id=e.owner
+    JOIN profiles src ON src.id=p.owner LEFT JOIN post_equipment g ON g.post=p.id
+    WHERE """ + filters[mode] + " ORDER BY e.created_at DESC,e.id LIMIT 40"
     entries = []
-    for post_id, created_at, caption, location, document in db.execute(query, (owner, owner)):
-        author = json.loads(document)
-        entries.append({"post": {"id": post_id, "createdAt": created_at, "caption": caption, "published": True,
-                                 "location": json.loads(location) if location else None},
-                        "author": author["name"], "username": author.get("username"),
-                        "avatar": author.get("avatar")})
+    for row in db.execute(query, (owner, owner, *params)):
+        entry_id, source, created, caption, location, gear, author_id, document, source_owner, source_doc, following, reposted = row
+        author = rider_card(author_id, document)
+        post = {"id": entry_id, "createdAt": created, "caption": caption, "published": True,
+                "location": json.loads(location) if location else None, "equipment": json.loads(gear) if gear else None}
+        if entry_id != source:
+            original = rider_card(source_owner, source_doc)
+            post.update(sourceID=source, sourceAuthor=original["name"], sourceUsername=original["username"])
+        entries.append({"post": post, "author": author["name"], "username": author["username"],
+                        "avatar": author["avatar"], "authorID": author_id, "following": bool(following),
+                        "mine": owner == author_id, "reposted": bool(reposted), "reaction": reactions(db, source, owner)})
     return entries
+
+
+def activity(db, owner):
+    query = """SELECT kind,actor,post,date,p.document FROM (
+        SELECT 'shaka' AS kind,s.owner AS actor,s.post AS post,s.created_at AS date
+        FROM shakas s JOIN posts r ON r.id=s.post WHERE r.owner=?
+        UNION ALL
+        SELECT 'comment',c.author,c.post,c.created_at FROM post_comments c JOIN posts r ON r.id=c.post WHERE r.owner=?
+        UNION ALL
+        SELECT 'follow',f.owner,NULL,f.created_at FROM follow_activity f WHERE f.target=?
+        UNION ALL
+        SELECT 'repost',s.owner,s.post,s.created_at FROM reposts s JOIN posts r ON r.id=s.post WHERE r.owner=?
+    ) AS a JOIN profiles p ON p.id=a.actor
+    WHERE a.actor<>? ORDER BY a.date DESC,a.actor LIMIT 60"""
+    return [{"kind": kind, "person": rider_card(actor, document), "postID": post, "createdAt": date}
+            for kind, actor, post, date, document in db.execute(query, (owner,) * 5)]
+
+
+def inbox(db, owner):
+    query = """WITH dialogs AS (
+        SELECT recipient AS peer, created_at FROM direct_messages WHERE sender=?
+        UNION ALL SELECT sender, created_at FROM direct_messages WHERE recipient=?
+    )
+    SELECT p.id,p.document FROM profiles p JOIN dialogs d ON d.peer=p.id
+    GROUP BY p.id ORDER BY max(d.created_at) DESC,p.id LIMIT 60"""
+    return [rider_card(*row) for row in db.execute(query, (owner, owner))]
+
+
+def thread(db, owner, peer):
+    query = """SELECT m.id,m.sender,m.body,m.created_at,m.post,p.caption,p.owner
+    FROM direct_messages m LEFT JOIN posts p ON p.id=m.post
+    WHERE (sender=? AND recipient=?) OR (sender=? AND recipient=?)
+    ORDER BY m.created_at DESC,m.id DESC LIMIT 100"""
+    return [{"id": key, "mine": sender == owner, "text": body, "createdAt": date, "postID": post,
+             "postCaption": caption or ("Публикация Rider" if author else None)}
+            for key, sender, body, date, post, caption, author in reversed(list(db.execute(query, (owner, peer, peer, owner))))]
 
 
 def comments(db, post_id, owner):
@@ -293,6 +395,29 @@ def application(env, start_response):
         return [data]
 
     path, method = env.get("PATH_INFO", ""), env.get("REQUEST_METHOD", "")
+    view_path = re.fullmatch(r"/posts/([a-fA-F0-9-]{36})/view", path)
+    if method == "GET" and view_path:
+        try:
+            post_id = identifier(view_path[1])
+        except ValueError:
+            return send("404 Not Found", {"error": "unknown post"})
+        with closing(sqlite3.connect(os.environ.get("RIDER_DB", "rider-profiles.sqlite3"), timeout=5)) as db:
+            db.executescript(SCHEMA)
+            row = db.execute("""SELECT r.document,p.caption FROM posts p JOIN profiles r ON r.id=p.owner WHERE p.id=?""",
+                             (post_id,)).fetchone()
+        if row is None:
+            return send("404 Not Found", {"error": "unknown post"})
+        name, caption = escape(json.loads(row[0])["name"]), escape(row[1])
+        page = (f'<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width">'
+                f'<title>{name} · Rider</title><body style="max-width:680px;margin:24px auto;padding:0 16px;'
+                f'font:17px system-ui;background:#eaf9f7;color:#083d43"><h1>{name} · Rider</h1>'
+                f'<img width="100%" src="photo" alt="Фото публикации"><p>{caption}</p></body></html>').encode("utf-8")
+        start_response("200 OK", [("Content-Type", "text/html; charset=utf-8"),
+                                  ("Cache-Control", "no-store"), ("Content-Length", str(len(page)))])
+        return [page]
+
+    post_action = re.fullmatch(r"/posts/([a-fA-F0-9-]{36})/(details|shaka|repost)", path)
+    direct_path = re.fullmatch(r"/messages/([0-9a-f]{64})(?:/([a-fA-F0-9-]{36}))?", path)
     photo_path = re.fullmatch(r"/posts/([a-fA-F0-9-]{36})/photo", path)
     comment_path = re.fullmatch(r"/posts/([a-fA-F0-9-]{36})/comments(?:/([a-fA-F0-9-]{36}))?", path)
     if method == "GET" and photo_path:
@@ -362,17 +487,93 @@ def application(env, start_response):
                     db.executemany("INSERT INTO record_details VALUES (?,?,?,?,?)",
                                    ((owner, row[0], *row[6:]) for row in scores))
             elif (path, method) == ("/me", "DELETE"):
+                db.execute("DELETE FROM follows WHERE owner=?", (owner,))
                 db.execute("DELETE FROM profiles WHERE id=?", (owner,))
             elif path.startswith("/follow/") and method in ("PUT", "DELETE"):
                 target = path.removeprefix("/follow/")
+                db.execute("BEGIN IMMEDIATE")
                 if target == owner or not db.execute("SELECT 1 FROM profiles WHERE id=?", (target,)).fetchone():
                     return send("404 Not Found", {"error": "unknown rider"})
                 if method == "PUT":
-                    db.execute("INSERT OR IGNORE INTO follows VALUES (?,?)", (owner, target))
+                    changed = db.execute("INSERT OR IGNORE INTO follows VALUES (?,?)", (owner, target))
+                    if changed.rowcount and db.execute("SELECT 1 FROM profiles WHERE id=?", (owner,)).fetchone():
+                        db.execute("INSERT INTO follow_activity VALUES (?,?,?)", (owner, target, time.time()))
                 else:
                     db.execute("DELETE FROM follows WHERE owner=? AND target=?", (owner, target))
-            elif method == "GET" and path in ("/feed/following", "/feed/recommended"):
-                return send("200 OK", feed(db, owner, following=path.endswith("/following")))
+            elif method == "GET" and path in ("/feed/following", "/feed/recommended", "/feed/my-reposts"):
+                return send("200 OK", feed(db, owner, path.split("/")[-1]))
+            elif (path, method) == ("/activity", "GET"):
+                return send("200 OK", activity(db, owner))
+            elif (path, method) == ("/messages", "GET"):
+                return send("200 OK", inbox(db, owner))
+            elif direct_path:
+                peer, message_id = direct_path.groups()
+                if (method, bool(message_id)) not in (("GET", False), ("PUT", True)):
+                    return send("405 Method Not Allowed", {"error": "invalid messages method"})
+                if method == "PUT":
+                    try:
+                        message_id = identifier(message_id)
+                        raw = read_json(env, 8192)
+                        if not isinstance(raw, dict) or not isinstance(raw.get("text"), str):
+                            raise ValueError("invalid message")
+                        body = raw["text"].strip()
+                        shared = identifier(raw["postID"]) if raw.get("postID") is not None else None
+                        if len(body) > 1000 or not (body or shared):
+                            raise ValueError("invalid message length")
+                    except (ValueError, TypeError, RecursionError):
+                        return send("400 Bad Request", {"error": "invalid message"})
+                    db.execute("BEGIN IMMEDIATE")
+                    if not db.execute("SELECT 1 FROM profiles WHERE id=?", (owner,)).fetchone():
+                        return send("403 Forbidden", {"error": "publish a profile first"})
+                    if peer == owner or not db.execute("SELECT 1 FROM profiles WHERE id=?", (peer,)).fetchone():
+                        return send("404 Not Found", {"error": "unknown recipient"})
+                    if shared and not db.execute("SELECT 1 FROM posts WHERE id=?", (shared,)).fetchone():
+                        return send("404 Not Found", {"error": "unknown post"})
+                    changed = db.execute("INSERT INTO direct_messages VALUES (?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING",
+                                         (message_id, owner, peer, time.time(), body, shared))
+                    if not changed.rowcount and not db.execute("""SELECT 1 FROM direct_messages
+                        WHERE id=? AND sender=? AND recipient=? AND body=? AND post IS ?""",
+                        (message_id, owner, peer, body, shared)).fetchone():
+                        return send("409 Conflict", {"error": "message ID is taken"})
+                return send("200 OK", thread(db, owner, peer))
+            elif post_action:
+                try:
+                    post_id = identifier(post_action[1])
+                    action = post_action[2]
+                    if (action, method) not in (("details", "GET"), ("shaka", "PUT"), ("shaka", "DELETE"),
+                                                 ("repost", "PUT"), ("repost", "DELETE")):
+                        return send("405 Method Not Allowed", {"error": "invalid post action"})
+                    repost_id = identifier(read_json(env, 512)["id"]) if (action, method) == ("repost", "PUT") else None
+                except (ValueError, TypeError, RecursionError, KeyError):
+                    return send("400 Bad Request", {"error": "invalid post action"})
+                if action == "details":
+                    result = feed(db, owner, "single", post_id)
+                    return send("200 OK", result[0]) if result else send("404 Not Found", {"error": "unknown post"})
+                db.execute("BEGIN IMMEDIATE")
+                post = db.execute("SELECT owner FROM posts WHERE id=?", (post_id,)).fetchone()
+                if not post:
+                    return send("404 Not Found", {"error": "unknown post"})
+                if not db.execute("SELECT 1 FROM profiles WHERE id=?", (owner,)).fetchone():
+                    return send("403 Forbidden", {"error": "publish a profile first"})
+                if action == "shaka":
+                    if method == "PUT":
+                        db.execute("INSERT OR IGNORE INTO shakas VALUES (?,?,?)", (post_id, owner, time.time()))
+                    else:
+                        db.execute("DELETE FROM shakas WHERE post=? AND owner=?", (post_id, owner))
+                    return send("200 OK", reactions(db, post_id, owner))
+                if method == "DELETE":
+                    db.execute("DELETE FROM reposts WHERE post=? AND owner=?", (post_id, owner))
+                elif post[0] == owner:
+                    return send("400 Bad Request", {"error": "cannot repost own publication"})
+                else:
+                    if db.execute("SELECT 1 FROM posts WHERE id=?", (repost_id,)).fetchone():
+                        return send("409 Conflict", {"error": "post ID is taken"})
+                    try:
+                        db.execute("""INSERT INTO reposts VALUES (?,?,?,?)
+                            ON CONFLICT(owner,post) DO NOTHING""", (repost_id, post_id, owner, time.time()))
+                    except sqlite3.IntegrityError:
+                        return send("409 Conflict", {"error": "repost ID is taken"})
+                return send("200 OK", {"reposted": method == "PUT"})
             elif (path, method) == ("/tops", "POST"):
                 try:
                     rows = top_rows(db, read_json(env, 4096))
@@ -423,11 +624,19 @@ def application(env, start_response):
                 db.execute("BEGIN IMMEDIATE")
                 if not db.execute("SELECT 1 FROM profiles WHERE id=?", (owner,)).fetchone():
                     return send("403 Forbidden", {"error": "publish a profile first"})
+                if db.execute("SELECT 1 FROM reposts WHERE id=?", (post_id,)).fetchone():
+                    return send("409 Conflict", {"error": "post ID is taken"})
+                caption, location, image, equipment = fields
                 affected = db.execute("""INSERT INTO posts VALUES (?,?,?,?,?,?)
                     ON CONFLICT(id) DO UPDATE SET caption=excluded.caption,location=excluded.location,photo=excluded.photo
-                    WHERE posts.owner=excluded.owner""", (post_id, owner, time.time(), *fields))
+                    WHERE posts.owner=excluded.owner""", (post_id, owner, time.time(), caption, location, image))
                 if not affected.rowcount:
                     return send("409 Conflict", {"error": "post ID is taken"})
+                if equipment is None:
+                    db.execute("DELETE FROM post_equipment WHERE post=?", (post_id,))
+                else:
+                    db.execute("""INSERT INTO post_equipment VALUES (?,?)
+                        ON CONFLICT(post) DO UPDATE SET document=excluded.document""", (post_id, equipment))
                 return send("200 OK", {"published": True})
             elif (path, method) != ("/riders", "GET"):
                 return send("404 Not Found", {"error": "unknown endpoint"})
