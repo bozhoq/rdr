@@ -25,7 +25,9 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
         didSet { UserDefaults.standard.set(automaticConditions, forKey: "rider.autoConditions") }
     }
     @Published var manualWind = ""
-    @Published var manualDirection = ""
+    @Published var manualDirection: Int?
+    @Published var automaticSpotOverride: String?
+    @Published private(set) var attemptedLocation = false
     @Published private(set) var previewFix: CLLocation?
     @Published private(set) var locating = false
     private var conditionsResolved = false
@@ -82,12 +84,12 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
     }
     func locateSpot() {
         guard summary == nil else { return }
+        attemptedLocation = true
         if authorization == .notDetermined { location.requestWhenInUseAuthorization() }
         else if locationAuthorized { locating = true; location.requestLocation() }
     }
     var manualWindValid: Bool {
-        validNumber(manualWind, max: 200) && validNumber(manualDirection, max: 360) &&
-            (manualDirection.isEmpty || !manualWind.isEmpty)
+        validNumber(manualWind, max: 103) && (manualDirection == nil || !manualWind.isEmpty)
     }
     private func validNumber(_ text: String, max: Double) -> Bool {
         text.isEmpty || Double(text.replacingOccurrences(of: ",", with: ".")).map { $0.isFinite && (0...max).contains($0) } == true
@@ -260,7 +262,8 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
         if automaticConditions {
             sessionSetup.spotID = nil
             sessionSetup.spot = ""
-            if let fix, let nearest = nearestSpot(to: fix) { sessionSetup.selectSpot(nearest) }
+            if let automaticSpotOverride { sessionSetup.setSpotName(automaticSpotOverride) }
+            else if let fix, let nearest = nearestSpot(to: fix) { sessionSetup.selectSpot(nearest) }
         }
         if sessionSetup.spotID == nil, let matching = spots.first(where: { $0.matches(sessionSetup) }) {
             sessionSetup.selectSpot(matching)
@@ -286,8 +289,8 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
             sensors: sensors
         )
         session.automaticConditions = automaticConditions
-        if !automaticConditions, let knots = Double(manualWind.replacingOccurrences(of: ",", with: ".")) {
-            session.wind = SessionWind(knots: knots, direction: Double(manualDirection.replacingOccurrences(of: ",", with: ".")),
+        if !automaticConditions, let speed = Double(manualWind.replacingOccurrences(of: ",", with: ".")) {
+            session.wind = SessionWind(knots: speed / SessionWind.metersPerSecondPerKnot, direction: manualDirection.map { Double($0) },
                                        date: session.startedAt, source: "Вручную")
         }
         do {
@@ -312,6 +315,7 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
         if checkedSensors != nil { UserDefaults.standard.set(true, forKey: sensorCheckKey) }
         checkedSensors = nil
         checkedCalibration = nil
+        automaticSpotOverride = nil
         conditionsResolved = fix != nil
         weatherTask?.cancel()
         if let fix { fetchWind(at: fix, for: session.id, started: session.startedAt) }
@@ -500,7 +504,7 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
         locating = false
         if let fix = locations.last(where: { (0...65).contains($0.horizontalAccuracy) && abs($0.timestamp.timeIntervalSinceNow) <= 45 }) {
             previewFix = fix
-        }
+        } else { previewFix = nil }
         guard summary?.gpsEnabledAtStart == true, locationAuthorized else { return }
         for point in locations {
             recordLocation(point)
@@ -509,6 +513,7 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
 
     func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
         locating = false
+        previewFix = nil
         if (error as? CLError)?.code == .locationUnknown { return }
         recordEvent("locationError", detail: error.localizedDescription)
     }
@@ -643,7 +648,7 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
         if session.automaticConditions == true, !conditionsResolved, point.horizontalAccuracy <= 65,
            abs(point.timestamp.timeIntervalSinceNow) <= 45 {
             conditionsResolved = true
-            if let nearest = nearestSpot(to: point) { session.setup?.selectSpot(nearest) }
+            if session.setup?.spot.isEmpty != false, let nearest = nearestSpot(to: point) { session.setup?.selectSpot(nearest) }
             fetchWind(at: point, for: session.id, started: session.startedAt)
         }
         let sample = LocationSample(

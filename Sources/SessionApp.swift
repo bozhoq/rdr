@@ -115,7 +115,10 @@ private struct RecordingView: View {
         .sheet(item: $gear) { field in
             let suggestions = SetupSuggestions(history: recorder.history)
             if field == .spot {
-                SpotChoice(setup: $recorder.draftSetup, spots: recorder.spots, recent: suggestions.spots)
+                SpotChoice(setup: Binding(get: { recorder.draftSetup }, set: { selection in
+                    recorder.draftSetup = selection
+                    if recorder.automaticConditions { recorder.automaticSpotOverride = selection.spot.isEmpty ? nil : selection.spot }
+                }), spots: recorder.spots, recent: suggestions.spots)
             } else if field == .kite, usesKitePicker {
                 KitePicker(setup: $recorder.draftSetup, recent: suggestions.kites)
             } else if field == .board {
@@ -128,7 +131,12 @@ private struct RecordingView: View {
             }
         }
         .sheet(isPresented: $newGPSPoint) {
-            SpotEditor(original: nil, suggested: recorder.usableFix?.coordinate, save: recorder.saveSpot)
+            SpotEditor(original: nil, suggested: recorder.usableFix?.coordinate) { spot in
+                guard recorder.saveSpot(spot) else { return false }
+                recorder.draftSetup.selectSpot(spot)
+                recorder.automaticSpotOverride = spot.name
+                return true
+            }
         }
         .sheet(isPresented: $showingTools) {
             if let session = recorder.live { tools(session) }
@@ -154,17 +162,28 @@ private struct RecordingView: View {
                         Text("Вручную").tag(false)
                     }.pickerStyle(.segmented).padding(.vertical, 12)
                     if recorder.automaticConditions {
-                        if let fix = recorder.usableFix {
-                            if let spot = recorder.nearestSpot(to: fix) { LabeledContent("Спот", value: spot.name) }
-                            else { Button("Добавить мой спот") { newGPSPoint = true } }
+                        if let chosen = recorder.automaticSpotOverride {
+                            Button(chosen) { gear = .spot }
+                        } else if recorder.locating {
+                            ProgressView("Получаем координаты…")
+                        } else if let fix = recorder.usableFix, let nearest = recorder.nearestSpot(to: fix) {
+                            LabeledContent("Спот", value: nearest.name)
+                        } else if recorder.attemptedLocation || recorder.authorization == .denied || recorder.authorization == .restricted {
+                            Text("Не удалось определить ближайший спот, пожалуйста, укажите спот самостоятельно")
+                            Button("Выбрать спот") { gear = .spot }
+                            Button("Добавить мой спот") { newGPSPoint = true }
+                        } else {
+                            Button("Определить спот по GPS", action: recorder.locateSpot)
                         }
-                        Button(recorder.locating ? "Получаем координаты…" : "Определить спот по GPS",
-                               action: recorder.locateSpot).disabled(recorder.locating)
-                        Text("Ветер на старте — прогноз Open-Meteo по координатам.").font(.footnote).foregroundStyle(.secondary)
                     } else {
                         gearRow(.spot)
-                        TextField("Ветер, узлы", text: $recorder.manualWind).keyboardType(.decimalPad)
-                        TextField("Откуда дует, 0–360°", text: $recorder.manualDirection).keyboardType(.decimalPad)
+                        TextField("Ветер, м/с", text: $recorder.manualWind).keyboardType(.decimalPad)
+                        Picker("Откуда дует", selection: $recorder.manualDirection) {
+                            Text("Не указано").tag(Int?.none)
+                            ForEach(0..<8, id: \.self) { i in
+                                Text(SpotForecast.compass(Double(i * 45))).tag(Optional(i * 45))
+                            }
+                        }
                         if !recorder.manualWindValid { Text("Проверьте скорость и направление ветра.").font(.footnote) }
                     }
                     Divider()
@@ -207,6 +226,7 @@ private struct RecordingView: View {
             }.padding(20)
         }
         .background(RiderTheme.canvas.ignoresSafeArea())
+        .onChange(of: recorder.automaticConditions) { _, _ in recorder.automaticSpotOverride = nil }
         .task(id: recorder.automaticConditions) {
             if recorder.automaticConditions && recorder.locationAuthorized { recorder.locateSpot() }
         }
@@ -699,7 +719,7 @@ struct SessionDetail: View {
 
         if let wind = session.wind {
             LabeledContent(wind.source, value: wind.title)
-            if let gust = wind.gust { LabeledContent("Порывы", value: metric(gust, unit: "уз")) }
+            if let gust = wind.gust { LabeledContent("Порывы", value: metric(gust * SessionWind.metersPerSecondPerKnot, unit: "м/с")) }
         } else if session.automaticConditions == true { Text("Прогноз на старте недоступен").font(.footnote) }
         LabeledContent("Активность", value: session.setup?.activityTitle ?? "Не указано")
         if let setup = session.setup {

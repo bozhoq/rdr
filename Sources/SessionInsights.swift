@@ -494,6 +494,7 @@ struct LiveJumpEstimate: Codable {
     var inertialLift: Bool?
     var assumesLevelLanding: Bool?
     var apexSeconds: Double?
+    var pushRiseMeters: Double?
 
     static func phoneToss(_ event: JumpCandidate) -> Self? {
         guard event.minimumLoadG.isFinite, (0...0.2).contains(event.minimumLoadG),
@@ -520,7 +521,7 @@ struct LiveJumpEstimate: Codable {
         return Self(heightMeters: anchored?.height ?? corroborated ?? approximate, airtimeSeconds: event.unloadingSeconds,
                     distanceMeters: gpsDistance(start: start, end: end, gps: gps, motionClock: motionClock),
                     inertialLift: anchored == nil ? nil : true, assumesLevelLanding: approximate == nil ? nil : true,
-                    apexSeconds: anchored?.time)
+                    apexSeconds: anchored?.time, pushRiseMeters: anchored?.pushRise)
     }
 
     private static func pressureShowsLevelChange(start: Double, end: Double, altitude: [AltitudeSample]) -> Bool {
@@ -653,6 +654,7 @@ struct VerticalTrajectory {
     struct Peak {
         let height: Double
         let time: Double
+        var pushRise: Double? = nil
     }
     private(set) var velocity = 0.0
     private(set) var height = 0.0
@@ -699,10 +701,12 @@ struct VerticalTrajectory {
         let duration = right - left
         var path = Self()
         var positions: [(time: Double, path: Self)] = []
+        var preparation = [(time: left, path: path)]
         for (a, b) in zip(track, track.dropFirst()) {
             let dt = b.time - a.time
             guard dt > 0, dt <= 0.05, a.acceleration.isFinite, b.acceleration.isFinite else { return nil }
             path.advance(acceleration: (a.acceleration + b.acceleration) * 0.5, interval: dt)
+            if b.time <= start { preparation.append((b.time, path)) }
             if (start...end).contains(b.time) { positions.append((b.time, path)) }
         }
         // Both anchors approximate zero vertical speed. Their heights can differ.
@@ -717,7 +721,8 @@ struct VerticalTrajectory {
         let fraction = (apex.time - start) / (end - start)
         guard (0.06...35).contains(height), (0.08...0.92).contains(fraction),
               level(apex) - level(landing) >= 0.04 else { return nil }
-        return Peak(height: height, time: apex.time)
+        let baseline = preparation.filter { start - $0.time <= 1.2 }.map(level).min()
+        return Peak(height: height, time: apex.time, pushRise: baseline.map { max(0, level(takeoff) - $0) })
     }
 }
 

@@ -358,8 +358,8 @@ private struct SpotWeather: View {
                             ForEach(Array(hours.prefix(24))) { hour in
                                 VStack(spacing: 6) {
                                     Text(clock.string(from: hour.time)).font(.caption.weight(.medium))
-                                    Text(metric(hour.speed, unit: "уз", digits: 0)).font(.headline).foregroundStyle(RiderTheme.accent)
-                                    Text("Порывы \(metric(hour.gust, unit: "уз", digits: 0))").font(.caption2)
+                                    Text(metric(hour.speed * SessionWind.metersPerSecondPerKnot, unit: "м/с")).font(.headline).foregroundStyle(RiderTheme.accent)
+                                    Text("Порывы \(metric(hour.gust.map { $0 * SessionWind.metersPerSecondPerKnot }, unit: "м/с"))").font(.caption2)
                                     Text(SpotForecast.compass(hour.direction) + " · " + metric(hour.temperature, unit: "°C", digits: 0))
                                         .font(.caption2).foregroundStyle(.secondary)
                                 }.padding(9)

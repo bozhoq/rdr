@@ -218,6 +218,11 @@ struct EventDetailView: View {
 
     private func diagnostics(_ candidate: JumpCandidate) -> some View {
         VStack(alignment: .leading, spacing: 12) {
+            if let estimate = session.liveEstimate(for: candidate), let push = estimate.pushRiseMeters, let flight = estimate.heightMeters {
+                LabeledContent("Подъём телефона до отрыва", value: metric(push, unit: "м", digits: 2))
+                LabeledContent("От отрыва до вершины", value: metric(flight, unit: "м", digits: 2))
+                LabeledContent("Весь подъём телефона", value: metric(push + flight, unit: "м", digits: 2))
+            }
             if let apex = session.liveEstimate(for: candidate)?.apexSeconds {
                 LabeledContent("Вершина", value: eventTimeText(apex))
                 LabeledContent("Подъём до вершины", value: metric(apex - candidate.startSeconds, unit: "с"))

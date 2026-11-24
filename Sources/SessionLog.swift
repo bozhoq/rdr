@@ -116,6 +116,7 @@ struct SessionSummary: Codable, Identifiable {
 }
 
 struct SessionWind: Codable {
+    static let metersPerSecondPerKnot = 1852.0 / 3600.0
     var knots: Double
     var gust: Double?
     var direction: Double?
@@ -124,7 +125,7 @@ struct SessionWind: Codable {
 
     var title: String {
         let directionText = direction.map { " · " + SpotForecast.compass($0) } ?? ""
-        return knots.formatted(.number.precision(.fractionLength(0...1))) + " уз" + directionText
+        return (knots * Self.metersPerSecondPerKnot).formatted(.number.precision(.fractionLength(0...1))) + " м/с" + directionText
     }
 }
 

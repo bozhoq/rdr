@@ -165,7 +165,7 @@ struct JumpDetector {
 /// Detects a push, ascent, descent and braking as separate phases. A kite jump
 /// can stay loaded in the air, so it never needs a free-fall interval.
 struct RidingJumpDetector {
-    static let version = "ride-8"
+    static let version = "ride-9"
 
     struct Point {
         let time: Double
@@ -252,6 +252,8 @@ struct RidingJumpDetector {
     private var preparedUntil = -Double.infinity
     private var arc: Arc?
     private var lastPush = -Double.infinity
+    // A rotating pouch can stay laterally loaded while its vertical axis is already in flight.
+    private var verticalUnloading: [Motion] = []
     private var shortFlight: ShortFlight?
     private var pendingShortFlight: Flight?
     private var lastLanding = -Double.infinity
@@ -344,8 +346,16 @@ struct RidingJumpDetector {
         let followsPush = time - lastPush <= 0.55
         if load >= 1.55 && vertical >= 5 { lastPush = time }
         guard var flight = shortFlight else {
+            if followsPush, time - lastLanding >= 0.35, (-14.0 ... -6.8).contains(vertical), load <= 1.6 {
+                verticalUnloading.append(motion)
+                verticalUnloading.removeAll { time - $0.time > 0.25 }
+            } else { verticalUnloading.removeAll(keepingCapacity: true) }
             if load <= 0.52, followsPush, time - lastLanding >= 0.35 {
-                shortFlight = ShortFlight(start: time, minimumLoad: load, maximumSpin: spin, samples: [motion])
+                let lead = time - (verticalUnloading.first?.time ?? time)
+                let samples = lead >= 0.04 ? verticalUnloading : [motion]
+                shortFlight = ShortFlight(start: samples[0].time, minimumLoad: load,
+                                          maximumSpin: samples.map(\.spin).max() ?? spin, samples: samples)
+                verticalUnloading.removeAll(keepingCapacity: true)
             }
             return nil
         }
@@ -397,6 +407,7 @@ struct RidingJumpDetector {
         pendingShortFlight = nil
         lastLanding = -.infinity
         preparation.removeAll()
+        verticalUnloading.removeAll(keepingCapacity: true)
         preparedUntil = -Double.infinity
     }
 
