@@ -169,11 +169,20 @@ import FoundationXML
         let dayForecast = try JSONDecoder().decode(SpotForecast.self, from: Data(daylightFixture.utf8))
         let dayHours = dayForecast.hours(near: Date(timeIntervalSince1970: 1699979999))
         check(dayHours.first?.condition.name == "Солнечно" && dayHours.last?.condition.name == "Дождь" &&
-              dayHours.last?.rankingScore == nil && SpotForecast.windArrow(315) == "↘", "Weather and downwind arrows")
-        let rankingFixture = #"{"timezone":"Europe/Moscow","hourly":{"time":[1700042400,1700046000,1700049600],"wind_speed_10m":[17,18,18],"wind_gusts_10m":[19,20,21],"wind_direction_10m":[315,315,0],"temperature_2m":[20,20,20],"weather_code":[2,0,95],"is_day":[1,1,1]}}"#
-        let ranked = try JSONDecoder().decode(SpotForecast.self, from: Data(rankingFixture.utf8))
-        check(ranked.bestWindow(today: Date(timeIntervalSince1970: 1700042400))?.first.time.timeIntervalSince1970 == 1700042400 &&
-              ranked.bestWindow(today: Date(timeIntervalSince1970: 1700049600)) == nil, "Select a daylight two-hour window and exclude thunder")
+              dayHours.last?.daylight == false && SpotForecast.windArrow(315) == "↘", "Weather and downwind arrows")
+        let midnight = ISO8601DateFormatter().date(from: "2025-04-03T00:00:00+03:00")!
+        let timestamps = (0..<48).map { midnight.timeIntervalSince1970 + Double($0 * 3600) }
+        let knots = (0..<48).map { (7...20).contains($0) ? Double($0) : 90.0 }
+        let raw: [String: Any] = ["timezone": "Europe/Moscow", "hourly": ["time": timestamps, "wind_speed_10m": knots]]
+        let ranked = try JSONDecoder().decode(SpotForecast.self, from: JSONSerialization.data(withJSONObject: raw))
+        let late = midnight.addingTimeInterval(23 * 3600)
+        let day = ranked.daySummary(today: late)
+        check(day?.hours == 14 && abs((day?.meanWind ?? 0) - 13.5 * SessionWind.metersPerSecondPerKnot) < 0.00001 &&
+              day?.maxGust == nil, "Compare the full local day even after 20:00 with missing gusts")
+        check(ranked.daySummary(today: midnight.addingTimeInterval(-1)) == nil, "Missing day has no wind classification")
+        check([5.99, 6, 7.99, 8, 9.99, 10].map { SpotForecast.Day.description(for: $0) } ==
+              ["Подходящего ветра нет", "Обнаружен лайтвинд", "Обнаружен лайтвинд", "Обнаружен средний ветер",
+               "Обнаружен средний ветер", "Обнаружен сильный ветер"], "Classify at 6, 8 and 10 m/s")
         let forecast = try JSONDecoder().decode(SpotForecast.self, from: Data(fixture.utf8))
         let hours = forecast.hours(near: origin)
         check(hours.count == 2 && hours.first?.temperature == -3 && hours.last?.gust == nil, "Handle past and unavailable forecasts without mismatching arrays")

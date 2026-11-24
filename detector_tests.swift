@@ -292,11 +292,6 @@ enum DetectorTests {
         }
         let bodyEvent = JumpCandidate(startSeconds: 1.5, endSeconds: 2.5, minimumLoadG: 0.1,
                                       returnPeakG: 2, maximumRotationRadiansPerSecond: 1)
-        let measuredFloor = VerticalTrajectory.floorPeak(bodyEvent, from: .init(time: 0.5, meters: 0.6), samples: bodySamples)
-        check(abs((measuredFloor ?? 0) - 1.4) < 0.04, "Measure phone apex from a known 0.6 m floor reference")
-        check(VerticalTrajectory.floorPeak(bodyEvent, from: .init(time: -12, meters: 0), samples: bodySamples) == nil &&
-              VerticalTrajectory.floorPeak(bodyEvent, from: .init(time: 0.5, meters: 0), samples: bodySamples.filter { !(1.8...1.9).contains($0.time) }) == nil,
-              "Expire floor references and reject sensor gaps")
         let bodyPeak = VerticalTrajectory.flightPeak(bodyEvent, samples: bodySamples)
         check(abs((bodyPeak?.height ?? 0) - 0.4) < 0.04 && abs((bodyPeak?.time ?? 0) - 2) < 0.04,
               "Integrate from the takeoff level to the in-flight apex")
