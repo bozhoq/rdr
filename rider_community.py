@@ -6,6 +6,8 @@ import math
 import os
 import re
 import sqlite3
+import time
+from uuid import UUID
 from contextlib import closing
 from urllib.parse import urlencode
 from urllib.request import urlopen
@@ -17,6 +19,25 @@ CREATE TABLE IF NOT EXISTS follows(
     PRIMARY KEY(owner,target)
 );
 CREATE INDEX IF NOT EXISTS by_target ON follows(target);
+CREATE TABLE IF NOT EXISTS handles(
+    username TEXT PRIMARY KEY, owner TEXT UNIQUE NOT NULL REFERENCES profiles(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS posts(
+    id TEXT PRIMARY KEY, owner TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+    created_at REAL NOT NULL, caption TEXT NOT NULL, location TEXT, photo BLOB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS posts_by_owner ON posts(owner, created_at DESC);
+CREATE TABLE IF NOT EXISTS records(
+    owner TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+    session_id TEXT NOT NULL, spot_id TEXT, spot_name TEXT, started_at REAL NOT NULL,
+    height REAL NOT NULL, airtime REAL, PRIMARY KEY(owner, session_id)
+);
+CREATE INDEX IF NOT EXISTS records_by_spot ON records(spot_id, started_at);
+CREATE TABLE IF NOT EXISTS record_details(
+    owner TEXT NOT NULL, session_id TEXT NOT NULL, distance REAL, kite TEXT, board TEXT,
+    PRIMARY KEY(owner, session_id),
+    FOREIGN KEY(owner, session_id) REFERENCES records(owner, session_id) ON DELETE CASCADE
+);
 """
 
 
@@ -38,6 +59,11 @@ def publication(raw):
             raise ValueError("Invalid count")
         cleaned[key] = value
     result = {"name": name, "totals": cleaned}
+    if raw.get("username") is not None:
+        handle = raw["username"]
+        if not isinstance(handle, str) or not re.fullmatch(r"[a-z0-9_]{3,24}", handle):
+            raise ValueError("Invalid username")
+        result["username"] = handle
     if raw.get("bio") is not None:
         bio = raw["bio"]
         if not isinstance(bio, str) or len(bio) > 160:
@@ -54,15 +80,145 @@ def publication(raw):
 
 def state(db, owner):
     def entry(row):
-        return dict(id=row[0], profile=json.loads(row[1]), followers=row[2], following=bool(row[3]))
+        return dict(id=row[0], profile=json.loads(row[1]), followers=row[2],
+                    following=bool(row[3]), followingCount=row[4])
 
     query = """SELECT p.id,p.document,
         (SELECT count(*) FROM follows f WHERE f.target=p.id),
-        EXISTS(SELECT 1 FROM follows f WHERE f.owner=? AND f.target=p.id)
+        EXISTS(SELECT 1 FROM follows f WHERE f.owner=? AND f.target=p.id),
+        (SELECT count(*) FROM follows f WHERE f.owner=p.id AND EXISTS (
+            SELECT 1 FROM profiles following WHERE following.id=f.target))
         FROM profiles p """
     mine = db.execute(query + "WHERE p.id=?", (owner, owner)).fetchone()
     others = db.execute(query + "WHERE p.id<>? ORDER BY p.rowid DESC LIMIT 40", (owner, owner))
     return {"mine": entry(mine) if mine else None, "riders": [entry(row) for row in others]}
+
+
+def read_json(env, limit):
+    length = int(env.get("CONTENT_LENGTH") or 0)
+    if not 0 < length <= limit:
+        raise ValueError("invalid request size")
+    return json.loads(env["wsgi.input"].read(length))
+
+
+def identifier(value):
+    if not isinstance(value, str):
+        raise ValueError("invalid ID")
+    return str(UUID(value))
+
+
+def number(value, lower, upper):
+    return type(value) in (int, float) and lower <= value <= upper
+
+
+def score_rows(items):
+    if not isinstance(items, list) or len(items) > 5000:
+        raise ValueError("invalid records")
+    normalized = {}
+    for item in items:
+        if not isinstance(item, dict):
+            raise ValueError("invalid record")
+        key = identifier(item.get("id"))
+        spot_id = identifier(item["spotID"]) if item.get("spotID") is not None else None
+        spot = item.get("spot")
+        if spot is not None and (not isinstance(spot, str) or len(spot) > 100):
+            raise ValueError("invalid spot")
+        started, height, airtime = item.get("startedAt"), item.get("height"), item.get("airtime")
+        if not number(started, 0, 4e9) or not number(height, 0.01, 100):
+            raise ValueError("invalid jump")
+        if airtime is not None and not number(airtime, 0.01, 120):
+            raise ValueError("invalid airtime")
+        distance = item.get("distance")
+        if distance is not None and not (number(distance, 0, 100000) and distance > 0):
+            raise ValueError("invalid flight distance")
+        kite, board = item.get("kite"), item.get("board")
+        if any(label is not None and (not isinstance(label, str) or len(label) > 255) for label in (kite, board)):
+            raise ValueError("invalid equipment")
+        normalized[key] = (key, spot_id, spot.strip().casefold() if spot else None, started, height, airtime,
+                           distance, kite.strip() if kite else None, board.strip() if board else None)
+    return list(normalized.values())
+
+
+def post_fields(raw, target):
+    if not isinstance(raw, dict) or identifier(raw.get("id")) != target:
+        raise ValueError("invalid post")
+    caption, location, photo = raw.get("caption"), raw.get("location"), raw.get("photo")
+    if not isinstance(caption, str) or len(caption) > 800 or not isinstance(photo, str):
+        raise ValueError("invalid caption or photo")
+    image = base64.b64decode(photo, validate=True)
+    if not 3 < len(image) <= 390000 or not image.startswith(b"\xff\xd8\xff"):
+        raise ValueError("invalid post photo")
+    if location is not None:
+        if not isinstance(location, dict) or not isinstance(location.get("name"), str):
+            raise ValueError("invalid geotag")
+        name = location["name"].strip()
+        lat, lon = location.get("latitude"), location.get("longitude")
+        if not 1 <= len(name) <= 100 or ((lat is not None or lon is not None)
+                                       and not (number(lat, -90, 90) and number(lon, -180, 180))):
+            raise ValueError("invalid geotag")
+        location = json.dumps({"name": name, "latitude": lat, "longitude": lon}, ensure_ascii=False)
+    return caption.strip(), location, image
+
+
+def feed(db, owner, following):
+    relation = "EXISTS" if following else "NOT EXISTS"
+    query = f"""SELECT p.id,p.created_at,p.caption,p.location,r.document
+        FROM posts p JOIN profiles r ON r.id=p.owner
+        WHERE p.owner<>? AND {relation}(SELECT 1 FROM follows f WHERE f.owner=? AND f.target=p.owner)
+        ORDER BY p.created_at DESC,p.id LIMIT 40"""
+    entries = []
+    for post_id, created_at, caption, location, document in db.execute(query, (owner, owner)):
+        author = json.loads(document)
+        entries.append({"post": {"id": post_id, "createdAt": created_at, "caption": caption, "published": True,
+                                 "location": json.loads(location) if location else None},
+                        "author": author["name"], "username": author.get("username")})
+    return entries
+
+
+def top_rows(db, raw):
+    columns = {"height": "r.height", "airtime": "r.airtime", "distance": "d.distance"}
+    if not isinstance(raw, dict) or not isinstance(raw.get("metric"), str) or raw["metric"] not in columns:
+        raise ValueError("invalid metric")
+    metric = raw["metric"]
+    selected = columns[metric]
+    start_at, end_at = raw.get("startAt"), raw.get("endAt")
+    days = raw.get("days")
+    if start_at is not None or end_at is not None:
+        if not (number(start_at, 0, 4e9) and number(end_at, 0, 4e9) and start_at < end_at):
+            raise ValueError("invalid period")
+    elif days is not None:
+        if type(days) is not int or days not in (7, 30):
+            raise ValueError("invalid period")
+        start_at, end_at = time.time() - days * 86400, 4e9
+    else:
+        start_at, end_at = 0, 4e9
+
+    spot_id = identifier(raw["spotID"]) if raw.get("spotID") is not None else None
+    spot = raw.get("spot")
+    if spot is not None and (not isinstance(spot, str) or len(spot) > 100):
+        raise ValueError("invalid spot")
+    name = spot.strip().casefold() if spot else None
+    query = f"""WITH ranked AS (
+        SELECT p.id,p.document,r.height,r.airtime,d.distance,d.kite,d.board,
+               ROW_NUMBER() OVER (PARTITION BY r.owner ORDER BY {selected} DESC,r.started_at DESC,r.session_id) AS place
+        FROM records r JOIN profiles p ON p.id=r.owner
+        LEFT JOIN record_details d ON d.owner=r.owner AND d.session_id=r.session_id
+        WHERE r.started_at>=? AND r.started_at<? AND {selected} IS NOT NULL
+          AND ((? IS NULL AND ? IS NULL) OR r.spot_id=?
+               OR ((r.spot_id IS NULL OR ? IS NULL) AND r.spot_name=?))
+        )
+        SELECT id,document,height,airtime,distance,kite,board FROM ranked
+        WHERE place=1 ORDER BY {metric} DESC,id LIMIT 50"""
+    rows = db.execute(query, (start_at, end_at, spot_id, name, spot_id, spot_id, name))
+    output = []
+    for index, (owner, doc, height, airtime, distance, kite, board) in enumerate(rows):
+        profile = json.loads(doc)
+        entry = {"id": owner, "name": profile["name"], "username": profile.get("username"),
+                 "height": height, "airtime": airtime, "distance": distance}
+        if index < 3:
+            entry.update(avatar=profile.get("avatar"), kite=kite, board=board)
+        output.append(entry)
+    return output
 
 
 def route_query(raw, api_key):
@@ -116,11 +272,27 @@ def application(env, start_response):
                                 ("Cache-Control", "no-store"), ("Content-Length", str(len(data)))])
         return [data]
 
+    path, method = env.get("PATH_INFO", ""), env.get("REQUEST_METHOD", "")
+    photo_path = re.fullmatch(r"/posts/([a-fA-F0-9-]{36})/photo", path)
+    if method == "GET" and photo_path:
+        try:
+            post_id = identifier(photo_path[1])
+        except ValueError:
+            return send("404 Not Found", {"error": "unknown photo"})
+        with closing(sqlite3.connect(os.environ.get("RIDER_DB", "rider-profiles.sqlite3"), timeout=5)) as db:
+            db.executescript(SCHEMA)
+            row = db.execute("SELECT s.photo FROM posts s JOIN profiles p ON p.id=s.owner WHERE s.id=?", (post_id,)).fetchone()
+        if row is None:
+            return send("404 Not Found", {"error": "unknown photo"})
+        photo, = row
+        start_response("200 OK", [("Content-Type", "image/jpeg"), ("Content-Length", str(len(photo))),
+                                  ("Cache-Control", "no-store"), ("X-Content-Type-Options", "nosniff")])
+        return [photo]
+
     auth = re.fullmatch(r"Bearer ([a-fA-F0-9-]{72})", env.get("HTTP_AUTHORIZATION", ""))
     if not auth:
         return send("401 Unauthorized", {"error": "authentication required"})
     owner = hashlib.sha256(auth[1].encode("ascii")).hexdigest()
-    path, method = env.get("PATH_INFO", ""), env.get("REQUEST_METHOD", "")
     if (path, method) == ("/route-eta", "POST"):
         api_key = os.environ.get("RIDER_YANDEX_ROUTING_KEY")
         if not api_key:
@@ -144,14 +316,30 @@ def application(env, start_response):
         with db:
             if (path, method) == ("/me", "PUT"):
                 try:
-                    length = int(env.get("CONTENT_LENGTH") or 0)
-                    if not 0 < length <= 150000:
-                        return send("413 Payload Too Large", {"error": "profile size"})
-                    doc = publication(json.loads(env["wsgi.input"].read(length)))
+                    raw = read_json(env, 1500000)
+                    doc = publication(raw)
+                    scores = score_rows(raw["records"]) if "records" in raw else None
                 except (ValueError, TypeError, OverflowError, RecursionError):
                     return send("400 Bad Request", {"error": "invalid profile"})
+                db.execute("BEGIN IMMEDIATE")
+                handle = doc.get("username")
+                if handle and db.execute("SELECT 1 FROM handles WHERE username=? AND owner<>?", (handle, owner)).fetchone():
+                    return send("409 Conflict", {"error": "username taken"})
+                if scores is None and "username" not in raw:
+                    saved_handle = db.execute("SELECT username FROM handles WHERE owner=?", (owner,)).fetchone()
+                    if saved_handle:
+                        handle = doc["username"] = saved_handle[0]
                 db.execute("INSERT INTO profiles VALUES (?,?) ON CONFLICT(id) DO UPDATE SET document=excluded.document",
                            (owner, json.dumps(doc)))
+                db.execute("DELETE FROM handles WHERE owner=?", (owner,))
+                if handle:
+                    db.execute("INSERT INTO handles VALUES (?,?)", (handle, owner))
+                if scores is not None:
+                    db.execute("DELETE FROM records WHERE owner=?", (owner,))
+                    db.executemany("INSERT INTO records VALUES (?,?,?,?,?,?,?)",
+                                   ((owner, *row[:6]) for row in scores))
+                    db.executemany("INSERT INTO record_details VALUES (?,?,?,?,?)",
+                                   ((owner, row[0], *row[6:]) for row in scores))
             elif (path, method) == ("/me", "DELETE"):
                 db.execute("DELETE FROM profiles WHERE id=?", (owner,))
             elif path.startswith("/follow/") and method in ("PUT", "DELETE"):
@@ -162,6 +350,32 @@ def application(env, start_response):
                     db.execute("INSERT OR IGNORE INTO follows VALUES (?,?)", (owner, target))
                 else:
                     db.execute("DELETE FROM follows WHERE owner=? AND target=?", (owner, target))
+            elif method == "GET" and path in ("/feed/following", "/feed/recommended"):
+                return send("200 OK", feed(db, owner, following=path.endswith("/following")))
+            elif (path, method) == ("/tops", "POST"):
+                try:
+                    rows = top_rows(db, read_json(env, 4096))
+                except (ValueError, RecursionError):
+                    return send("400 Bad Request", {"error": "invalid filters"})
+                return send("200 OK", rows)
+            elif path.startswith("/posts/") and method in ("PUT", "DELETE"):
+                try:
+                    post_id = identifier(path.removeprefix("/posts/"))
+                    fields = post_fields(read_json(env, 560000), post_id) if method == "PUT" else None
+                except (ValueError, TypeError, RecursionError):
+                    return send("400 Bad Request", {"error": "invalid post"})
+                if fields is None:
+                    db.execute("DELETE FROM posts WHERE id=? AND owner=?", (post_id, owner))
+                    return send("200 OK", {"deleted": True})
+                db.execute("BEGIN IMMEDIATE")
+                if not db.execute("SELECT 1 FROM profiles WHERE id=?", (owner,)).fetchone():
+                    return send("403 Forbidden", {"error": "publish a profile first"})
+                affected = db.execute("""INSERT INTO posts VALUES (?,?,?,?,?,?)
+                    ON CONFLICT(id) DO UPDATE SET caption=excluded.caption,location=excluded.location,photo=excluded.photo
+                    WHERE posts.owner=excluded.owner""", (post_id, owner, time.time(), *fields))
+                if not affected.rowcount:
+                    return send("409 Conflict", {"error": "post ID is taken"})
+                return send("200 OK", {"published": True})
             elif (path, method) != ("/riders", "GET"):
                 return send("404 Not Found", {"error": "unknown endpoint"})
         return send("200 OK", state(db, owner))

@@ -61,6 +61,47 @@ import FoundationXML
               profileBadges.first(where: { $0.id == "ten-hours" })?.progress == 1 &&
               profileBadges.first(where: { $0.id == "fifty-hours" })?.unlocked == false,
               "Unlock achievements at the exact thresholds and clamp progress")
+        let socialBadges = RiderAchievement.milestones(profileTotals, followers: 10)
+        let followerBadge = socialBadges.first { $0.id == "ten-followers" }
+        check(socialBadges.count == 10 && followerBadge?.unlocked == true &&
+              socialBadges.first { $0.id == "fifty-followers" }?.unlocked == false,
+              "Follower awards reflect real counts and leave higher goals locked")
+        check(RiderJumpScore.records(in: [rideForProfile, interruptedRideForProfile, landTestForProfile]).count == 1,
+              "Leaderboard shares measured riding results without report logs or test jumps")
+        let rankingZone = TimeZone(identifier: "Europe/Moscow")!
+        let dateParser = ISO8601DateFormatter()
+        let rankingNow = dateParser.date(from: "2026-01-01T14:15:00+03:00")!
+        let rankingMidnight = dateParser.date(from: "2026-01-01T00:00:00+03:00")!
+        let yesterdayMidnight = dateParser.date(from: "2025-12-31T00:00:00+03:00")!
+        let mondayMidnight = dateParser.date(from: "2025-12-29T00:00:00+03:00")!
+        let nextMonthMidnight = dateParser.date(from: "2026-02-01T00:00:00+03:00")!
+        let todayInterval = RiderTopPeriod.today.interval(at: rankingNow, timeZone: rankingZone)
+        let yesterdayInterval = RiderTopPeriod.yesterday.interval(at: rankingNow, timeZone: rankingZone)
+        check(todayInterval?.start == rankingMidnight && yesterdayInterval?.start == yesterdayMidnight &&
+              yesterdayInterval?.end == rankingMidnight && RiderTopPeriod.all.interval(at: rankingNow) == nil,
+              "The leaderboard uses full local days, not rolling 24-hour windows")
+        check(RiderTopPeriod.week.interval(at: rankingNow, timeZone: rankingZone)?.start == mondayMidnight &&
+              RiderTopPeriod.month.interval(at: rankingNow, timeZone: rankingZone)?.end == nextMonthMidnight,
+              "Use Monday and calendar month boundaries even across New Year")
+
+        var shortHighRide = rideForProfile
+        shortHighRide.setup?.selectKite("XR8", area: 9)
+        shortHighRide.setup?.selectBoard(BoardSelection(brand: "CORE", model: "Fusion", size: "137 см")!)
+        let recordKey = SessionReview.key(for: event, version: JumpDetector.version)
+        shortHighRide.liveJumpEstimates?[recordKey] = LiveJumpEstimate(heightMeters: 8, airtimeSeconds: 3, distanceMeters: 18)
+        var longLowerRide = rideForProfile
+        longLowerRide.id = UUID()
+        longLowerRide.setup?.selectKite("Rebel", area: 12)
+        longLowerRide.liveJumpEstimates?[recordKey] = LiveJumpEstimate(heightMeters: 5, airtimeSeconds: 4, distanceMeters: 36)
+        let eventRecords = RiderJumpScore.records(in: [shortHighRide, longLowerRide, interruptedRideForProfile])
+        let winningHeight = RiderJumpScore.best(for: .height, in: eventRecords)
+        let winningDistance = RiderJumpScore.best(for: .distance, in: eventRecords)
+        check(winningHeight?.kite?.contains("XR8") == true && winningHeight?.board?.contains("Fusion") == true &&
+              winningDistance?.kite?.contains("Rebel") == true && winningDistance?.distance == 36 &&
+              RiderJumpScore.best(for: .airtime, in: eventRecords)?.id == longLowerRide.id,
+              "Select the record session for each metric and keep that session's equipment")
+        check(RiderJumpScore.best(for: .distance, in: RiderJumpScore.records(in: [rideForProfile])) == nil,
+              "A session without measured flight distance cannot enter the distance ranking")
         let smallToss = JumpCandidate(startSeconds: 0, endSeconds: 0.64, minimumLoadG: 0.1,
                                      returnPeakG: 7, maximumRotationRadiansPerSecond: 1)
         let toss = LiveJumpEstimate.phoneToss(smallToss)
@@ -180,6 +221,19 @@ import FoundationXML
               "Preserve a configured shoreline and interpret weather bearings as wind origin")
         check(RiderSpot(name: "Bad", latitude: "91", longitude: "37") == nil &&
               RiderSpot(name: "Bad", latitude: "nan", longitude: "37") == nil, "Invalid coordinates cannot create a spot")
+        var oldPlacement = SessionSetup(sport: .kite, placement: .waist)
+        check(oldPlacement.placement == .waist && oldPlacement.forRecording.placement == .chest,
+              "New recordings always use chest placement while saved history retains its placement")
+        oldPlacement = gearPreset.applying(to: oldPlacement)
+        oldPlacement.clearEquipment()
+        check(oldPlacement.kiteTitle.isEmpty && oldPlacement.boardTitle.isEmpty &&
+              oldPlacement.kiteAreaSquareMeters == nil && oldPlacement.boardDetails == nil,
+              "Removing the preset clears both equipment fields and their metadata")
+        let enteredWind = SessionWind(knots: 13.5 / SessionWind.metersPerSecondPerKnot, direction: 135,
+                                      date: origin, source: "Вручную", range: .twelveToFifteen)
+        let savedWindRange = try JSONDecoder().decode(SessionWind.self, from: JSONEncoder().encode(enteredWind))
+        check(savedWindRange.title == "12–15 м/с · ЮВ" && savedWindRange.range?.midpoint == 13.5,
+              "Show the selected manual wind range after reloading a session")
         let legacyWind = SessionWind(knots: 10, direction: 315, date: Date(), source: "test")
         check(legacyWind.title.contains("м/с") && legacyWind.title.contains("СЗ") &&
               abs(legacyWind.knots * SessionWind.metersPerSecondPerKnot - 5.14444) < 0.001, "Display historic wind in m/s, from NW")
