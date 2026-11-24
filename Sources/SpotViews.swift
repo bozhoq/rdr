@@ -380,15 +380,8 @@ private struct BestSpotsToday: View {
 
     private struct Ranked: Identifiable {
         let spot: RiderSpot
-        let window: SpotForecast.Window
-        let zone: String
+        let day: SpotForecast.Day
         var id: UUID { spot.id }
-        var timeLabel: String {
-            let clock = DateFormatter()
-            clock.timeZone = TimeZone(identifier: zone)
-            clock.dateFormat = "HH:mm"
-            return clock.string(from: window.first.time) + "–" + clock.string(from: window.second.time.addingTimeInterval(3600))
-        }
     }
 
     var body: some View {
@@ -403,28 +396,33 @@ private struct BestSpotsToday: View {
             } else if loading {
                 ProgressView("Сравниваем прогнозы")
             } else {
+                if let best = results.first {
+                    Text(SpotForecast.Day.description(for: best.day.meanWind))
+                        .font(.headline).foregroundStyle(RiderTheme.accent)
+                }
                 ForEach(results) { item in
                     NavigationLink {
                         SpotDetailView(recorder: recorder, original: item.spot, goToRecording: goToRecording)
                     } label: {
                         VStack(alignment: .leading, spacing: 5) {
                             Text(item.spot.name).font(.headline)
-                            Text(item.timeLabel + (item.spot.areaOnly == true ? " · ориентир района" : "")).font(.subheadline)
-                            let hour = item.window.first
-                            Text(metric(hour.speed * SessionWind.metersPerSecondPerKnot, unit: "м/с") + " " + SpotForecast.compass(hour.direction) + " " + SpotForecast.windArrow(hour.direction))
-                            Text("Порывы до " + metric(max(hour.gust ?? 0, item.window.second.gust ?? 0) * SessionWind.metersPerSecondPerKnot, unit: "м/с") + " · " + metric(hour.temperature, unit: "°C", digits: 0)).font(.caption)
-                            Label(hour.condition.name, systemImage: hour.condition.icon).font(.caption)
+                            Text("Средний ветер " + metric(item.day.meanWind, unit: "м/с", digits: 1)).font(.subheadline)
+                            Text(SpotForecast.Day.description(for: item.day.meanWind)).font(.caption)
+                            Text("Порывы до " + metric(item.day.maxGust, unit: "м/с") + " · " + metric(item.day.meanTemperature, unit: "°C", digits: 0)).font(.caption)
+                            Text("07:00–20:00 · часов с прогнозом \(item.day.hours) из 14").font(.caption)
+                            if item.day.thunder { Label("В прогнозе гроза", systemImage: "cloud.bolt.rain").font(.caption) }
+                            if item.spot.areaOnly == true { Text("Ориентир района").font(.caption) }
                         }
                     }
                 }
                 if results.isEmpty {
-                    Text(checked == 0 ? "Прогнозы не загрузились." : "На сегодня подходящих двухчасовых окон не найдено.")
+                    Text(checked == 0 ? "Прогнозы не загрузились." : "Нет почасовых данных о ветре за 07:00–20:00.")
                 }
                 Text("Прогноз получен для \(checked) из \(total) спотов").font(.footnote)
                 Button("Обновить прогноз") { revision += 1 }
             }
             DisclosureGroup("Как выбираем") {
-                Text("Сравниваем оставшиеся светлые часы по местному времени. Выше места с ровным ветром около 9 м/с, меньшими порывами, более тёплым воздухом и без дождя. Для сравнения нужны два часа подряд. Гроза и сильные порывы исключают окно. Направление относительно берега и местные ограничения проверьте на месте.")
+                Text("Сравниваем средний ветер по доступным часам с 07:00 до 20:00 включительно по местному времени спота. Выше спот с более сильным средним ветром. При равенстве выбираем более полный прогноз. Порывы и грозы указаны отдельно.")
             }
             Link("Прогноз Open-Meteo", destination: URL(string: "https://open-meteo.com/")!)
         }
@@ -473,16 +471,18 @@ private struct BestSpotsToday: View {
                 for await (spot, data) in group {
                     guard let data else { continue }
                     fetched += 1
-                    if let window = data.bestWindow(today: now) {
-                        ranks.append(Ranked(spot: spot, window: window, zone: data.timezone))
+                    if let day = data.daySummary(today: now) {
+                        ranks.append(Ranked(spot: spot, day: day))
                     }
                 }
             }
         }
         guard !Task.isCancelled else { return }
         let sorted = ranks.sorted {
-            if $0.window.score == $1.window.score { return $0.spot.name < $1.spot.name }
-            return $0.window.score > $1.window.score
+            if $0.day.meanWind != $1.day.meanWind { return $0.day.meanWind > $1.day.meanWind }
+            if $0.day.hours != $1.day.hours { return $0.day.hours > $1.day.hours }
+            if $0.spot.name != $1.spot.name { return $0.spot.name < $1.spot.name }
+            return $0.id.uuidString < $1.id.uuidString
         }
         results = Array(sorted.prefix(3))
         checked = fetched

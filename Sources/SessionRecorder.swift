@@ -50,28 +50,6 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
     private var lastLocationTimestamp: Date?
     private var routeFilter = RouteFilter()
     private var ridingDetector = RidingJumpDetector()
-    private var floorReference: VerticalTrajectory.FloorReference?
-    @Published private(set) var floorMessage: String?
-
-    func markFloor(height: Double?) -> Bool {
-        guard let height, (0...3).contains(height), let last = verticalSamples.last, let origin = motionTimeOrigin,
-              abs(ProcessInfo.processInfo.systemUptime - origin - last.time) <= 0.12 else {
-            floorMessage = "Нужна отметка от 0 до 3 м и работающий датчик движения."
-            return false
-        }
-        let quiet = verticalSamples.suffix(50)
-        guard let first = quiet.first, last.time - first.time >= 0.35, last.time - first.time <= 0.8,
-              quiet.allSatisfy({ abs($0.acceleration) < 0.8 }),
-              zip(quiet, quiet.dropFirst()).allSatisfy({ pair in pair.1.time - pair.0.time <= 0.05 && pair.1.time > pair.0.time }) else {
-            floorMessage = "Удерживайте телефон неподвижно на выбранной высоте и повторите."
-            return false
-        }
-        floorReference = .init(time: last.time, meters: height)
-        floorMessage = "Отметка принята. Выполните один прыжок в течение 8 с."
-        recordEvent("floorReference", detail: String(height))
-        return true
-    }
-
     private var verticalSamples: [VerticalTrajectory.Sample] = []
     private var lastMarkerAt: ContinuousClock.Instant?
     private var calibrationStartedAt: ContinuousClock.Instant?
@@ -369,8 +347,6 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
         routeFilter = RouteFilter()
         if let data = try? JSONEncoder().encode(draftSetup.cleaned) { UserDefaults.standard.set(data, forKey: "rider.sessionSetup") }
         ridingDetector = RidingJumpDetector()
-        floorReference = nil
-        floorMessage = nil
         verticalSamples.removeAll(keepingCapacity: true)
         lastMarkerAt = nil
         motionIsRecent = false
@@ -757,14 +733,8 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
             pendingRides.removeFirst()
             let peak = VerticalTrajectory.flightPeak(flight.event, samples: verticalSamples,
                                                    levelLandingCheck: flight.levelLandingHeight)
-            var estimate = LiveJumpEstimate.riding(flight, altitude: recentAltitude, gps: recentFixes,
+            let estimate = LiveJumpEstimate.riding(flight, altitude: recentAltitude, gps: recentFixes,
                                                    motionClock: motionClock, motionPeak: peak)
-            if let ref = floorReference, flight.event.startSeconds >= ref.time {
-                estimate.floorReferenceMeters = ref.meters
-                estimate.floorPeakMeters = VerticalTrajectory.floorPeak(flight.event, from: ref, samples: verticalSamples)
-                floorMessage = estimate.floorPeakMeters == nil ? "Над полом — нет надёжной оценки. Для следующей попытки задайте отметку." : "Замер сохранён. Для следующей попытки задайте отметку."
-                floorReference = nil
-            }
             if estimate.heightMeters == nil {
                 try log.append("event", SessionEvent(name: "jumpHeightUnavailable", batteryPercent: batteryPercent,
                                                      detail: "pressureOrTrajectoryInsufficient"))
@@ -778,11 +748,9 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
         let key = SessionReview.key(for: event, version: session.jumpAnalysis?.detectorVersion ?? JumpDetector.version)
         try log.append("liveJumpEstimate", JumpEstimateEntry(startSeconds: event.startSeconds, endSeconds: event.endSeconds, estimate: estimate))
         session.liveJumpEstimates?[key] = estimate
-        let jumpPhrase = estimate.heightMeters.flatMap(LiveJumpEstimate.spokenHeight)
+        let phrase = estimate.heightMeters.flatMap(LiveJumpEstimate.spokenHeight)
             .map { estimate.assumesLevelLanding == true || estimate.inertialLift == true ? "Примерно \($0)" : $0 }
             ?? (session.recordingMode == .battle ? "Прыжок" : nil)
-        let phrase = estimate.floorReferenceMeters == nil ? jumpPhrase : (estimate.floorPeakMeters.flatMap(LiveJumpEstimate.spokenHeight)
-            .map { "Над полом примерно " + $0 } ?? "Высота над полом неизвестна")
         if speak, voiceEnabled, let phrase {
             let utterance = AVSpeechUtterance(string: phrase)
             utterance.voice = AVSpeechSynthesisVoice(language: "ru-RU")

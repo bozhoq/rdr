@@ -72,7 +72,6 @@ private struct RecordingView: View {
     @State private var device = RecordingDevice.phone
     @State private var gear: GearField?
     @State private var newGPSPoint = false
-    @State private var floorHeight = "0"
     @State private var showingTools = false
     @State private var confirmingStop = false
     @State private var showingSensorCheck = false
@@ -381,14 +380,6 @@ private struct RecordingView: View {
     private func tools(_ session: SessionSummary) -> some View {
         NavigationStack {
             Form {
-                Section("Телефон над полом") {
-                    Text("Удерживайте телефон неподвижно на полу или на известной отметке шкалы. Укажите высоту телефона в метрах. После отметки выполните один прыжок в течение 8 с и остановитесь.")
-                    TextField("Начальная высота, м", text: $floorHeight).keyboardType(.decimalPad)
-                    Button("Запомнить отметку") {
-                        if recorder.markFloor(height: Double(floorHeight.replacingOccurrences(of: ",", with: "."))) { showingTools = false }
-                    }
-                    if let message = recorder.floorMessage { Text(message).font(.footnote) }
-                }
                 Section("Калибровка телефона") {
                     if let calibration = session.motionCalibration {
                         if session.reusedMotionCalibration == true {

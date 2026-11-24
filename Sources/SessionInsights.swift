@@ -297,23 +297,13 @@ struct SpotForecast: Decodable {
             }
         }
 
-        var rankingScore: Double? {
-            guard daylight == true, let code = weatherCode, [0,1,2,3,51,53,55,61,63,80].contains(code),
-                  let gust, let temperature, let direction, (0...360).contains(direction) else { return nil }
-            let wind = speed * SessionWind.metersPerSecondPerKnot
-            let peak = gust * SessionWind.metersPerSecondPerKnot
-            guard (5...15).contains(wind), peak <= 19, peak <= wind * 1.65 else { return nil }
-            return 100 - 4 * abs(wind - 9) - 4 * max(0, peak - wind)
-                - min(20, max(0, 17 - temperature)) - (code >= 51 ? 12 : 0)
-        }
-
     }
 
     private struct Hourly: Decodable {
         let time: [Double]
         let speed: [Double?]
-        let gust: [Double?]
-        let direction: [Double?]
+        let gust: [Double?]?
+        let direction: [Double?]?
         let temperature: [Double?]?
         let weatherCode: [Int?]?
         let isDay: [Int?]?
@@ -339,7 +329,7 @@ struct SpotForecast: Decodable {
             URLQueryItem(name: "longitude", value: String(spot.longitude)),
             URLQueryItem(name: "hourly", value: "wind_speed_10m,wind_gusts_10m,wind_direction_10m,temperature_2m,weather_code,is_day"),
             URLQueryItem(name: "wind_speed_unit", value: "kn"),
-            URLQueryItem(name: "forecast_hours", value: "25"),
+            URLQueryItem(name: "forecast_days", value: "2"),
             URLQueryItem(name: "timezone", value: "auto"),
             URLQueryItem(name: "timeformat", value: "unixtime")
         ]
@@ -347,6 +337,10 @@ struct SpotForecast: Decodable {
     }
 
     func hours(near now: Date) -> [Hour] {
+        allHours.filter { $0.time.timeIntervalSince(now) > -3600 }
+    }
+
+    private var allHours: [Hour] {
         func value(_ items: [Double?], at i: Int) -> Double? {
             guard items.indices.contains(i), let number = items[i], number.isFinite, number >= 0 else { return nil }
             return number
@@ -354,11 +348,10 @@ struct SpotForecast: Decodable {
         return hourly.time.enumerated().compactMap { index, timestamp in
             guard timestamp.isFinite, let speed = value(hourly.speed, at: index) else { return nil }
             let time = Date(timeIntervalSince1970: timestamp)
-            guard time.timeIntervalSince(now) > -3600 else { return nil }
             let temperatures = hourly.temperature ?? []
             let temperature = temperatures.indices.contains(index) ? temperatures[index] : nil
-            return Hour(time: time, speed: speed, gust: value(hourly.gust, at: index),
-                        direction: value(hourly.direction, at: index), temperature: temperature,
+            return Hour(time: time, speed: speed, gust: value(hourly.gust ?? [], at: index),
+                        direction: value(hourly.direction ?? [], at: index), temperature: temperature,
                         weatherCode: hourly.weatherCode.flatMap { $0.indices.contains(index) ? $0[index] : nil },
                         daylight: hourly.isDay.flatMap { $0.indices.contains(index) ? $0[index] : nil }.map { $0 == 1 })
         }.sorted { $0.time < $1.time }
@@ -369,24 +362,38 @@ struct SpotForecast: Decodable {
         return ["↓","↙","←","↖","↑","↗","→","↘"][Int((direction / 45).rounded()) % 8]
     }
 
-    struct Window {
-        let first: Hour
-        let second: Hour
-        let score: Double
+    struct Day {
+        let meanWind: Double
+        let maxGust: Double?
+        let meanTemperature: Double?
+        let thunder: Bool
+        let hours: Int
+
+        static func description(for speed: Double) -> String {
+            switch speed {
+            case ..<6: return "Подходящего ветра нет"
+            case ..<8: return "Обнаружен лайтвинд"
+            case ..<10: return "Обнаружен средний ветер"
+            default: return "Обнаружен сильный ветер"
+            }
+        }
     }
 
-    func bestWindow(today now: Date) -> Window? {
+    func daySummary(today now: Date) -> Day? {
         guard let zone = TimeZone(identifier: timezone) else { return nil }
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = zone
-        let hours = hours(near: now).filter { calendar.isDate($0.time, inSameDayAs: now) }
-        var best: Window?
-        for (a, b) in zip(hours, hours.dropFirst()) {
-            guard b.time.timeIntervalSince(a.time) == 3600, let aScore = a.rankingScore, let bScore = b.rankingScore else { continue }
-            let score = (aScore + bScore) / 2
-            if score > (best?.score ?? -.infinity) { best = Window(first: a, second: b, score: score) }
+        let hours = allHours.filter {
+            calendar.isDate($0.time, inSameDayAs: now) && (7...20).contains(calendar.component(.hour, from: $0.time))
         }
-        return best
+        guard !hours.isEmpty else { return nil }
+        let scale = SessionWind.metersPerSecondPerKnot
+        let temps = hours.compactMap(\.temperature)
+        return Day(meanWind: hours.reduce(0) { $0 + $1.speed } * scale / Double(hours.count),
+                   maxGust: hours.compactMap(\.gust).max().map { $0 * scale },
+                   meanTemperature: temps.isEmpty ? nil : temps.reduce(0,+) / Double(temps.count),
+                   thunder: hours.contains { [95, 96, 99].contains($0.weatherCode ?? -1) },
+                   hours: hours.count)
     }
 
     static func compass(_ direction: Double?) -> String {
@@ -751,39 +758,6 @@ struct VerticalTrajectory {
             }
         }
         return nil
-    }
-
-    struct FloorReference {
-        let time: Double
-        let meters: Double
-    }
-
-    static func floorPeak(_ event: JumpCandidate, from reference: FloorReference, samples: [Sample]) -> Double? {
-        let start = event.startSeconds, end = event.endSeconds
-        guard (0...3).contains(reference.meters), reference.time <= start, start < end,
-              end - reference.time <= 8,
-              let right = anchor(samples.filter { $0.time > end && $0.time <= end + 2 }, nearTakeoff: false) else { return nil }
-        let track = samples.filter { $0.time >= reference.time && $0.time <= right }
-        guard track.first?.time == reference.time, track.last?.time == right else { return nil }
-        var path = Self()
-        var air: [(Double, Double)] = []
-        for (a,b) in zip(track, track.dropFirst()) {
-            let dt = b.time - a.time
-            guard dt > 0, dt <= 0.05, a.acceleration.isFinite, b.acceleration.isFinite else { return nil }
-            path.advance(acceleration: (a.acceleration + b.acceleration) / 2, interval: dt)
-            if (start...end).contains(b.time) { air.append((b.time, path.height)) }
-        }
-        let duration = right - reference.time
-        guard abs(path.velocity) <= 0.45, abs(path.velocity * duration / 2) <= 0.40,
-              air.first?.0 == start, air.last?.0 == end else { return nil }
-        let levels = air.map { (t,h) in
-            reference.meters + h - path.velocity * pow(t - reference.time, 2) / (2 * duration)
-        }
-        guard let i = levels.indices.max(by: { levels[$0] < levels[$1] }),
-              (0.08...0.92).contains((air[i].0 - start) / (end - start)),
-              levels[i] > (levels.first ?? 0) + 0.04, levels[i] > (levels.last ?? 0) + 0.04,
-              (0.06...35).contains(levels[i]) else { return nil }
-        return levels[i]
     }
 
     static func flightPeak(_ event: JumpCandidate, samples: [Sample], levelLandingCheck: Double? = nil) -> Peak? {
