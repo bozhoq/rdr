@@ -131,6 +131,13 @@ import FoundationXML
         check(spot.name == "Тестовый спот" && spot.latitude == 55.75 && spot.longitude == 37.62, "Parse decimal commas in spot coordinates")
         check(RiderSpot(name: "Bad", latitude: "91", longitude: "37") == nil &&
               RiderSpot(name: "Bad", latitude: "nan", longitude: "37") == nil, "Invalid coordinates cannot create a spot")
+        let grouped = StarterSpots.decode([["id": spot.id.uuidString, "name": "Каталог", "latitude": 55.75,
+                                            "longitude": 37.62, "region": "Регион", "locality": "Берег", "areaOnly": true] as [String: Any]])
+        check(StarterSpots.merge(saved: [spot], catalogue: grouped).first?.region == "Регион" &&
+              StarterSpots.merge(saved: [spot], catalogue: grouped).first?.name == spot.name,
+              "Attach catalogue hierarchy to saved ID while keeping user edits")
+        check(BoardCatalog.brands.contains { $0.matches("Молоков") && $0.models.contains { $0.name == "Splash" } },
+              "Find Russian board makers by Cyrillic spelling")
         var setupWithSpot = SessionSetup(sport: .kite)
         setupWithSpot.selectSpot(spot)
         let renamed = RiderSpot(id: spot.id, name: "Новое имя", latitude: "55.75", longitude: "37.62")!
@@ -150,9 +157,9 @@ import FoundationXML
               "The starter catalogue preserves existing saved spots and IDs")
         let entry: [[String: Any]] = [["id": spot.id.uuidString, "name": spot.name,
                                       "latitude": spot.latitude, "longitude": spot.longitude,
-                                      "mapLink": "https://yandex.ru/maps/-/test"]]
+                                      "mapLink": "https://yandex.ru/maps/-/test", "source": "https://example.org/spot"]]
         let starter = StarterSpots.decode(entry).first
-        check(starter?.id == spot.id && starter?.yandexURL?.absoluteString == "https://yandex.ru/maps/-/test",
+        check(starter?.source?.absoluteString == "https://example.org/spot" && starter?.id == spot.id && starter?.yandexURL?.absoluteString == "https://yandex.ru/maps/-/test",
               "Decode the bundled starter catalogue and original map link")
         let fixture = #"{"timezone":"Europe/Moscow","hourly":{"time":[1699980000,1700000000,1700003600,1700007200],"wind_speed_10m":[8,12,null,17],"wind_gusts_10m":[10,19,null],"wind_direction_10m":[0,90,null,225],"temperature_2m":[2,-3,null,0]}}"#
         let forecast = try JSONDecoder().decode(SpotForecast.self, from: Data(fixture.utf8))
