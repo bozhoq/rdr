@@ -207,7 +207,6 @@ private struct SpotDetailView: View {
             }.buttonStyle(.borderedProminent).tint(RiderTheme.action)
             Button {
                 recorder.chooseSpot(spot)
-                recorder.recordingMode = .battle
                 goToRecording()
             } label: {
                 Text("Выбрать для записи").frame(maxWidth: .infinity)

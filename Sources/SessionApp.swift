@@ -142,26 +142,14 @@ private struct RecordingView: View {
                 Text("Новая сессия").font(.largeTitle.bold())
 
                 VStack(spacing: 0) {
-                    VStack(spacing: 11) {
-                        Picker("Режим записи", selection: $recorder.recordingMode) {
-                            ForEach(RecordingMode.allCases, id: \.self) { Text($0.title).tag($0) }
-                        }.pickerStyle(.segmented)
-                        if recorder.recordingMode == .battle {
-                            ActivityFields(setup: $recorder.draftSetup, ridingOnly: true)
-                            if recorder.draftSetup.placement == .hand {
-                                Text("В руке измеряется подъём телефона до вершины и возврат.")
-                                    .font(.footnote).foregroundStyle(.secondary)
-                            }
-                        }
-                    }.padding(.vertical, 12)
-                    if recorder.recordingMode == .battle {
-                        Divider()
-                        gearRow(.spot)
-                        Divider()
-                        gearRow(.kite)
-                        Divider()
-                        gearRow(.board)
-                    }
+                    ActivityFields(setup: $recorder.draftSetup, ridingOnly: true)
+                        .padding(.vertical, 12)
+                    Divider()
+                    gearRow(.spot)
+                    Divider()
+                    gearRow(.kite)
+                    Divider()
+                    gearRow(.board)
                 }.lagoonCard()
 
                 VStack(alignment: .leading, spacing: 12) {
@@ -187,10 +175,8 @@ private struct RecordingView: View {
 
                 DisclosureGroup("Настройки записи") {
                     VStack(spacing: 15) {
-                        if recorder.recordingMode == .battle {
-                            Picker("Где телефон", selection: $recorder.draftSetup.placement) {
-                                ForEach(PhonePlacement.allCases, id: \.self) { Text($0.title).tag($0) }
-                            }
+                        Picker("Где телефон", selection: $recorder.draftSetup.placement) {
+                            ForEach(PhonePlacement.allCases.filter { $0 != .hand }, id: \.self) { Text($0.title).tag($0) }
                         }
                         Toggle("Проверить датчики перед записью", isOn: $recorder.recalibrateNextSession)
                         locationControls
@@ -201,9 +187,6 @@ private struct RecordingView: View {
             }.padding(20)
         }
         .background(RiderTheme.canvas.ignoresSafeArea())
-        .onChange(of: recorder.recordingMode, initial: true) { _, mode in
-            if mode == .battle, !recorder.draftSetup.sport.isRiding { recorder.draftSetup.sport = .kite }
-        }
     }
 
     private func requestRecording() {
@@ -705,7 +688,6 @@ struct SessionDetail: View {
         if let setup = session.setup {
             Button("Использовать настройки для следующей сессии") {
                 recorder.reuseSetup(setup)
-                recorder.recordingMode = setup.sport.isRiding ? .battle : .test
                 setupCopied = true
             }.disabled(recorder.live != nil)
             if setupCopied { Text("Настройки выбраны. Откройте вкладку «Запись».").font(.footnote).foregroundStyle(.secondary) }

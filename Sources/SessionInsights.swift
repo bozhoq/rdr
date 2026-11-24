@@ -94,6 +94,13 @@ struct SessionSetup: Codable {
         spot = name
     }
 
+    var forRecording: Self {
+        var next = self
+        if !next.sport.isRiding { next.sport = .kite }
+        if next.placement == .hand { next.placement = .unspecified }
+        return next.cleaned
+    }
+
     var activityTitle: String {
         guard sport.supportsKiteStyle, let kiteStyle else { return sport.title }
         return "\(sport.title) · \(kiteStyle.title)"
@@ -458,16 +465,25 @@ struct LiveJumpEstimate: Codable {
     }
 
     static func riding(_ flight: RidingJumpDetector.Flight, altitude: [AltitudeSample],
-                       gps: [RoutePoint], motionClock: Date?, allowLevelLandingEstimate: Bool = true) -> Self {
+                       gps: [RoutePoint], motionClock: Date?, allowLevelLandingEstimate: Bool = true,
+                       motionPeak: VerticalTrajectory.Peak? = nil) -> Self {
         let event = flight.event
         let start = event.startSeconds, end = event.endSeconds
         let corroborated = ridingHeight(flight, altitude: altitude)
-        let approximate = allowLevelLandingEstimate && corroborated == nil &&
+        // For long arcs require independent pressure support before accepting drift-prone integration.
+        let anchored = motionPeak.flatMap { peak -> VerticalTrajectory.Peak? in
+            if let corroborated {
+                return abs(peak.height - corroborated) <= max(0.25, 0.25 * corroborated) ? peak : nil
+            }
+            return end - start <= 2.5 ? peak : nil
+        }
+        let approximate = anchored == nil && allowLevelLandingEstimate && corroborated == nil &&
             !pressureShowsLevelChange(start: start, end: end, altitude: altitude)
             ? flight.levelLandingHeight : nil
-        return Self(heightMeters: corroborated ?? approximate, airtimeSeconds: event.unloadingSeconds,
+        return Self(heightMeters: anchored?.height ?? corroborated ?? approximate, airtimeSeconds: event.unloadingSeconds,
                     distanceMeters: gpsDistance(start: start, end: end, gps: gps, motionClock: motionClock),
-                    assumesLevelLanding: approximate != nil ? true : nil)
+                    inertialLift: anchored == nil ? nil : true, assumesLevelLanding: approximate == nil ? nil : true,
+                    apexSeconds: anchored?.time)
     }
 
     private static func pressureShowsLevelChange(start: Double, end: Double, altitude: [AltitudeSample]) -> Bool {
@@ -590,6 +606,84 @@ struct LiveJumpEstimate: Codable {
 
 /// Measures a complete vertical excursion of the phone. A stable vertical
 /// velocity supplies an anchor even while the phone moves horizontally.
+/// Integrates gravity-aligned acceleration, retaining the trajectory through its apex.
+/// The hand-lift fixtures and the live rider estimator exercise the same integrator.
+struct VerticalTrajectory {
+    struct Sample {
+        let time: Double
+        let acceleration: Double
+    }
+    struct Peak {
+        let height: Double
+        let time: Double
+    }
+    private(set) var velocity = 0.0
+    private(set) var height = 0.0
+
+    mutating func advance(acceleration: Double, interval: Double) {
+        let next = velocity + acceleration * interval
+        height += (velocity + next) * interval * 0.5
+        velocity = next
+    }
+
+    func correctedHeight(elapsed: Double, duration: Double, residualVelocity: Double, closure: Double) -> Double {
+        let fraction = elapsed / duration
+        return height - residualVelocity * elapsed * fraction * 0.5
+            - closure * fraction * fraction * (3 - 2 * fraction)
+    }
+
+    // Look for a quiet vertical window before the push and after the landing.
+    // Lateral motion is allowed. Never integrate across a missing sensor interval.
+    private static func anchor(_ samples: [Sample], nearTakeoff: Bool) -> Double? {
+        guard !samples.isEmpty else { return nil }
+        let ordered = nearTakeoff ? Array(samples.reversed()) : samples
+        var window: [Sample] = []
+        for sample in ordered {
+            window.append(sample)
+            window.removeAll { abs($0.time - sample.time) > 0.40 }
+            guard let edge = window.first, abs(sample.time - edge.time) >= 0.35, window.count >= 20 else { continue }
+            let n = Double(window.count)
+            let mean = window.reduce(0.0) { $0 + $1.acceleration } / n
+            let power = window.reduce(0.0) { $0 + $1.acceleration * $1.acceleration } / n
+            if abs(mean) <= 0.35 && power < 0.8 * 0.8 {
+                return window[window.count / 2].time
+            }
+        }
+        return nil
+    }
+
+    static func flightPeak(_ event: JumpCandidate, samples: [Sample]) -> Peak? {
+        let start = event.startSeconds, end = event.endSeconds
+        guard start < end, end - start <= 15.5 else { return nil }
+        let nearby = samples.filter { $0.time >= start - 2.5 && $0.time <= end + 2 }
+        guard let left = anchor(nearby.filter { $0.time < start }, nearTakeoff: true),
+              let right = anchor(nearby.filter { $0.time > end }, nearTakeoff: false) else { return nil }
+        let track = nearby.filter { $0.time >= left && $0.time <= right }
+        let duration = right - left
+        var path = Self()
+        var positions: [(time: Double, path: Self)] = []
+        for (a, b) in zip(track, track.dropFirst()) {
+            let dt = b.time - a.time
+            guard dt > 0, dt <= 0.05, a.acceleration.isFinite, b.acceleration.isFinite else { return nil }
+            path.advance(acceleration: (a.acceleration + b.acceleration) * 0.5, interval: dt)
+            if (start...end).contains(b.time) { positions.append((b.time, path)) }
+        }
+        // Both anchors approximate zero vertical speed. Their heights can differ.
+        guard abs(path.velocity) <= 0.45, let takeoff = positions.first, let landing = positions.last,
+              abs(takeoff.time - start) < 0.001, abs(landing.time - end) < 0.001 else { return nil }
+        func level(_ point: (time: Double, path: Self)) -> Double {
+            point.path.correctedHeight(elapsed: point.time - left, duration: duration,
+                                       residualVelocity: path.velocity, closure: 0)
+        }
+        guard let apex = positions.max(by: { level($0) < level($1) }) else { return nil }
+        let height = level(apex) - level(takeoff)
+        let fraction = (apex.time - start) / (end - start)
+        guard (0.06...35).contains(height), (0.08...0.92).contains(fraction),
+              level(apex) - level(landing) >= 0.04 else { return nil }
+        return Peak(height: height, time: apex.time)
+    }
+}
+
 struct MovingHeightDetector {
     enum Phase { case searching, rising, descending, returning }
 
@@ -644,20 +738,15 @@ struct MovingHeightDetector {
             // applying endpoint drift corrections. A shelf ascent fails here.
             let closure = liveHeight - liveVelocity * duration * 0.5
             guard abs(closure) <= 0.4 else { return nil }
-            var velocity = 0.0
-            var height = 0.0
+            var path = VerticalTrajectory()
             var peak = 0.0
             var lowest = 0.0
             var apex = first.time
             for (before, after) in zip(samples, samples.dropFirst()) {
                 let dt = after.time - before.time
-                let next = velocity + ((before.acceleration + after.acceleration) * 0.5 - bias) * dt
-                height += (velocity + next) * 0.5 * dt
-                velocity = next
-                let elapsed = after.time - first.time
-                let fraction = elapsed / duration
-                let corrected = height - liveVelocity * elapsed * fraction * 0.5
-                    - closure * fraction * fraction * (3 - 2 * fraction)
+                path.advance(acceleration: (before.acceleration + after.acceleration) * 0.5 - bias, interval: dt)
+                let corrected = path.correctedHeight(elapsed: after.time - first.time, duration: duration,
+                                                     residualVelocity: liveVelocity, closure: closure)
                 lowest = min(lowest, corrected)
                 if corrected > peak {
                     peak = corrected

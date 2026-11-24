@@ -165,7 +165,7 @@ struct JumpDetector {
 /// Detects a push, ascent, descent and braking as separate phases. A kite jump
 /// can stay loaded in the air, so it never needs a free-fall interval.
 struct RidingJumpDetector {
-    static let version = "ride-6"
+    static let version = "ride-7"
 
     struct Point {
         let time: Double
@@ -374,7 +374,9 @@ struct RidingJumpDetector {
             }
             flight.samples.append(motion)
             flight.minimumLoad = min(flight.minimumLoad, load)
-            if load >= 0.80 {
+            // The pouch can swing laterally in flight. A large total load alone
+            // must not cut off the ascent while the vertical axis is still unloading.
+            if load >= 0.80 && vertical >= -3.0 {
                 flight.landing = time
                 flight.landingLoad = load
                 flight.landingAcceleration = vertical

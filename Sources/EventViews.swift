@@ -197,6 +197,9 @@ struct EventDetailView: View {
         if estimate.assumesLevelLanding == true {
             return "Оценка по движению. Предполагает отрыв и приземление на одной высоте."
         }
+        if estimate.inertialLift == true && session.handSimulationTest != true {
+            return "Высота от отрыва до вершины по вертикальному движению закреплённого телефона."
+        }
         if estimate.inertialLift == true { return "Приблизительная высота по движению телефона." }
         if session.handSimulationTest == true || estimate.isHandLift == true { return "Барометр замеряет подъём телефона и время выше исходного уровня." }
         if estimate.isPhoneToss == true { return "Оценка по времени полёта, если телефон отпустили и поймали примерно на одном уровне." }
