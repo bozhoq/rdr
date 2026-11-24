@@ -41,7 +41,7 @@ struct JumpHistoryTable<Destination: View>: View {
             let estimate = session.liveEstimate(for: event)
             let manualToss = session.handSimulationTest == true ? nil : event.approximateTossHeightMeters(label: label)
             return Row(index: index, event: event, height: estimate?.heightMeters ?? manualToss,
-                       airtime: estimate?.isHandLift == true && session.handSimulationTest != true ? nil : estimate?.airtimeSeconds ?? manualToss.map { _ in event.unloadingSeconds }, distance: estimate?.distanceMeters)
+                       airtime: estimate?.isHandLift == true && session.handSimulationTest != true ? nil : estimate?.reportedAirtime ?? manualToss.map { _ in event.unloadingSeconds }, distance: estimate?.distanceMeters)
         }.sorted { first, second in
             switch (first.value(for: sort), second.value(for: sort)) {
             case let (a?, b?) where a != b: return ascending ? a < b : a > b

@@ -437,7 +437,7 @@ private struct SpotRecords: View {
         let speeds = rides.compactMap { session in session.maxSpeedMetersPerSecond.map { (session, $0 * 3.6) } }
         return [
             Record(title: "Лучший прыжок", unit: "м", approximate: true, best: bestJump { $0.heightMeters }),
-            Record(title: "Зависание", unit: "с", approximate: true, best: bestJump { $0.airtimeSeconds }),
+            Record(title: "Зависание", unit: "с", approximate: true, best: bestJump { $0.reportedAirtime }),
             Record(title: "Дистанция прыжка", unit: "м", approximate: true, best: bestJump { $0.distanceMeters }),
             Record(title: "Топ скорость", unit: "км/ч", approximate: false, best: speeds.max { $0.1 < $1.1 })
         ]

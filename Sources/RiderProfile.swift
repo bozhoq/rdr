@@ -3,7 +3,7 @@ import PhotosUI
 import ImageIO
 import Security
 
-enum RiderDestination: Hashable { case statistics }
+enum RiderDestination: Hashable { case statistics, session(UUID) }
 
 private struct RiderPublication: Codable {
     let name: String

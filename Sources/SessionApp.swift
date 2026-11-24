@@ -60,8 +60,10 @@ private struct Tabs: View {
 
             NavigationStack {
                 RecordingView(recorder: recorder) {
+                    guard let id = recorder.live?.id else { return }
                     recorder.stop()
-                    riderPath = [.statistics]
+                    guard recorder.history.contains(where: { $0.id == id && $0.status == .finished }) else { return }
+                    riderPath = [.statistics, .session(id)]
                     selectedTab = .rider
                 }
             }
@@ -77,6 +79,10 @@ private struct Tabs: View {
                     .navigationDestination(for: RiderDestination.self) { destination in
                         switch destination {
                         case .statistics: PersonalStatsView(recorder: recorder)
+                        case let .session(id):
+                            if let session = recorder.history.first(where: { $0.id == id }) {
+                                SessionDetail(recorder: recorder, originalSession: session)
+                            }
                         }
                     }
             }
@@ -437,7 +443,7 @@ private struct RecordingView: View {
     private func recordingMetrics(_ session: SessionSummary) -> some View {
         let estimates = (session.liveJumpEstimates ?? [:]).values
         let height = estimates.compactMap(\.heightMeters).max()
-        let airtime = estimates.filter { session.handSimulationTest == true || $0.isHandLift != true }.map(\.airtimeSeconds).max()
+        let airtime = estimates.filter { session.handSimulationTest == true || $0.isHandLift != true }.compactMap(\.reportedAirtime).max()
         let distance = estimates.compactMap(\.distanceMeters).max()
         return VStack(spacing: 0) {
             HStack(spacing: 0) {
@@ -859,6 +865,14 @@ struct SessionDetail: View {
 
     var body: some View {
         List {
+            Section {
+                let jumps = session.jumpAnalysis?.candidates.compactMap { session.liveEstimate(for: $0) } ?? []
+                HStack(alignment: .top, spacing: 4) {
+                    sessionRecord("Топ прыжок", icon: "arrow.up", value: jumps.compactMap(\.heightMeters).max(), unit: "м")
+                    sessionRecord("Топ дистанция", icon: "arrow.left.and.right", value: jumps.compactMap(\.distanceMeters).max(), unit: "м")
+                    sessionRecord("Топ завис", icon: "stopwatch", value: jumps.compactMap(\.reportedAirtime).max(), unit: "с")
+                }.padding(.vertical, 4)
+            }.listRowBackground(RiderTheme.surface)
             eventsSection
             Section {
                 NavigationLink { RouteView(recorder: recorder, session: session) } label: {
@@ -901,14 +915,20 @@ struct SessionDetail: View {
             } else {
                 analyzeButton("Найти события")
             }
-        } header: {
-            VStack(alignment: .leading, spacing: 13) {
-                RDRWordmark().frame(maxWidth: .infinity)
-                Text("История прыжков").font(.largeTitle.bold())
-                    .textCase(nil).foregroundStyle(.primary)
-            }.padding(.bottom, 5)
         }
         .listRowBackground(RiderTheme.surface)
+    }
+
+    private func sessionRecord(_ title: String, icon: String, value: Double?, unit: String) -> some View {
+        VStack(spacing: 5) {
+            Image(systemName: icon).foregroundStyle(RiderTheme.accent).accessibilityHidden(true)
+            Text(metric(value, unit: unit)).font(.headline.monospacedDigit()).lineLimit(1).minimumScaleFactor(0.7)
+            Text(title).font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(title)
+        .accessibilityValue(metric(value, unit: unit))
     }
 
     private func analyzeButton(_ title: String) -> some View {

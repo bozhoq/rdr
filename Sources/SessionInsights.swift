@@ -13,7 +13,7 @@ struct RiderTotals: Codable {
         sessions = rides.count
         jumps = events.count
         height = events.compactMap(\.heightMeters).max()
-        airtime = events.map(\.airtimeSeconds).filter { $0.isFinite && $0 > 0 }.max()
+        airtime = events.compactMap(\.reportedAirtime).filter { $0.isFinite && $0 > 0 }.max()
         seconds = rides.reduce(0) { $0 + $1.durationSeconds }
     }
 
@@ -112,7 +112,7 @@ struct RiderJumpScore: Codable {
         history.compactMap { session in
             let jumps = RiderTotals.measuredJumps(in: session)
             guard let height = jumps.compactMap(\.heightMeters).max() else { return nil }
-            let airtime = jumps.map(\.airtimeSeconds).filter { $0.isFinite && $0 > 0 }.max()
+            let airtime = jumps.compactMap(\.reportedAirtime).filter { $0.isFinite && $0 > 0 }.max()
             let distance = jumps.compactMap(\.distanceMeters).filter { $0.isFinite && $0 > 0 }.max()
             let setup = session.setup?.cleaned
             let name = setup?.spot
@@ -933,13 +933,15 @@ struct RoutePoint: Identifiable, Sendable {
 struct LiveJumpEstimate: Codable {
     let heightMeters: Double?
     let airtimeSeconds: Double
-    let distanceMeters: Double?
+    var distanceMeters: Double?
     var isPhoneToss: Bool?
     var isHandLift: Bool?
     var inertialLift: Bool?
     var assumesLevelLanding: Bool?
     var apexSeconds: Double?
     var pushRiseMeters: Double?
+    var measuredFlightSeconds: Double?
+    var reportedAirtime: Double? { approachExcursion == true ? measuredFlightSeconds : airtimeSeconds }
     var approachExcursion: Bool?
     var crossedStartLevel: Bool?
     var floorPeakMeters: Double?
@@ -968,7 +970,7 @@ struct LiveJumpEstimate: Codable {
                 nearApex.contains { abs($0.relativeAltitudeMeters - baseline - peak.height) <= max(0.5, 0.25 * peak.height) }
             let measured: Double? = end - start <= 4.5 || corroborated ? peak.height : nil
             return Self(heightMeters: measured, airtimeSeconds: end - start,
-                        distanceMeters: gpsDistance(start: start, end: end, gps: gps, motionClock: motionClock),
+                        distanceMeters: nil,
                         inertialLift: true, apexSeconds: peak.time, approachExcursion: true,
                         crossedStartLevel: flight.crossedStartLevel)
         }
@@ -1136,6 +1138,15 @@ struct RideJumpQueue {
                 guard let height = estimate.heightMeters, height.isFinite, height >= ApproachJumpDetector.minimumHeight else { continue }
                 let priority = flight.crossedStartLevel ? 3 : flight.approachPeak != nil ? 1 : (item.gpsApproach ? 2 : 0)
                 if best == nil || priority > best!.priority { best = (flight.event, estimate, priority) }
+            }
+            if var chosen = best, chosen.estimate.approachExcursion == true, let apex = chosen.estimate.apexSeconds,
+               let physical = group.first(where: {
+                   $0.flight.approachPeak == nil && ($0.flight.event.startSeconds...$0.flight.event.endSeconds).contains(apex)
+               })?.flight.event {
+                chosen.estimate.measuredFlightSeconds = physical.unloadingSeconds
+                chosen.estimate.distanceMeters = LiveJumpEstimate.gpsDistance(start: physical.startSeconds, end: physical.endSeconds,
+                                                                              gps: gps, motionClock: motionClock)
+                best = chosen
             }
             flights.removeFirst(group.count)
             if let best {
