@@ -1004,6 +1004,8 @@ struct LiveJumpEstimate: Codable {
     var estimatedFlightStart: Double?
     var estimatedFlightEnd: Double?
     var distanceFromSpeed: Bool?
+    enum DistanceIssue: String, Codable { case insufficientCoverage, lowAccuracy }
+    var distanceIssue: DistanceIssue?
     var pressureAssisted: Bool?
     var measuredFlightSeconds: Double?
     var reportedAirtime: Double? {
@@ -1037,7 +1039,8 @@ struct LiveJumpEstimate: Codable {
             let corroborated = before.count == 2 && before.allSatisfy { abs($0.relativeAltitudeMeters - baseline) <= 0.3 } &&
                 nearApex.contains { abs($0.relativeAltitudeMeters - baseline - peak.height) <= max(0.5, 0.25 * peak.height) }
             let measured: Double? = flight.pressureAssisted || end - start <= 4.5 || corroborated ? peak.height : nil
-            return Self(heightMeters: measured, airtimeSeconds: end - start,
+            let airtime = flight.flightWindow.map { $0.upperBound - $0.lowerBound } ?? (end - start)
+            return Self(heightMeters: measured, airtimeSeconds: airtime,
                         distanceMeters: nil,
                         inertialLift: true, apexSeconds: peak.time, estimatedFlightStart: flight.flightWindow?.lowerBound,
                         estimatedFlightEnd: flight.flightWindow?.upperBound, pressureAssisted: flight.pressureAssisted, approachExcursion: true,
@@ -1144,42 +1147,59 @@ struct LiveJumpEstimate: Codable {
     /// Integrate horizontal speed between the actual takeoff and return times.
     /// Speeds on both sides must bracket the interval in one continuous GPS segment.
     static func speedDistance(start: Double, end: Double, gps: [RoutePoint], motionClock: Date?) -> Double? {
+        guard let motionClock, let fixes = flightFixes(start: start, end: end, gps: gps, motionClock: motionClock) else { return nil }
+        let from = motionClock.addingTimeInterval(start)
+        var meters = 0.0, uncertainty = 0.0
+        for (a, b) in zip(fixes, fixes.dropFirst()) {
+            let t0 = a.sample.timestamp.timeIntervalSince(from), t1 = b.sample.timestamp.timeIntervalSince(from)
+            let dt = t1 - t0, lo = max(0, t0), hi = min(end - start, t1)
+            guard hi > lo, a.speedSegment == b.speedSegment,
+                  let v0 = a.speed, let v1 = b.speed, (0...60).contains(v0), (0...60).contains(v1),
+                  let e0 = a.sample.speedAccuracyMetersPerSecond, let e1 = b.sample.speedAccuracyMetersPerSecond,
+                  (0...3).contains(e0), (0...3).contains(e1) else { return nil }
+            let fraction = ((lo + hi) / 2 - t0) / dt
+            meters += (v0 + (v1 - v0) * fraction) * (hi - lo)
+            // Integrate the error bound too. A fast ride can have a solid signal
+            // even when the absolute speed uncertainty exceeds 1.25 m/s.
+            uncertainty += max(0.15, e0 + (e1 - e0) * fraction) * (hi - lo)
+        }
+        return meters >= 1 && uncertainty <= meters * 0.35 ? meters : nil
+    }
+
+    private static func flightFixes(start: Double, end: Double, gps: [RoutePoint], motionClock: Date?) -> ArraySlice<RoutePoint>? {
         guard let motionClock, start.isFinite, end.isFinite, end > start else { return nil }
         let from = motionClock.addingTimeInterval(start), to = motionClock.addingTimeInterval(end)
         guard let first = gps.lastIndex(where: { $0.sample.timestamp <= from }),
               let last = gps.firstIndex(where: { $0.sample.timestamp >= to }), first < last else { return nil }
         let fixes = gps[first...last]
-        var meters = 0.0, uncertainty = 0.0
         for (a, b) in zip(fixes, fixes.dropFirst()) {
-            let t0 = a.sample.timestamp.timeIntervalSince(from), t1 = b.sample.timestamp.timeIntervalSince(from)
-            let dt = t1 - t0, lo = max(0, t0), hi = min(end - start, t1)
-            guard dt > 0, dt <= 2.2, hi > lo, a.segment == b.segment, a.speedSegment == b.speedSegment,
-                  let v0 = a.speed, let v1 = b.speed, (0...60).contains(v0), (0...60).contains(v1),
-                  let e0 = a.sample.speedAccuracyMetersPerSecond, let e1 = b.sample.speedAccuracyMetersPerSecond,
-                  (0...1.25).contains(e0), (0...1.25).contains(e1) else { return nil }
-            let mean = v0 + (v1 - v0) * ((lo + hi) / 2 - t0) / dt
-            meters += mean * (hi - lo)
-            uncertainty += max(0.15, max(e0, e1)) * (hi - lo)
+            let dt = b.sample.timestamp.timeIntervalSince(a.sample.timestamp)
+            guard dt > 0, dt <= 2.2, a.segment == b.segment else { return nil }
         }
-        return meters >= 1 && uncertainty <= meters * 0.35 ? meters : nil
+        return fixes
     }
 
     static func gpsDistance(start: Double, end: Double, gps: [RoutePoint], motionClock: Date?) -> Double? {
-        if let motionClock {
-            let fixes = gps.filter { $0.sample.horizontalAccuracyMeters <= 5 }
-            let entry = motionClock.addingTimeInterval(start), exit = motionClock.addingTimeInterval(end)
-            if let a = fixes.min(by: { abs($0.sample.timestamp.timeIntervalSince(entry)) < abs($1.sample.timestamp.timeIntervalSince(entry)) }),
-               let b = fixes.min(by: { abs($0.sample.timestamp.timeIntervalSince(exit)) < abs($1.sample.timestamp.timeIntervalSince(exit)) }),
-               a.segment == b.segment, a.sample.timestamp < b.sample.timestamp,
-               abs(a.sample.timestamp.timeIntervalSince(entry)) <= 0.75,
-               abs(b.sample.timestamp.timeIntervalSince(exit)) <= 0.75 {
-                let separation = RouteFilter.distance(a.sample, b.sample)
-                if separation >= a.sample.horizontalAccuracyMeters + b.sample.horizontalAccuracyMeters {
-                    return separation
-                }
-            }
+        guard let motionClock, let fixes = flightFixes(start: start, end: end, gps: gps, motionClock: motionClock) else { return nil }
+        func position(_ time: Double, between a: LocationSample, and b: LocationSample) -> LocationSample {
+            let date = motionClock.addingTimeInterval(time)
+            let f = date.timeIntervalSince(a.timestamp) / b.timestamp.timeIntervalSince(a.timestamp)
+            let delta = (b.longitude - a.longitude + 540).truncatingRemainder(dividingBy: 360) - 180
+            return LocationSample(timestamp: date, latitude: a.latitude + (b.latitude - a.latitude) * f,
+                                  longitude: a.longitude + delta * f,
+                                  horizontalAccuracyMeters: (1 - f) * a.horizontalAccuracyMeters + f * b.horizontalAccuracyMeters,
+                                  speedMetersPerSecond: nil, speedAccuracyMetersPerSecond: nil)
         }
-        return nil
+        let i = fixes.startIndex, j = fixes.endIndex - 1
+        let a = position(start, between: fixes[i].sample, and: fixes[i + 1].sample)
+        let b = position(end, between: fixes[j - 1].sample, and: fixes[j].sample)
+        let separation = RouteFilter.distance(a, b)
+        let uncertainty = a.horizontalAccuracyMeters + b.horizontalAccuracyMeters
+        return separation >= 1 && uncertainty <= separation * 0.5 ? separation : nil
+    }
+
+    static func distanceIssue(start: Double, end: Double, gps: [RoutePoint], motionClock: Date?) -> DistanceIssue {
+        flightFixes(start: start, end: end, gps: gps, motionClock: motionClock) == nil ? .insufficientCoverage : .lowAccuracy
     }
 
     static func spokenHeight(_ height: Double) -> String? {
@@ -1239,6 +1259,9 @@ struct RideJumpQueue {
                     chosen.estimate.distanceFromSpeed = true
                 } else {
                     chosen.estimate.distanceMeters = LiveJumpEstimate.gpsDistance(start: start, end: end, gps: gps, motionClock: motionClock)
+                    if chosen.estimate.distanceMeters == nil {
+                        chosen.estimate.distanceIssue = LiveJumpEstimate.distanceIssue(start: start, end: end, gps: gps, motionClock: motionClock)
+                    }
                 }
                 best = chosen
             }

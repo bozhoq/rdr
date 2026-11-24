@@ -238,7 +238,11 @@ struct EventDetailView: View {
             if let estimate = session.liveEstimate(for: candidate), let start = estimate.estimatedFlightStart, let end = estimate.estimatedFlightEnd {
                 LabeledContent("Начало подъёма", value: eventTimeText(start))
                 LabeledContent("Возврат", value: eventTimeText(end))
-                if estimate.distanceMeters != nil {
+            }
+            if let estimate = session.liveEstimate(for: candidate) {
+                if let issue = estimate.distanceIssue {
+                    LabeledContent("Дистанция", value: issue == .lowAccuracy ? "Недостаточная точность GPS" : "Нет непрерывного GPS на всём прыжке")
+                } else if estimate.distanceMeters != nil {
                     LabeledContent("Дистанция", value: estimate.distanceFromSpeed == true ? "По скорости GPS" : "По координатам GPS")
                 }
             }
@@ -247,7 +251,7 @@ struct EventDetailView: View {
                 LabeledContent("Подъём до вершины", value: metric(apex - candidate.startSeconds, unit: "с"))
             }
             if session.handSimulationTest != true {
-                LabeledContent(session.jumpAnalysis?.detectorVersion.hasPrefix("ride-") == true ? "Полёт" : "Разгрузка",
+                LabeledContent(session.jumpAnalysis?.detectorVersion.hasPrefix("ride-") == true ? "Интервал детектора" : "Разгрузка",
                                value: metric(candidate.unloadingSeconds, unit: "с", digits: 2))
                 LabeledContent("Минимальная нагрузка", value: metric(candidate.minimumLoadG, unit: "g", digits: 2))
                 LabeledContent("Пик после события", value: metric(candidate.returnPeakG, unit: "g"))

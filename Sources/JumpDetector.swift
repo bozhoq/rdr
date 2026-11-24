@@ -165,7 +165,7 @@ struct JumpDetector {
 /// Detects a push, ascent, descent and braking as separate phases. A kite jump
 /// can stay loaded in the air, so it never needs a free-fall interval.
 struct RidingJumpDetector {
-    static let version = "ride-11"
+    static let version = "ride-12"
 
     struct Point {
         let time: Double
@@ -563,7 +563,10 @@ struct ApproachJumpDetector {
             return nil
         }
         let start = origin.point.time
-        if t - start > (approach(before: start).gps ? 15.5 : 4.5) {
+        // A soft landing is dated at the centre of the settling window.
+        // Give the final samples time to arrive before expiring that landing.
+        let durationLimit = approach(before: start).gps ? 15.5 : 4.5
+        if center.time - start > durationLimit {
             active = nil
             baseline = stable ? anchor : nil
             return nil
@@ -579,8 +582,25 @@ struct ApproachJumpDetector {
                                       returnPeakG: track.filter { $0.time >= apex.time }.map(\.load).max() ?? 1,
                                       maximumRotationRadiansPerSecond: flight.map(\.spin).max() ?? 0)
             let band = max(0.03, min(0.08, height * 0.035))
-            let launch = flight.last { $0.time < apex.time && level($0) <= band }?.time ?? start
-            let landing = crossed ? end : flight.last { $0.time >= apex.time && level($0) > band }?.time ?? end
+            // Height identifies the correct ascent and descent. Near the surface,
+            // time the edges by vertical speed so a soft approach to zero is included.
+            // The centred difference uses actual sample times (about 0.11 s wide).
+            func slope(at i: Int) -> Double {
+                var left = i, right = i
+                while left > flight.startIndex && flight[left - 1].time >= flight[i].time - 0.055 { left -= 1 }
+                while right + 1 < flight.endIndex && flight[right].time < flight[i].time + 0.055 { right += 1 }
+                guard right > left else { return 0 }
+                return (level(flight[right]) - level(flight[left])) / (flight[right].time - flight[left].time)
+            }
+            let rising = flight.lastIndex { $0.time < apex.time && level($0) <= band } ?? flight.startIndex
+            var first = rising
+            while first > flight.startIndex && slope(at: first) > 0.12 { first -= 1 }
+            let launch = flight[first].time
+            var landing = end
+            if !crossed, var i = flight.lastIndex(where: { $0.time >= apex.time && level($0) > band }) {
+                while i + 1 < flight.endIndex && slope(at: i) < -0.12 { i += 1 }
+                landing = flight[i].time
+            }
             return .init(event: event, trajectory: [], settledHeight: 0, residualVelocity: 0,
                          approachPeak: .init(height: height, time: apex.time), crossedStartLevel: crossed,
                          flightWindow: launch...max(launch, landing))
@@ -593,7 +613,7 @@ struct ApproachJumpDetector {
             let above = track[positive], below = track[positive + 1]
             let crossing = above.time + rawHeight(above) / (rawHeight(above) - rawHeight(below)) * (below.time - above.time)
             let airborne = track[...positive]
-            if t - crossing >= 0.08, let apex = airborne.max(by: { rawHeight($0) < rawHeight($1) }),
+            if crossing - start <= durationLimit, t - crossing >= 0.08, let apex = airborne.max(by: { rawHeight($0) < rawHeight($1) }),
                rawHeight(apex) >= Self.minimumHeight, crossing - apex.time >= 0.15,
                airborne.contains(where: { $0.time >= apex.time && $0.velocity < origin.speed - 0.58 }),
                !airborne.contains(where: { $0.time < apex.time && rawHeight($0) < -0.25 }) {
