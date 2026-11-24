@@ -537,12 +537,13 @@ private struct SpotRouteButton: View {
 private struct BestSpotsToday: View {
     @ObservedObject var recorder: SessionRecorder
     let goToRecording: () -> Void
+    @AppStorage("rider.bestSpotRadius") private var radiusKilometers = 0.0
+    @State private var radiusOrigin: CLLocation?
+    @State private var editingRadius = false
+    @State private var radiusDraft = ""
     @State private var region = ""
     @State private var revision = 0
-    @State private var loading = false
-    @State private var checked = 0
-    @State private var total = 0
-    @State private var results: [SpotForecast.Ranking] = []
+    @State private var completed: SearchResult?
     @State private var expandedWindows: Set<SpotForecast.Window> = []
     @State private var travelTimes: [RiderSpot: TravelTime] = [:]
     @State private var lastTravelOrigin: Date?
@@ -556,6 +557,38 @@ private struct BestSpotsToday: View {
         let timestamp: Date?
         let spots: [RiderSpot]
     }
+
+    private enum SearchArea: Equatable {
+        case region(String)
+        case radius(SpotForecast.SearchRadius, latitude: Double, longitude: Double)
+    }
+
+    private struct Search: Equatable {
+        let area: SearchArea?
+        let revision: Int
+        let day: SpotForecast.RankingDay
+        let dayStart: Date
+    }
+
+    private struct SearchResult {
+        let search: Search
+        let rankings: [SpotForecast.Ranking]
+        let checked: Int
+        let total: Int
+    }
+
+    private var radius: SpotForecast.SearchRadius? {
+        SpotForecast.SearchRadius(kilometers: radiusKilometers)
+    }
+
+    private var searchArea: SearchArea? {
+        if let radius {
+            guard recorder.locationAuthorized, let fix = radiusOrigin else { return nil }
+            return .radius(radius, latitude: fix.coordinate.latitude, longitude: fix.coordinate.longitude)
+        }
+        return region.isEmpty ? nil : .region(region)
+    }
+
     private var regions: [String] { Set(recorder.spots.compactMap(\.region)).sorted() }
 
     var body: some View {
@@ -565,25 +598,31 @@ private struct BestSpotsToday: View {
     }
 
     private func rankingList(now: Date, day: SpotForecast.RankingDay) -> some View {
-        let dayStart = Calendar.current.startOfDay(for: now)
+        let search = Search(area: searchArea, revision: revision, day: day, dayStart: Calendar.current.startOfDay(for: now))
+        let result = completed.flatMap { $0.search == search ? $0 : nil }
         let origin = routeOrigin(at: now)
         let windows = day.visibleWindows(at: now)
-        let visibleResults = results.filter { windows.contains($0.window) }
+        let visibleResults = (result?.rankings ?? []).filter { windows.contains($0.window) }
         let batch = TravelBatch(timestamp: origin?.timestamp, spots: routeTargets(for: visibleResults))
         return List {
-            Picker("Регион", selection: $region) {
-                Text("Выберите регион").tag("")
-                ForEach(regions, id: \.self) { Text($0).tag($0) }
-            }
-            if region.isEmpty {
-                if recorder.locating { ProgressView("Определяем регион") }
-                else { Button("Определить регион по GPS") { recorder.locateSpot() } }
-            } else if loading {
-                ProgressView("Сравниваем прогнозы")
+            if let radius {
+                LabeledContent("Радиус по прямой", value: radiusLabel(radius))
             } else {
-                if visibleResults.contains(where: { !$0.spots.isEmpty }) {
+                Picker("Регион", selection: $region) {
+                    Text("Выберите регион").tag("")
+                    ForEach(regions, id: \.self) { Text($0).tag($0) }
+                }
+            }
+            if search.area == nil {
+                if radius != nil { locationRow(forRadius: true) }
+                else if recorder.locating { ProgressView("Определяем регион") }
+                else { Button("Определить регион по GPS") { recorder.locateSpot() } }
+            } else if let result {
+                if result.total == 0 {
+                    Text(radius == nil ? "В этом регионе пока нет спотов." : "В этом радиусе нет спотов. Увеличьте радиус поиска.")
+                } else if visibleResults.contains(where: { !$0.spots.isEmpty }) {
                     if origin == nil && !batch.spots.isEmpty {
-                        locationRow
+                        locationRow()
                     }
                     ForEach(visibleResults) { ranking in
                         Section {
@@ -609,13 +648,17 @@ private struct BestSpotsToday: View {
                         }
                     }
                 } else {
-                    Text(checked == 0 ? "Прогнозы не загрузились." : "Нет данных о ветре для выбранного времени.")
+                    Text(result.checked == 0 ? "Прогнозы не загрузились." : "Нет данных о ветре для выбранного времени.")
                 }
-                Text("Прогноз получен для \(checked) из \(total) спотов").font(.footnote)
+                if result.total > 0 {
+                    Text("Прогноз получен для \(result.checked) из \(result.total) спотов").font(.footnote)
+                }
                 Button("Обновить прогноз") {
                     revision += 1
                     if recorder.locationAuthorized && !recorder.locating { recorder.locateSpot() }
                 }
+            } else {
+                ProgressView("Сравниваем прогнозы")
             }
             DisclosureGroup("Как выбираем") {
                 Text("С 07:00 до 20:00 по местному времени сравниваем средний ветер отдельно для каждого окна. При равенстве выше спот с более полным прогнозом. Порывы показываем по максимуму за окно.")
@@ -626,10 +669,32 @@ private struct BestSpotsToday: View {
         .background(RiderTheme.canvas.ignoresSafeArea())
         .navigationTitle(day.title)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    radiusDraft = radius?.kilometers.formatted(.number.grouping(.never)) ?? ""
+                    editingRadius = true
+                } label: {
+                    Label(radius.map(radiusLabel) ?? "Радиус", systemImage: "scope")
+                        .font(.subheadline.weight(.semibold))
+                }
+                .accessibilityLabel("Радиус поиска")
+                .accessibilityValue(radius.map(radiusLabel) ?? "Выключен")
+            }
+        }
+        .sheet(isPresented: $editingRadius) { radiusEditor }
         .onAppear {
-            if recorder.usableFix == nil && !recorder.locating && (region.isEmpty || recorder.locationAuthorized) {
+            if let fix = recorder.usableFix { radiusOrigin = fix }
+            if recorder.usableFix == nil && !recorder.locating &&
+                (radius != nil || region.isEmpty || recorder.locationAuthorized) {
                 recorder.locateSpot()
             }
+        }
+        .onChange(of: recorder.previewFix?.timestamp) {
+            if let fix = recorder.usableFix { radiusOrigin = fix }
+        }
+        .onChange(of: recorder.locationAuthorized) {
+            if !recorder.locationAuthorized { radiusOrigin = nil }
         }
         .task(id: batch) {
             if let origin { await loadTravelTimes(origin: origin, spots: batch.spots) }
@@ -643,9 +708,54 @@ private struct BestSpotsToday: View {
                 region = match
             } else if let nearby = nearbyRegion(fix, within: 80000) { region = nearby }
         }
-        .task(id: "\(region)/\(revision)/\(dayStart.timeIntervalSince1970)/\(day.rawValue)") {
-            await compare(for: day, relativeTo: now)
+        .task(id: search) { await compare(search, relativeTo: now) }
+    }
+
+    private func radiusLabel(_ radius: SpotForecast.SearchRadius) -> String {
+        radius.kilometers.formatted() + " км"
+    }
+
+    private var radiusEditor: some View {
+        let draft = SpotForecast.SearchRadius(text: radiusDraft)
+        return NavigationStack {
+            Form {
+                Section {
+                    HStack {
+                        TextField("Например, 200", text: $radiusDraft)
+                            .keyboardType(.decimalPad)
+                            .accessibilityLabel("Радиус в километрах")
+                        Text("км").foregroundStyle(.secondary)
+                    }
+                } footer: {
+                    Text("Расстояние по прямой от вашей геопозиции. В поиск входят споты из соседних регионов.")
+                }
+                if radius != nil {
+                    Button("Искать по региону") {
+                        radiusKilometers = 0
+                        editingRadius = false
+                        if region.isEmpty && !recorder.locating { recorder.locateSpot() }
+                    }
+                }
+            }
+            .navigationTitle("Радиус поиска")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Отмена") { editingRadius = false }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Применить") {
+                        guard let draft else { return }
+                        radiusOrigin = recorder.usableFix
+                        radiusKilometers = draft.kilometers
+                        editingRadius = false
+                        if radiusOrigin == nil && !recorder.locating { recorder.locateSpot() }
+                    }
+                    .disabled(draft == nil)
+                }
+            }
         }
+        .presentationDetents([.medium, .large])
     }
 
     private func rankedLink(_ item: SpotForecast.RankedSpot, in window: SpotForecast.Window, origin: CLLocation?) -> some View {
@@ -726,14 +836,16 @@ private struct BestSpotsToday: View {
         }
     }
 
-    @ViewBuilder private var locationRow: some View {
+    @ViewBuilder private func locationRow(forRadius: Bool = false) -> some View {
         if recorder.locating {
-            ProgressView("Уточняем геопозицию для расчёта дороги")
+            ProgressView(forRadius ? "Определяем центр поиска" : "Уточняем геопозицию для расчёта дороги")
         } else if recorder.authorization == .denied || recorder.authorization == .restricted {
-            Text("Для расчёта дороги разрешите Rider доступ к геопозиции в настройках iPhone.")
+            Text(forRadius ? "Для поиска по радиусу разрешите Rider доступ к геопозиции в настройках iPhone."
+                           : "Для расчёта дороги разрешите Rider доступ к геопозиции в настройках iPhone.")
                 .font(.footnote).foregroundStyle(.secondary)
         } else {
-            Button("Определить геопозицию для расчёта дороги", action: recorder.locateSpot)
+            Button(forRadius ? "Определить геопозицию для поиска" : "Определить геопозицию для расчёта дороги",
+                   action: recorder.locateSpot)
         }
     }
 
@@ -820,22 +932,27 @@ private struct BestSpotsToday: View {
         }.min(by: { $0.1 < $1.1 })?.0
     }
 
-    @MainActor private func compare(for day: SpotForecast.RankingDay, relativeTo now: Date) async {
-        results = []
-        checked = 0
-        total = 0
-        guard !region.isEmpty else { loading = false; return }
-        loading = true
-        let candidates = recorder.spots.filter { spot in
-            if let name = spot.region { return name == region }
-            return nearbyRegion(CLLocation(latitude: spot.latitude, longitude: spot.longitude), within: 30000) == region
+    @MainActor private func compare(_ search: Search, relativeTo now: Date) async {
+        guard let area = search.area else { return }
+        let candidates: [RiderSpot]
+        switch area {
+        case .region(let region):
+            candidates = recorder.spots.filter { spot in
+                if let name = spot.region { return name == region }
+                return nearbyRegion(CLLocation(latitude: spot.latitude, longitude: spot.longitude), within: 30000) == region
+            }
+        case .radius(let radius, let latitude, let longitude):
+            let origin = CLLocation(latitude: latitude, longitude: longitude)
+            candidates = recorder.spots.filter { spot in
+                let location = CLLocation(latitude: spot.latitude, longitude: spot.longitude)
+                return radius.contains(distanceMeters: origin.distance(from: location))
+            }
         }
         let forecasts = await SpotForecast.fetchAvailable(for: candidates)
         guard !Task.isCancelled else { return }
-        results = SpotForecast.rankings(for: day, relativeTo: now, forecasts: forecasts)
-        checked = forecasts.count
-        total = candidates.count
-        loading = false
+        completed = SearchResult(search: search,
+                                 rankings: SpotForecast.rankings(for: search.day, relativeTo: now, forecasts: forecasts),
+                                 checked: forecasts.count, total: candidates.count)
     }
 }
 

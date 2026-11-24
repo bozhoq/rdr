@@ -670,6 +670,25 @@ struct SpotForecast: Decodable {
         }
     }
 
+    struct SearchRadius: Equatable {
+        let kilometers: Double
+
+        init?(text: String) {
+            let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: ",", with: ".")
+            guard let value = Double(normalized) else { return nil }
+            self.init(kilometers: value)
+        }
+
+        init?(kilometers: Double) {
+            guard kilometers.isFinite, kilometers > 0 else { return nil }
+            self.kilometers = kilometers
+        }
+
+        func contains(distanceMeters: Double) -> Bool {
+            distanceMeters >= 0 && distanceMeters.isFinite && distanceMeters / 1000 <= kilometers
+        }
+    }
+
     enum RankingDay: Int {
         case today = 0
         case tomorrow = 1
