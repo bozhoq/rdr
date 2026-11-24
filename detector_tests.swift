@@ -305,7 +305,7 @@ enum DetectorTests {
               bodyEstimate.apexSeconds == bodyPeak?.time && bodyEstimate.airtimeSeconds == 1 &&
               bodyEstimate.isHandLift != true, "One rider event uses the anchored height and actual flight interval")
         let historicalSetup = SessionSetup(sport: .groundTest, placement: .hand)
-        check(historicalSetup.forRecording.sport == .kite && historicalSetup.forRecording.placement == .unspecified &&
+        check(historicalSetup.forRecording.sport == .kite && historicalSetup.forRecording.placement == .chest &&
               historicalSetup.placement == .hand, "Migrate copied settings without changing the historical session")
 
         var handAtUpperLevel = HandSimulationDetector()
