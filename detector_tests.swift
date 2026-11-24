@@ -134,6 +134,22 @@ enum DetectorTests {
         let ridingJumps = ridingTrace.dropFirst(342).compactMap { riding.process($0, calibration: nil, moving: false) }
         check(ridingJumps.count == 1 && ridingJumps[0].event.minimumLoadG > 0.65 &&
               (1.5...2.3).contains(ridingJumps[0].event.unloadingSeconds), "Detect a supported riding jump without GPS or free fall")
+        var gentle = RidingJumpDetector()
+        let gentleTrace = (0..<370).map { index -> MotionSample in
+            let acceleration: Double
+            switch index {
+            case 100..<132: acceleration = 8
+            case 132..<206: acceleration = -6
+            case 206..<269: acceleration = 3
+            default: acceleration = 0
+            }
+            return sample(Double(index) / 100, 1 + acceleration / 9.80665)
+        }
+        let beforeRecovery = gentleTrace.prefix(269).compactMap { gentle.process($0, calibration: nil, moving: true) }
+        let afterRecovery = gentleTrace.dropFirst(269).compactMap { gentle.process($0, calibration: nil, moving: true) }
+        check(beforeRecovery.isEmpty && afterRecovery.count == 1,
+              "One jump after a sustained gentle brake and stable recovery")
+
         func shortRide(unloadingCount: Int, landingLoad: Double, startsWithPush: Bool) -> [MotionSample] {
             (0..<320).map { index in
                 let load: Double
