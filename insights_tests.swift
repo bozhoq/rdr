@@ -172,17 +172,55 @@ import FoundationXML
               dayHours.last?.daylight == false && SpotForecast.windArrow(315) == "↘", "Weather and downwind arrows")
         let midnight = ISO8601DateFormatter().date(from: "2025-04-03T00:00:00+03:00")!
         let timestamps = (0..<48).map { midnight.timeIntervalSince1970 + Double($0 * 3600) }
-        let knots = (0..<48).map { (7...20).contains($0) ? Double($0) : 90.0 }
-        let forecastPayload: [String: Any] = ["timezone": "Europe/Moscow", "hourly": ["time": timestamps, "wind_speed_10m": knots]]
-        let ranked = try JSONDecoder().decode(SpotForecast.self, from: JSONSerialization.data(withJSONObject: forecastPayload))
+        let scale = SessionWind.metersPerSecondPerKnot
+        func windowForecast(wind: (Int) -> Double?) throws -> SpotForecast {
+            let speeds: [Any] = (0..<48).map { hour in
+                if let speed = wind(hour) { return speed / scale }
+                return NSNull()
+            }
+            let gusts = (0..<48).map { Double($0) / scale }
+            let codes = (0..<48).map { $0 == 14 ? 95 : 0 }
+            let hourly: [String: Any] = ["time": timestamps, "wind_speed_10m": speeds,
+                                         "wind_gusts_10m": gusts, "weather_code": codes]
+            let payload: [String: Any] = ["timezone": "Europe/Moscow", "hourly": hourly]
+            return try JSONDecoder().decode(SpotForecast.self, from: JSONSerialization.data(withJSONObject: payload))
+        }
+
+        let rankingForecast = try windowForecast { hour in Double(hour) }
         let late = midnight.addingTimeInterval(23 * 3600)
-        let day = ranked.daySummary(today: late)
-        check(day?.hours == 14 && abs((day?.meanWind ?? 0) - 13.5 * SessionWind.metersPerSecondPerKnot) < 0.00001 &&
-              day?.maxGust == nil, "Compare the full local day even after 20:00 with missing gusts")
-        check(ranked.daySummary(today: midnight.addingTimeInterval(-1)) == nil, "Missing day has no wind classification")
-        check([5.99, 6, 7.99, 8, 9.99, 10].map { SpotForecast.Day.description(for: $0) } ==
-              ["Подходящего ветра нет", "Обнаружен лайтвинд", "Обнаружен лайтвинд", "Обнаружен средний ветер",
-               "Обнаружен средний ветер", "Обнаружен сильный ветер"], "Classify at 6, 8 and 10 m/s")
+        let summaries = rankingForecast.windowSummaries(today: late)
+        let windows = SpotForecast.Window.allCases
+        check(windows.map(\.title) == ["07:00–10:00", "10:00–13:00", "13:00–16:00", "16:00–20:00"] &&
+              windows.compactMap { summaries[$0]?.hours } == [3, 3, 3, 5],
+              "Divide 07:00 through 20:00 into local windows without double counting")
+        let averages = windows.compactMap { summaries[$0]?.meanWind }
+        check(averages.count == 4 && zip(averages, [8.0, 11, 14, 18]).allSatisfy { pair in abs(pair.0 - pair.1) < 0.00001 } &&
+              summaries[.afternoon]?.thunder == true && abs((summaries[.afternoon]?.maxGust ?? 0) - 15) < 0.00001,
+              "Keep the earlier forecasts, peak gusts and thunder in the right window")
+        check(rankingForecast.windowSummaries(today: midnight.addingTimeInterval(-1)).isEmpty,
+              "Missing day has no window summaries")
+
+        let windyMorning = try windowForecast { hour in (7..<10).contains(hour) ? 9 : 2 }
+        let windyEvening = try windowForecast { hour in (16...20).contains(hour) ? 11 : 2 }
+        let weakForecast = try windowForecast { _ in 3 }
+        var regionForecasts = [(spot, windyMorning), (nearby, windyEvening)]
+        for i in 1...5 {
+            let extra = RiderSpot(name: "Спот \(i)", latitude: "55.75", longitude: "37.62")!
+            regionForecasts.append((extra, weakForecast))
+        }
+        let rankings = SpotForecast.rankings(today: late, forecasts: regionForecasts)
+        check(rankings.allSatisfy { $0.spots.count == 5 } &&
+              rankings.first?.spots.first?.id == spot.id && rankings.last?.spots.first?.id == nearby.id &&
+              rankings[1].spots.allSatisfy { $0.weather.windLevel == .calm },
+              "Pick a separate winner for each window and still show five results in weak wind")
+        let missingForecast = try windowForecast { hour in hour == 17 ? 7 : nil }
+        let partial = missingForecast.windowSummaries(today: late)
+        check(partial.count == 1 && partial[.evening]?.hours == 1 && partial[.evening]?.windLevel == .light,
+              "Missing hours and windows do not turn into a forecast of zero wind")
+
+        check([5.99, 6, 7.99, 8, 9.99, 10].map(SpotForecast.WindLevel.average) == [.calm, .light, .light, .medium, .medium, .strong] &&
+              [8.99, 9, 12, 13, 13.01].map(SpotForecast.WindLevel.gust) == [.light, .medium, .medium, .medium, .strong],
+              "Classify sustained wind and gusts independently at the specified thresholds")
         let forecast = try JSONDecoder().decode(SpotForecast.self, from: Data(fixture.utf8))
         let hours = forecast.hours(near: origin)
         check(hours.count == 2 && hours.first?.temperature == -3 && hours.last?.gust == nil, "Handle past and unavailable forecasts without mismatching arrays")
