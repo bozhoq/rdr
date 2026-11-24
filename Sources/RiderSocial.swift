@@ -1226,7 +1226,7 @@ private struct RiderThreadView: View {
             let result = try await RiderCommunity.messages(with: peer.id)
             if !Task.isCancelled && !sending && revision == messageRevision { messages = result; error = nil }
         } catch {
-            if !Task.isCancelled && !sending && revision == messageRevision { error = "Не удалось загрузить переписку." }
+            if !Task.isCancelled && !sending && revision == messageRevision { self.error = "Не удалось загрузить переписку." }
         }
     }
 
