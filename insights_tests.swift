@@ -165,6 +165,15 @@ import FoundationXML
         check(starter?.source?.absoluteString == "https://example.org/spot" && starter?.id == spot.id && starter?.yandexURL?.absoluteString == "https://yandex.ru/maps/-/test",
               "Decode the bundled starter catalogue and original map link")
         let fixture = #"{"timezone":"Europe/Moscow","hourly":{"time":[1699980000,1700000000,1700003600,1700007200],"wind_speed_10m":[8,12,null,17],"wind_gusts_10m":[10,19,null],"wind_direction_10m":[0,90,null,225],"temperature_2m":[2,-3,null,0]}}"#
+        let daylightFixture = fixture.replacingOccurrences(of: #""temperature_2m":[2,-3,null,0]"#, with: #""temperature_2m":[15,14,null,1],"weather_code":[0,3,95,61],"is_day":[1,1,1,0]"#)
+        let dayForecast = try JSONDecoder().decode(SpotForecast.self, from: Data(daylightFixture.utf8))
+        let dayHours = dayForecast.hours(near: Date(timeIntervalSince1970: 1699979999))
+        check(dayHours.first?.condition.name == "Солнечно" && dayHours.last?.condition.name == "Дождь" &&
+              dayHours.last?.rankingScore == nil && SpotForecast.windArrow(315) == "↘", "Weather and downwind arrows")
+        let rankingFixture = #"{"timezone":"Europe/Moscow","hourly":{"time":[1700042400,1700046000,1700049600],"wind_speed_10m":[17,18,18],"wind_gusts_10m":[19,20,21],"wind_direction_10m":[315,315,0],"temperature_2m":[20,20,20],"weather_code":[2,0,95],"is_day":[1,1,1]}}"#
+        let ranked = try JSONDecoder().decode(SpotForecast.self, from: Data(rankingFixture.utf8))
+        check(ranked.bestWindow(today: Date(timeIntervalSince1970: 1700042400))?.first.time.timeIntervalSince1970 == 1700042400 &&
+              ranked.bestWindow(today: Date(timeIntervalSince1970: 1700049600)) == nil, "Select a daylight two-hour window and exclude thunder")
         let forecast = try JSONDecoder().decode(SpotForecast.self, from: Data(fixture.utf8))
         let hours = forecast.hours(near: origin)
         check(hours.count == 2 && hours.first?.temperature == -3 && hours.last?.gust == nil, "Handle past and unavailable forecasts without mismatching arrays")
