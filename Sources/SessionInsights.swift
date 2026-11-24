@@ -8,21 +8,8 @@ struct RiderTotals: Codable {
     let seconds: Double
 
     init(_ history: [SessionSummary]) {
-        let rides = history.filter {
-            $0.status != .recording && $0.setup?.sport.isRiding == true &&
-            $0.durationSeconds.isFinite && $0.durationSeconds > 0 &&
-            $0.handSimulationTest != true && $0.phoneTossTest != true && $0.recordingMode != .test
-        }
-        var events: [LiveJumpEstimate] = []
-        for session in rides {
-            guard let analysis = session.jumpAnalysis else { continue }
-            for candidate in analysis.candidates {
-                guard let estimate = session.liveEstimate(for: candidate),
-                      estimate.isPhoneToss != true, estimate.isHandLift != true,
-                      let height = estimate.heightMeters, height.isFinite, height > 0 else { continue }
-                events.append(estimate)
-            }
-        }
+        let rides = history.filter(Self.isRide)
+        let events = rides.flatMap { Self.measuredJumps(in: $0) }
         sessions = rides.count
         jumps = events.count
         height = events.compactMap(\.heightMeters).max()
@@ -30,10 +17,124 @@ struct RiderTotals: Codable {
         seconds = rides.reduce(0) { $0 + $1.durationSeconds }
     }
 
+    private static func isRide(_ session: SessionSummary) -> Bool {
+        session.status != .recording && session.setup?.sport.isRiding == true &&
+            session.durationSeconds.isFinite && session.durationSeconds > 0 &&
+            session.handSimulationTest != true && session.phoneTossTest != true && session.recordingMode != .test
+    }
+
+    fileprivate static func measuredJumps(in session: SessionSummary) -> [LiveJumpEstimate] {
+        guard isRide(session), let analysis = session.jumpAnalysis else { return [] }
+        return analysis.candidates.compactMap { candidate in
+            guard let estimate = session.liveEstimate(for: candidate),
+                  estimate.isPhoneToss != true, estimate.isHandLift != true,
+                  let height = estimate.heightMeters, height.isFinite, height > 0 else { return nil }
+            return estimate
+        }
+    }
+
     var timeOnWater: String {
         let minutes = Int(min(seconds / 60, Double(Int32.max)))
         let hours = minutes / 60
         return hours > 0 ? "\(hours) ч \(minutes % 60) мин" : "\(minutes) мин"
+    }
+}
+
+enum RiderTopPeriod: String, CaseIterable, Identifiable {
+    case all, today, yesterday, week, month
+
+    var id: Self { self }
+    var title: String {
+        switch self {
+        case .all: return "За всё время"
+        case .today: return "Сегодня"
+        case .yesterday: return "Вчера"
+        case .week: return "Эта неделя"
+        case .month: return "Этот месяц"
+        }
+    }
+
+    func interval(at now: Date, timeZone: TimeZone = .current) -> DateInterval? {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = timeZone
+        calendar.firstWeekday = 2
+        calendar.minimumDaysInFirstWeek = 4
+        switch self {
+        case .all: return nil
+        case .today: return calendar.dateInterval(of: .day, for: now)
+        case .yesterday:
+            guard let earlier = calendar.date(byAdding: .day, value: -1, to: now) else { return nil }
+            return calendar.dateInterval(of: .day, for: earlier)
+        case .week: return calendar.dateInterval(of: .weekOfYear, for: now)
+        case .month: return calendar.dateInterval(of: .month, for: now)
+        }
+    }
+}
+
+enum RiderTopMetric: String, CaseIterable, Identifiable {
+    case height, airtime, distance
+
+    var id: Self { self }
+    var title: String {
+        switch self {
+        case .height: return "Высота (м)"
+        case .airtime: return "Время полёта (с)"
+        case .distance: return "Дистанция в полёте (м)"
+        }
+    }
+    var unit: String { self == .airtime ? "с" : "м" }
+
+    func value(height: Double?, airtime: Double?, distance: Double?) -> Double? {
+        switch self {
+        case .height: return height
+        case .airtime: return airtime
+        case .distance: return distance
+        }
+    }
+}
+
+struct RiderJumpScore: Codable {
+    let id: UUID
+    let spotID: UUID?
+    let spot: String?
+    let startedAt: TimeInterval
+    let height: Double
+    let airtime: Double?
+    let distance: Double?
+    let kite: String?
+    let board: String?
+
+    func value(for metric: RiderTopMetric) -> Double? {
+        metric.value(height: height, airtime: airtime, distance: distance)
+    }
+
+    static func records(in history: [SessionSummary]) -> [Self] {
+        history.compactMap { session in
+            let jumps = RiderTotals.measuredJumps(in: session)
+            guard let height = jumps.compactMap(\.heightMeters).max() else { return nil }
+            let airtime = jumps.map(\.airtimeSeconds).filter { $0.isFinite && $0 > 0 }.max()
+            let distance = jumps.compactMap(\.distanceMeters).filter { $0.isFinite && $0 > 0 }.max()
+            let setup = session.setup?.cleaned
+            let name = setup?.spot
+            let kite = setup?.kiteTitle
+            let board = setup?.boardTitle
+            return Self(id: session.id, spotID: setup?.spotID,
+                        spot: name?.isEmpty == false ? name : nil,
+                        startedAt: session.startedAt.timeIntervalSince1970,
+                        height: height, airtime: airtime, distance: distance,
+                        kite: kite?.isEmpty == false ? kite : nil,
+                        board: board?.isEmpty == false ? board : nil)
+        }
+    }
+
+    static func best(for metric: RiderTopMetric, in records: [Self]) -> Self? {
+        records.filter { $0.value(for: metric) != nil }.min { lhs, rhs in
+            let left = lhs.value(for: metric) ?? 0
+            let right = rhs.value(for: metric) ?? 0
+            if left != right { return left > right }
+            if lhs.startedAt != rhs.startedAt { return lhs.startedAt > rhs.startedAt }
+            return lhs.id.uuidString < rhs.id.uuidString
+        }
     }
 }
 
@@ -48,7 +149,7 @@ struct RiderAchievement: Identifiable {
     var unlocked: Bool { value >= target }
     var progress: Double { min(1, max(0, value / target)) }
 
-    static func milestones(_ totals: RiderTotals) -> [Self] {
+    static func milestones(_ totals: RiderTotals, followers: Int = 0) -> [Self] {
         let sessions = Double(totals.sessions)
         let hours = totals.seconds / 3600
         let height = totals.height ?? 0
@@ -59,7 +160,10 @@ struct RiderAchievement: Identifiable {
             Self(id: "five-meters", title: "Заглянул в окна второго этажа", icon: "arrow.up.right", goal: "Прыжок от 5 м", value: height, target: 5),
             Self(id: "ten-meters", title: "Там, где крыши", icon: "arrow.up.to.line", goal: "Прыжок от 10 м", value: height, target: 10),
             Self(id: "three-seconds", title: "Забыл приземлиться", icon: "timer", goal: "Зависание от 3 с", value: totals.airtime ?? 0, target: 3),
-            Self(id: "fifty-jumps", title: "Земля, приём", icon: "bolt.fill", goal: "50 прыжков с высотой", value: Double(totals.jumps), target: 50)
+            Self(id: "fifty-jumps", title: "Земля, приём", icon: "bolt.fill", goal: "50 прыжков с высотой", value: Double(totals.jumps), target: 50),
+            Self(id: "first-follower", title: "Первый зритель", icon: "person.badge.plus", goal: "1 подписчик", value: Double(followers), target: 1),
+            Self(id: "ten-followers", title: "Фан-клуб на берегу", icon: "person.2.fill", goal: "10 подписчиков", value: Double(followers), target: 10),
+            Self(id: "fifty-followers", title: "Весь спот смотрит", icon: "person.3.fill", goal: "50 подписчиков", value: Double(followers), target: 50)
         ]
     }
 }
@@ -148,6 +252,12 @@ struct SessionSetup: Codable {
         boardDetails = selection
     }
 
+    mutating func clearEquipment() {
+        selectKite("", area: nil)
+        board = ""
+        boardDetails = nil
+    }
+
     mutating func selectSpot(_ selected: RiderSpot) {
         spot = selected.name
         spotID = selected.id
@@ -162,7 +272,7 @@ struct SessionSetup: Codable {
         var next = self
         next.sport = .kite
         next.kiteStyle = .bigAir
-        if next.placement == .hand { next.placement = .unspecified }
+        next.placement = .chest
         return next.cleaned
     }
 

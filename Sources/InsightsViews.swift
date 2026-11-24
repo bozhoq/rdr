@@ -160,7 +160,7 @@ struct BoardPicker: View {
                         NavigationLink(brand.name) { BoardModels(brand: brand, choose: choose) }
                     }
                 }
-                NavigationLink("Указать доску или лыжи вручную") {
+                NavigationLink("Указать доску вручную") {
                     BoardManualEntry(brand: setup.boardDetails?.brand ?? "",
                                      model: setup.boardDetails?.model ?? setup.board,
                                      size: setup.boardDetails?.size ?? "", choose: choose)
@@ -174,7 +174,7 @@ struct BoardPicker: View {
                 }
             }
             .searchable(text: $search, prompt: "Поиск бренда доски")
-            .navigationTitle("Доска / лыжи")
+            .navigationTitle("Доска")
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Закрыть") { dismiss() } } }
         }.tint(RiderTheme.accent)
     }
@@ -271,7 +271,7 @@ struct SetupFields: View {
             }
         }
         Button { showingBoardPicker = true } label: {
-            LabeledContent("Доска / лыжи", value: setup.boardTitle.isEmpty ? "Выбрать" : setup.boardTitle)
+            LabeledContent("Доска", value: setup.boardTitle.isEmpty ? "Выбрать" : setup.boardTitle)
         }.sheet(isPresented: $showingBoardPicker) {
             BoardPicker(setup: $setup, recent: recent)
         }

@@ -22,13 +22,18 @@ private struct Tabs: View {
     @ObservedObject var recorder: SessionRecorder
     @State private var selectedTab = Tab.record
     @State private var riderPath: [RiderDestination] = []
+    @StateObject private var social = RiderSocialStore()
 
     private enum Tab: Hashable {
-        case spot, record, rider
+        case feed, spot, record, tops, rider
     }
 
     var body: some View {
         TabView(selection: $selectedTab) {
+            NavigationStack { RiderFeedView() }
+                .tabItem { Label("Лента", systemImage: "rectangle.stack") }
+                .tag(Tab.feed)
+
             NavigationStack {
                 SpotsView(recorder: recorder) { selectedTab = .record }
             }
@@ -45,6 +50,10 @@ private struct Tabs: View {
             .tabItem { Label("Запись", systemImage: "waveform") }
             .tag(Tab.record)
 
+            NavigationStack { RiderTopsView(recorder: recorder) }
+                .tabItem { Label("Топы", systemImage: "trophy") }
+                .tag(Tab.tops)
+
             NavigationStack(path: $riderPath) {
                 RiderProfileView(recorder: recorder)
                     .navigationDestination(for: RiderDestination.self) { destination in
@@ -57,6 +66,7 @@ private struct Tabs: View {
             .tag(Tab.rider)
 
         }
+        .environmentObject(social)
         .tint(RiderTheme.accent)
         .alert("Rider", isPresented: Binding(
             get: { recorder.errorMessage != nil },
@@ -72,12 +82,11 @@ private struct Tabs: View {
 private struct GearPresetsView: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var recorder: SessionRecorder
-    @State private var name = ""
-    @State private var saveFailed = false
+    @State private var creating = false
 
     var body: some View {
         NavigationStack {
-            Form {
+            List {
                 if !recorder.gearPresets.isEmpty {
                     Section("Мои комплекты") {
                         ForEach(recorder.gearPresets) { preset in
@@ -96,32 +105,60 @@ private struct GearPresetsView: View {
                         }
                     }
                 }
-                Section("Сохранить текущий комплект") {
-                    if GearPreset.canSave(recorder.draftSetup) {
-                        LabeledContent("Кайт", value: recorder.draftSetup.kiteTitle)
-                        LabeledContent("Доска", value: recorder.draftSetup.boardTitle)
-                        TextField("Название комплекта", text: $name)
-                            .onChange(of: name) { _, _ in saveFailed = false }
-                        Button("Сохранить комплект") {
-                            if recorder.saveGearPreset(named: name) { dismiss() }
-                            else { saveFailed = true }
-                        }
-                        .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                        if saveFailed {
-                            Text("Такое название или сочетание кайта и доски уже сохранено.")
-                                .font(.footnote).foregroundStyle(.secondary)
-                        }
-                    } else {
-                        Text("Выберите кайт и доску на экране записи, чтобы сохранить их вместе.")
-                            .foregroundStyle(.secondary)
-                    }
+                Button { creating = true } label: {
+                    Label("Добавить комплект", systemImage: "plus")
+                }
+                Button("Запись без комплекта") {
+                    recorder.clearGearPreset()
+                    dismiss()
                 }
             }
             .navigationTitle("Комплекты")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Закрыть") { dismiss() } } }
+            .navigationDestination(isPresented: $creating) {
+                GearPresetEditor(recorder: recorder, didSave: { dismiss() })
+            }
         }
         .tint(RiderTheme.accent)
+    }
+}
+
+private struct GearPresetEditor: View {
+    @ObservedObject var recorder: SessionRecorder
+    let didSave: () -> Void
+    @State private var name = ""
+    @State private var equipment = SessionSetup(sport: .kite)
+    @State private var showingKites = false
+    @State private var showingBoards = false
+    @State private var saveFailed = false
+
+    var body: some View {
+        Form {
+            TextField("Название комплекта", text: $name)
+                .onChange(of: name) { _, _ in saveFailed = false }
+            Button { showingKites = true } label: {
+                LabeledContent("Кайт", value: equipment.kiteTitle.isEmpty ? "Выбрать" : equipment.kiteTitle)
+            }
+            Button { showingBoards = true } label: {
+                LabeledContent("Доска", value: equipment.boardTitle.isEmpty ? "Выбрать" : equipment.boardTitle)
+            }
+            Button("Сохранить комплект") {
+                if recorder.saveGearPreset(named: name, equipment: equipment) { didSave() }
+                else { saveFailed = true }
+            }
+            .disabled(!GearPreset.canSave(equipment) || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            if saveFailed {
+                Text("Такое название или сочетание кайта и доски уже сохранено.").foregroundStyle(.secondary)
+            }
+        }
+        .navigationTitle("Новый комплект")
+        .sheet(isPresented: $showingKites) {
+            KitePicker(setup: $equipment, recent: SetupSuggestions(history: recorder.history).kites)
+        }
+        .sheet(isPresented: $showingBoards) {
+            BoardPicker(setup: $equipment, recent: recorder.history)
+        }
     }
 }
 
@@ -130,7 +167,7 @@ private struct RecordingView: View {
     @ObservedObject var recorder: SessionRecorder
     let onStop: () -> Void
     @State private var device = RecordingDevice.phone
-    @State private var gear: GearField?
+    @State private var choosingSpot = false
     @State private var showingPresets = false
     @State private var newGPSPoint = false
     @State private var showingTools = false
@@ -139,29 +176,6 @@ private struct RecordingView: View {
     @State private var markerKind = MarkerKind.walking
 
     private enum RecordingDevice: Hashable { case phone, watch }
-    private enum GearField: String, Identifiable {
-        case spot = "Спот"
-        case kite = "Кайт"
-        case board = "Доска"
-        var id: Self { self }
-
-        var key: WritableKeyPath<SessionSetup, String> {
-            switch self {
-            case .spot: return \.spot
-            case .kite: return \.kite
-            case .board: return \.board
-            }
-        }
-
-        func choices(_ suggestions: SetupSuggestions) -> [String] {
-            switch self {
-            case .spot: return suggestions.spots
-            case .kite: return suggestions.kites
-            case .board: return suggestions.boards
-            }
-        }
-    }
-
     var body: some View {
         Group {
             if let session = recorder.live {
@@ -173,23 +187,13 @@ private struct RecordingView: View {
                     .toolbar(.hidden, for: .navigationBar)
             }
         }
-        .sheet(item: $gear) { field in
-            let suggestions = SetupSuggestions(history: recorder.history)
-            if field == .spot {
-                SpotChoice(setup: Binding(get: { recorder.draftSetup }, set: { selection in
-                    recorder.draftSetup = selection
-                    if recorder.automaticConditions { recorder.automaticSpotOverride = selection.spot.isEmpty ? nil : selection.spot }
-                }), spots: recorder.spots, recent: suggestions.spots)
-            } else if field == .kite, usesKitePicker {
-                KitePicker(setup: $recorder.draftSetup, recent: suggestions.kites)
-            } else if field == .board {
-                BoardPicker(setup: $recorder.draftSetup, recent: recorder.history)
-            } else {
-                GearChoice(title: gearTitle(field), initial: recorder.draftSetup[keyPath: field.key],
-                           options: field.choices(suggestions)) { value in
-                    recorder.draftSetup[keyPath: field.key] = value
+        .sheet(isPresented: $choosingSpot) {
+            SpotChoice(setup: Binding(get: { recorder.draftSetup }, set: { selection in
+                recorder.draftSetup = selection
+                if recorder.automaticConditions {
+                    recorder.automaticSpotOverride = selection.spot.isEmpty ? nil : selection.spot
                 }
-            }
+            }), spots: recorder.spots, recent: SetupSuggestions(history: recorder.history).spots)
         }
         .sheet(isPresented: $showingPresets) {
             GearPresetsView(recorder: recorder)
@@ -218,7 +222,6 @@ private struct RecordingView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 RDRWordmark().frame(maxWidth: .infinity)
-                Text("Новая сессия").font(.largeTitle.bold())
 
                 VStack(spacing: 0) {
                     Picker("Спот и ветер", selection: $recorder.automaticConditions) {
@@ -227,33 +230,36 @@ private struct RecordingView: View {
                     }.pickerStyle(.segmented).padding(.vertical, 12)
                     if recorder.automaticConditions {
                         if let chosen = recorder.automaticSpotOverride {
-                            Button(chosen) { gear = .spot }
+                            Button(chosen) { choosingSpot = true }
                         } else if recorder.locating {
                             ProgressView("Получаем координаты…")
                         } else if let fix = recorder.usableFix, let nearest = recorder.nearestSpot(to: fix) {
                             LabeledContent("Спот", value: nearest.name)
                         } else if recorder.attemptedLocation || recorder.authorization == .denied || recorder.authorization == .restricted {
                             Text("Не удалось определить ближайший спот, пожалуйста, укажите спот самостоятельно")
-                            Button("Выбрать спот") { gear = .spot }
+                            Button("Выбрать спот") { choosingSpot = true }
                             Button("Добавить мой спот") { newGPSPoint = true }
                         } else {
                             Button("Определить спот по GPS", action: recorder.locateSpot)
                         }
                     } else {
-                        gearRow(.spot)
-                        TextField("Ветер, м/с", text: $recorder.manualWind).keyboardType(.decimalPad)
+                        Button { choosingSpot = true } label: {
+                            LabeledContent("Спот", value: recorder.draftSetup.spot.isEmpty ? "Выбрать" : recorder.draftSetup.spot)
+                        }.padding(.vertical, 10)
+                        Divider()
+                        Picker("Ветер", selection: $recorder.manualWind) {
+                            Text("Не указан").tag(ManualWindRange?.none)
+                            ForEach(ManualWindRange.allCases) { range in Text(range.title).tag(Optional(range)) }
+                        }.pickerStyle(.menu)
                         Picker("Откуда дует", selection: $recorder.manualDirection) {
                             Text("Не указано").tag(Int?.none)
                             ForEach(0..<8, id: \.self) { i in
-                                Text(SpotForecast.compass(Double(i * 45))).tag(Optional(i * 45))
+                                let bearing = Double(i * 45)
+                                Text(SpotForecast.compass(bearing) + " " + SpotForecast.windArrow(bearing)).tag(Optional(i * 45))
                             }
-                        }
-                        if !recorder.manualWindValid { Text("Проверьте скорость и направление ветра.").font(.footnote) }
+                        }.pickerStyle(.menu)
+                        if !recorder.manualWindValid { Text("Укажите диапазон ветра.").font(.footnote) }
                     }
-                    Divider()
-                    gearRow(.kite)
-                    Divider()
-                    gearRow(.board)
                     Divider()
                     Button { showingPresets = true } label: {
                         LabeledContent("Комплект", value: recorder.gearPresets.first(where: {
@@ -283,14 +289,6 @@ private struct RecordingView: View {
                 .controlSize(.large)
                 .disabled(device == .watch || (!recorder.automaticConditions && !recorder.manualWindValid) || !recorder.hasRecordingSensors || recorder.analyzingSessionID != nil)
 
-                DisclosureGroup("Настройки записи") {
-                    VStack(spacing: 15) {
-                        Picker("Где телефон", selection: $recorder.draftSetup.placement) {
-                            ForEach(PhonePlacement.allCases.filter { $0 != .hand }, id: \.self) { Text($0.title).tag($0) }
-                        }
-                        locationControls
-                    }.padding(.top, 12)
-                }.lagoonCard()
                 if !recorder.hasRecordingSensors { Text("Датчики записи пока недоступны.").foregroundStyle(.secondary) }
                 if recorder.analyzingSessionID != nil { ProgressView("Разбираем сохранённую сессию…") }
             }.padding(20)
@@ -310,7 +308,7 @@ private struct RecordingView: View {
         NavigationStack {
             Form {
                 Section("Калибровка") {
-                    Text("Положите телефон плашмя на неподвижную поверхность на 5 секунд. После проверки закрепите его и начните запись.")
+                    Text("Положите телефон плашмя на неподвижную поверхность на 5 секунд. После проверки закрепите его на груди и начните запись.")
                     if recorder.sensorCheckRunning {
                         ProgressView("Проверяем датчики 5 секунд")
                     } else if recorder.checkedCalibration != nil {
@@ -347,33 +345,6 @@ private struct RecordingView: View {
         guard available else { return "Недоступен" }
         guard let response else { return "Проверяется" }
         return response ? "Есть данные" : "Нет ответа"
-    }
-
-    private func gearRow(_ field: GearField) -> some View {
-        let setup = recorder.draftSetup
-        let value = field == .kite ? setup.kiteTitle : field == .board ? setup.boardTitle : setup.spot
-        return Button { gear = field } label: {
-            HStack(spacing: 10) {
-                Text(gearTitle(field)).font(.body.weight(.medium)).foregroundStyle(.primary)
-                Spacer(minLength: 8)
-                Text(value.isEmpty ? "Выбрать" : value).foregroundStyle(.secondary).lineLimit(2)
-                Image(systemName: "chevron.right").font(.caption.weight(.semibold)).accessibilityHidden(true)
-            }
-            .padding(.vertical, 13)
-            .contentShape(Rectangle())
-        }.buttonStyle(.plain)
-    }
-
-    private var usesKitePicker: Bool {
-        let sport = recorder.draftSetup.sport
-        return sport.usesKite || sport == .groundTest || sport == .unclassified
-    }
-
-    private func gearTitle(_ field: GearField) -> String {
-        guard field == .kite else { return field.rawValue }
-        if recorder.draftSetup.sport == .wing { return "Винг" }
-        if recorder.draftSetup.sport == .windsurf { return "Парус" }
-        return field.rawValue
     }
 
     private func recording(_ session: SessionSummary) -> some View {
@@ -505,226 +476,289 @@ struct RDRWordmark: View {
     }
 }
 
-private struct GearChoice: View {
-    @Environment(\.dismiss) private var dismiss
-    let title: String
-    @State private var draft: String
-    let options: [String]
-    let onSave: (String) -> Void
-
-    init(title: String, initial: String, options: [String], onSave: @escaping (String) -> Void) {
-        self.title = title
-        _draft = State(initialValue: initial)
-        self.options = options
-        self.onSave = onSave
-    }
-
-    var body: some View {
-        NavigationStack {
-            Form {
-                TextField("Введите название", text: $draft)
-                    .onChange(of: draft) { _, value in if value.count > 100 { draft = String(value.prefix(100)) } }
-                if !options.isEmpty {
-                    Section("Недавние") {
-                        ForEach(options, id: \.self) { value in
-                            Button(value) { onSave(value); dismiss() }
-                        }
-                    }
-                }
-            }
-            .scrollContentBackground(.hidden)
-            .background(RiderTheme.canvas.ignoresSafeArea())
-            .navigationTitle(title)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Отмена") { dismiss() } }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Готово") { onSave(draft.trimmingCharacters(in: .whitespacesAndNewlines)); dismiss() }
-                }
-            }
-        }
-    }
-}
-
-private struct StopRecordingSlider: View {
-    let onStop: () -> Void
-    let accessibleStop: () -> Void
-    @GestureState private var dragOffset: CGFloat = 0
-
-    var body: some View {
-        GeometryReader { proxy in
-            let travel = max(1, proxy.size.width - 66)
-            ZStack(alignment: .leading) {
-                Capsule().fill(.black.opacity(0.18))
-                Capsule().strokeBorder(.white.opacity(0.35))
-                Text("Сдвинь для завершения")
-                    .font(.subheadline.weight(.semibold))
-                    .frame(maxWidth: .infinity)
-                    .padding(.leading, 48).padding(.trailing, 12)
-                    .opacity(Double(max(0.12, 1 - dragOffset / travel)))
-                Circle()
-                    .fill(RiderTheme.foam)
-                    .frame(width: 50, height: 50)
-                    .overlay {
-                        Image(systemName: "chevron.right").font(.headline).foregroundStyle(RiderTheme.action)
-                    }
-                    .contentShape(Circle())
-                    .offset(x: min(travel, max(0, dragOffset)))
-                    .gesture(DragGesture(minimumDistance: 8)
-                        .updating($dragOffset) { value, state, _ in state = max(0, value.translation.width) }
-                        .onEnded { value in if value.translation.width >= travel * 0.92 { onStop() } })
-                    .padding(.leading, 8)
-            }
-        }
-        .frame(height: 66)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Завершить запись")
-        .accessibilityAddTraits(.isButton)
-        .accessibilityAction { accessibleStop() }
-    }
-}
-
 private struct PersonalStatsView: View {
+
     @ObservedObject var recorder: SessionRecorder
+
     @State private var pendingDeletion: SessionSummary?
+
     @State private var search = ""
+
     @State private var activityFilter: SessionSport?
+
     @State private var styleFilter: KiteStyle?
+
     @State private var spotFilter: UUID?
 
+
+
     private var filtered: [SessionSummary] {
+
         recorder.history.filter { session in
+
             (activityFilter == nil || activityFilter == (session.setup?.sport ?? .unclassified)) &&
+
             (styleFilter == nil || styleFilter == session.setup?.kiteStyle) &&
+
             (spotFilter == nil || recorder.spots.first(where: { $0.id == spotFilter })?.matches(session.setup) == true) &&
+
             session.matches(search)
+
         }
+
     }
 
+
+
     var body: some View {
+
         Group {
+
             if recorder.history.isEmpty {
+
                 ContentUnavailableView {
+
                     Label {
+
                         Text("Сессий пока нет")
+
                     } icon: {
+
                         Image(systemName: "clock")
+
                             .foregroundStyle(RiderTheme.accent)
+
                     }
+
                 } description: {
+
                     Text("Завершите запись, чтобы увидеть сводку и выгрузить лог.")
+
                 }
+
             } else {
+
                 List {
+
                     if !recorder.gearPresets.isEmpty {
+
                         Section {
+
                             DisclosureGroup("По комплектам") {
+
                                 ForEach(recorder.gearPresets) { preset in
+
                                     let totals = RiderTotals(recorder.history.filter { $0.setup.map(preset.matches) == true })
+
                                     DisclosureGroup(preset.name) {
+
                                         Text(preset.subtitle).font(.caption).foregroundStyle(.secondary)
+
                                         LabeledContent("Сессии", value: String(totals.sessions))
+
                                         LabeledContent("Часы на воде", value: totals.timeOnWater)
+
                                         LabeledContent("Топ прыжок", value: metric(totals.height, unit: "м"))
+
                                     }
+
                                 }
+
                             }
+
                         }
+
                     }
+
                     Section("Сессии") {
+
                         ForEach(filtered) { session in
+
                             NavigationLink {
+
                                 SessionDetail(recorder: recorder, originalSession: session)
+
                             } label: {
+
                                 VStack(alignment: .leading, spacing: 10) {
+
                                     if let title = session.review?.title, !title.isEmpty {
+
                                         Text(title).font(.headline).lineLimit(2)
+
                                     }
+
                                     Text(session.startedAt, format: .dateTime.day().month(.wide).hour().minute())
+
                                         .font(.headline)
+
                                     if session.status == .interrupted {
+
                                         Label("Запись прервана", systemImage: "exclamationmark.circle")
+
                                             .font(.subheadline)
+
                                             .foregroundStyle(.secondary)
+
                                     }
+
                                     if let setup = session.setup {
+
                                         Text([setup.activityTitle, setup.spot].filter { !$0.isEmpty }.joined(separator: " · "))
+
                                             .font(.subheadline).foregroundStyle(RiderTheme.foam).lineLimit(2)
+
                                     }
+
                                     HStack(spacing: 16) {
+
                                         Text(durationText(session.durationSeconds)).monospacedDigit()
+
                                         if let analysis = session.jumpAnalysis { Text("Событий: \(analysis.candidates.count)") }
+
                                     }.font(.subheadline.weight(.semibold)).foregroundStyle(RiderTheme.foam)
+
                                 }
+
                                 .foregroundStyle(.white)
+
                                 .padding(17)
+
                                 .frame(maxWidth: .infinity, alignment: .leading)
+
                                 .background(RiderTheme.lagoon, in: RoundedRectangle(cornerRadius: 18))
+
                             }
+
                             .swipeActions {
+
                                 Button(role: .destructive) {
+
                                     pendingDeletion = session
+
                                 } label: {
+
                                     Label("Удалить", systemImage: "trash")
+
                                 }
+
                                 .disabled(recorder.analyzingSessionID == session.id)
+
                             }
+
                             .listRowInsets(EdgeInsets(top: 6, leading: 10, bottom: 6, trailing: 10))
+
                             .listRowSeparator(.hidden)
+
                             .listRowBackground(Color.clear)
+
                         }
+
                     }
+
                 }
+
                 .listStyle(.insetGrouped)
+
                 .scrollContentBackground(.hidden)
+
                 .overlay {
+
                     if filtered.isEmpty {
+
                         ContentUnavailableView("Нет подходящих сессий", systemImage: "line.3.horizontal.decrease.circle")
+
                     }
+
                 }
+
             }
+
         }
+
         .background(RiderTheme.canvas.ignoresSafeArea())
+
         .toolbarBackground(RiderTheme.canvas, for: .navigationBar, .tabBar)
+
         .toolbarBackground(.visible, for: .navigationBar, .tabBar)
+
         .navigationTitle("Личная статистика")
+
         .searchable(text: $search, prompt: "Название, спот, снаряжение, заметки")
+
         .toolbar {
+
             ToolbarItem(placement: .topBarTrailing) {
+
                 Menu {
+
                     Picker("Активность", selection: $activityFilter) {
+
                         Text("Все активности").tag(nil as SessionSport?)
+
                         ForEach(SessionSport.allCases, id: \.self) { Text($0.title).tag(Optional($0)) }
+
                     }
+
                     if activityFilter == nil || activityFilter?.supportsKiteStyle == true {
+
                         Picker("Стиль", selection: $styleFilter) {
+
                             Text("Все стили").tag(nil as KiteStyle?)
+
                             ForEach(KiteStyle.allCases, id: \.self) { Text($0.title).tag(Optional($0)) }
+
                         }
+
                     }
+
                     if !recorder.spots.isEmpty {
+
                         Picker("Спот", selection: $spotFilter) {
+
                             Text("Все споты").tag(nil as UUID?)
+
                             ForEach(recorder.spots) { spot in Text(spot.name).tag(Optional(spot.id)) }
+
                         }
+
                     }
+
                 } label: {
+
                     Label("Фильтры", systemImage: "line.3.horizontal.decrease.circle")
+
                 }
+
             }
+
         }
+
         .onChange(of: activityFilter) { _, newFilter in
+
             if newFilter?.supportsKiteStyle == false { styleFilter = nil }
+
         }
+
         .confirmationDialog("Удалить сессию и её лог?", isPresented: Binding(
+
             get: { pendingDeletion != nil },
+
             set: { if !$0 { pendingDeletion = nil } }
+
         ), titleVisibility: .visible, presenting: pendingDeletion) { session in
+
             Button("Удалить", role: .destructive) { recorder.delete(session.id) }
+
             Button("Отмена", role: .cancel) {}
+
         }
+
     }
+
 }
+
+
 
 struct SessionDetail: View {
     @ObservedObject var recorder: SessionRecorder
@@ -816,7 +850,7 @@ struct SessionDetail: View {
             if !setup.kite.isEmpty {
                 LabeledContent(setup.sport == .wing ? "Винг" : setup.sport == .windsurf ? "Парус" : "Кайт", value: setup.kiteTitle)
             }
-            if !setup.boardTitle.isEmpty { LabeledContent("Доска / лыжи", value: setup.boardTitle) }
+            if !setup.boardTitle.isEmpty { LabeledContent("Доска", value: setup.boardTitle) }
             LabeledContent("Где телефон", value: setup.placement.title)
         }
         Button("Изменить занятие и снаряжение") { editingSetup = true }

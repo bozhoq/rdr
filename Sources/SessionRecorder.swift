@@ -26,7 +26,7 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
     @Published var automaticConditions = (UserDefaults.standard.object(forKey: "rider.autoConditions") as? Bool) ?? true {
         didSet { UserDefaults.standard.set(automaticConditions, forKey: "rider.autoConditions") }
     }
-    @Published var manualWind = ""
+    @Published var manualWind: ManualWindRange?
     @Published var manualDirection: Int?
     @Published var automaticSpotOverride: String?
     @Published private(set) var attemptedLocation = false
@@ -91,14 +91,9 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
         if authorization == .notDetermined { location.requestWhenInUseAuthorization() }
         else if locationAuthorized { locating = true; location.requestLocation() }
     }
-    var manualWindValid: Bool {
-        validNumber(manualWind, max: 103) && (manualDirection == nil || !manualWind.isEmpty)
-    }
-    private func validNumber(_ text: String, max: Double) -> Bool {
-        text.isEmpty || Double(text.replacingOccurrences(of: ",", with: ".")).map { $0.isFinite && (0...max).contains($0) } == true
-    }
+    var manualWindValid: Bool { manualDirection == nil || manualWind != nil }
 
-    private var effectivePlacement: PhonePlacement { draftSetup.placement }
+    private var effectivePlacement: PhonePlacement { .chest }
 
     private var sensorInventory: RecordingSensors {
         RecordingSensors(accelerometer: motion.isAccelerometerAvailable, gyroscope: motion.isGyroAvailable,
@@ -111,8 +106,7 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
     }
 
     var savedCalibration: MotionCalibration? {
-        guard effectivePlacement != .unspecified else { return nil }
-        return calibrationPresets[effectivePlacement.rawValue]?.usable(at: Date(), systemVersion: UIDevice.current.systemVersion)
+        calibrationPresets[effectivePlacement.rawValue]?.usable(at: Date(), systemVersion: UIDevice.current.systemVersion)
     }
 
     override init() {
@@ -146,11 +140,18 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
         if let data = try? JSONEncoder().encode(draftSetup) { UserDefaults.standard.set(data, forKey: "rider.sessionSetup") }
     }
 
-    func saveGearPreset(named name: String) -> Bool {
-        guard live == nil, let preset = GearPreset(name: name, setup: draftSetup),
-              !gearPresets.contains(where: { $0.name.caseInsensitiveCompare(preset.name) == .orderedSame || $0.matches(draftSetup) })
-        else { return false }
-        return persistGearPresets(gearPresets + [preset])
+    func saveGearPreset(named name: String, equipment: SessionSetup) -> Bool {
+        guard live == nil, let preset = GearPreset(name: name, setup: equipment),
+              !gearPresets.contains(where: { $0.name.caseInsensitiveCompare(preset.name) == .orderedSame || $0.matches(equipment) }),
+              persistGearPresets(gearPresets + [preset]) else { return false }
+        useGearPreset(preset)
+        return true
+    }
+
+    func clearGearPreset() {
+        var setup = draftSetup
+        setup.clearEquipment()
+        reuseSetup(setup)
     }
 
     func useGearPreset(_ preset: GearPreset) {
@@ -158,7 +159,9 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
     }
 
     func deleteGearPreset(_ preset: GearPreset) {
-        _ = persistGearPresets(gearPresets.filter { $0.id != preset.id })
+        if persistGearPresets(gearPresets.filter { $0.id != preset.id }), preset.matches(draftSetup) {
+            clearGearPreset()
+        }
     }
 
     private func persistGearPresets(_ presets: [GearPreset]) -> Bool {
@@ -304,6 +307,9 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
         UIDevice.current.isBatteryMonitoringEnabled = true
         let calibration = checkedCalibration
         var sessionSetup = draftSetup.forRecording
+        if !gearPresets.contains(where: { $0.matches(sessionSetup) }) {
+            sessionSetup.clearEquipment()
+        }
         let fix = automaticConditions ? usableFix : nil
         if automaticConditions {
             sessionSetup.spotID = nil
@@ -335,9 +341,10 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
             sensors: sensors
         )
         session.automaticConditions = automaticConditions
-        if !automaticConditions, let speed = Double(manualWind.replacingOccurrences(of: ",", with: ".")) {
-            session.wind = SessionWind(knots: speed / SessionWind.metersPerSecondPerKnot, direction: manualDirection.map { Double($0) },
-                                       date: session.startedAt, source: "Вручную")
+        if !automaticConditions, let range = manualWind {
+            session.wind = SessionWind(knots: range.midpoint / SessionWind.metersPerSecondPerKnot,
+                                       direction: manualDirection.map { Double($0) },
+                                       date: session.startedAt, source: "Вручную", range: range)
         }
         do {
             let newLog = try store.makeLog(for: session)

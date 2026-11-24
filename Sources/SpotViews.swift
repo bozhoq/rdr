@@ -12,12 +12,24 @@ struct SpotsView: View {
     let goToRecording: () -> Void
     @State private var adding = false
     @State private var pendingDelete: RiderSpot?
+    @State private var favoriteForecasts: FavoriteForecasts?
     @State private var forecastRefresh = 0
+
+    private struct FavoriteForecasts {
+        let target: [RiderSpot]
+        let values: [(RiderSpot, SpotForecast)]
+    }
+
+    private struct ForecastRequest: Hashable {
+        let spots: [RiderSpot]
+        let revision: Int
+    }
 
     private var favorites: [RiderSpot] { recorder.spots.filter { recorder.favoriteSpots.contains($0.id) } }
 
     var body: some View {
-        List {
+        let request = ForecastRequest(spots: favorites, revision: forecastRefresh)
+        return List {
             TimelineView(.everyMinute) { context in
                 let day = SpotForecast.RankingDay.forEveningSwitch(at: context.date)
                 NavigationLink {
@@ -26,8 +38,8 @@ struct SpotsView: View {
             }
             if !favorites.isEmpty {
                 Section("Ближайшее окно в избранном") {
-                    FavoriteWindRow(spots: favorites, recorder: recorder, goToRecording: goToRecording)
-                        .id(forecastRefresh)
+                    let values = favoriteForecasts.flatMap { $0.target == request.spots ? $0.values : nil }
+                    FavoriteWindRow(forecasts: values, recorder: recorder, goToRecording: goToRecording)
                 }
             }
             Section("Избранные споты") {
@@ -40,6 +52,14 @@ struct SpotsView: View {
         .background(RiderTheme.canvas.ignoresSafeArea())
         .navigationTitle("Спот")
         .refreshable { await MainActor.run { forecastRefresh += 1 } }
+        .task(id: request) {
+            guard !request.spots.isEmpty else { favoriteForecasts = nil; return }
+            let forecasts = await SpotForecast.fetchAvailable(for: request.spots)
+            guard !Task.isCancelled else { return }
+            if forecasts.isEmpty, favoriteForecasts?.target == request.spots,
+               favoriteForecasts?.values.isEmpty == false { return }
+            favoriteForecasts = FavoriteForecasts(target: request.spots, values: forecasts)
+        }
         .sheet(isPresented: $adding) { SpotEditor(original: nil, save: recorder.saveSpot) }
         .alert("Удалить личный спот?", isPresented: Binding(get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } }), presenting: pendingDelete) { spot in
             Button("Удалить", role: .destructive) { recorder.deletePersonalSpot(spot) }
@@ -63,16 +83,16 @@ struct SpotsView: View {
 }
 
 private struct FavoriteWindRow: View {
-    let spots: [RiderSpot]
-    @ObservedObject var recorder: SessionRecorder
+    let forecasts: [(RiderSpot, SpotForecast)]?
+    let recorder: SessionRecorder
     let goToRecording: () -> Void
-    @State private var forecasts: [(RiderSpot, SpotForecast)]?
 
     var body: some View {
-        Group {
+        VStack(alignment: .leading, spacing: 0) {
             content
         }
-        .task(id: spots) { await load() }
+        .frame(minHeight: 46, alignment: .leading)
+        .animation(nil, value: forecasts == nil)
     }
 
     @ViewBuilder private var content: some View {
@@ -104,7 +124,7 @@ private struct FavoriteWindRow: View {
                 }
             }
         } else {
-            ProgressView("Смотрим прогноз избранных спотов")
+            Text("Загружаем прогноз избранных спотов").foregroundStyle(.secondary)
         }
     }
 
@@ -118,12 +138,6 @@ private struct FavoriteWindRow: View {
         return start + "–" + formatter.string(from: window.end)
     }
 
-    @MainActor private func load() async {
-        forecasts = nil
-        let fetched = await SpotForecast.fetchAvailable(for: spots)
-        guard !Task.isCancelled else { return }
-        forecasts = fetched
-    }
 }
 
 private struct SpotGroups<Row: View>: View {

@@ -115,6 +115,26 @@ struct SessionSummary: Codable, Identifiable {
     }
 }
 
+enum ManualWindRange: String, CaseIterable, Codable, Identifiable {
+    case fourToSix = "4–6"
+    case sixToEight = "6–8"
+    case eightToTen = "8–10"
+    case tenToTwelve = "10–12"
+    case twelveToFifteen = "12–15"
+
+    var id: Self { self }
+    var title: String { rawValue + " м/с" }
+    var midpoint: Double {
+        switch self {
+        case .fourToSix: return 5
+        case .sixToEight: return 7
+        case .eightToTen: return 9
+        case .tenToTwelve: return 11
+        case .twelveToFifteen: return 13.5
+        }
+    }
+}
+
 struct SessionWind: Codable {
     static let metersPerSecondPerKnot = 1852.0 / 3600.0
     var knots: Double
@@ -122,10 +142,12 @@ struct SessionWind: Codable {
     var direction: Double?
     var date: Date
     var source: String
+    var range: ManualWindRange?
 
     var title: String {
         let directionText = direction.map { " · " + SpotForecast.compass($0) } ?? ""
-        return (knots * Self.metersPerSecondPerKnot).formatted(.number.precision(.fractionLength(0...1))) + " м/с" + directionText
+        let speed = (knots * Self.metersPerSecondPerKnot).formatted(.number.precision(.fractionLength(0...1)))
+        return (range?.title ?? speed + " м/с") + directionText
     }
 }
 

@@ -7,19 +7,22 @@ enum RiderDestination: Hashable { case statistics }
 
 private struct RiderPublication: Codable {
     let name: String
+    let username: String?
     let bio: String?
     let totals: RiderTotals
     let avatar: Data?
+    let records: [RiderJumpScore]?
 }
 
-private struct RemoteRider: Decodable, Identifiable {
+fileprivate struct RemoteRider: Decodable, Identifiable {
     let id: String
     let profile: RiderPublication
     let followers: Int
     let following: Bool
+    let followingCount: Int?
 }
 
-private struct CommunityState: Decodable {
+fileprivate struct CommunityState: Decodable {
     let mine: RemoteRider?
     let riders: [RemoteRider]
 }
@@ -62,6 +65,28 @@ enum RiderCommunity {
         return result
     }
 
+    static func publishPost(_ post: RiderPost) async throws {
+        let path = "posts/" + post.id.uuidString.lowercased()
+        _ = try await requestData(path, method: "PUT", body: JSONEncoder().encode(post))
+    }
+
+    static func deletePost(_ id: UUID) async throws {
+        _ = try await requestData("posts/" + id.uuidString.lowercased(), method: "DELETE", body: nil)
+    }
+
+    static func feed(recommended: Bool) async throws -> [RiderFeedEntry] {
+        let path = recommended ? "feed/recommended" : "feed/following"
+        let data = try await requestData(path, method: "GET", body: nil)
+        return try JSONDecoder().decode([RiderFeedEntry].self, from: data)
+    }
+
+    static func tops(_ filter: RiderTopFilter) async throws -> [RiderTopEntry] {
+        let data = try await requestData("tops", method: "POST", body: JSONEncoder().encode(filter))
+        return try JSONDecoder().decode([RiderTopEntry].self, from: data)
+    }
+
+    fileprivate enum Rejection: Error { case conflict }
+
     private static func requestData(_ path: String, method: String, body: Data?) async throws -> Data {
         guard let base = endpoint else { throw URLError(.unsupportedURL) }
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
@@ -75,11 +100,20 @@ enum RiderCommunity {
             token = saved
         } else {
             guard status == errSecItemNotFound else { throw URLError(.userAuthenticationRequired) }
-            token = UUID().uuidString + UUID().uuidString
+            let created = UUID().uuidString + UUID().uuidString
             var item = query
-            item[kSecValueData as String] = Data(token.utf8)
+            item[kSecValueData as String] = Data(created.utf8)
             item[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-            guard SecItemAdd(item as CFDictionary, nil) == errSecSuccess else { throw URLError(.userAuthenticationRequired) }
+            let added = SecItemAdd(item as CFDictionary, nil)
+            if added == errSecSuccess {
+                token = created
+            } else if added == errSecDuplicateItem,
+                      SecItemCopyMatching(lookup as CFDictionary, &result) == errSecSuccess,
+                      let data = result as? Data, let saved = String(data: data, encoding: .utf8) {
+                token = saved
+            } else {
+                throw URLError(.userAuthenticationRequired)
+            }
         }
         var req = URLRequest(url: base.appendingPathComponent(path), cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 12)
         req.httpMethod = method
@@ -89,47 +123,94 @@ enum RiderCommunity {
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
         let (data, response) = try await URLSession.shared.data(for: req)
-        guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw URLError(.badServerResponse) }
+        let statusCode = (response as? HTTPURLResponse)?.statusCode
+        if statusCode == 409 { throw Rejection.conflict }
+        guard statusCode == 200 else { throw URLError(.badServerResponse) }
         return data
     }
 }
 
 struct RiderProfileView: View {
+    @EnvironmentObject private var social: RiderSocialStore
     @ObservedObject var recorder: SessionRecorder
     @AppStorage("rider.profileName") private var name = "Райдер"
+    @AppStorage("rider.username") private var username = ""
     @AppStorage("rider.profileBio") private var bio = ""
     @AppStorage("rider.profilePhoto") private var photo = Data()
     @State private var picked: PhotosPickerItem?
     @State private var editing = false
+    @State private var draftUsername = ""
+    @State private var showingAchievements = false
+    @State private var composing = false
+    @State private var mine: RemoteRider?
+
+    private var cleanedUsername: String {
+        draftUsername.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "^@", with: "", options: .regularExpression).lowercased()
+    }
+
+    private var usernameValid: Bool {
+        cleanedUsername.isEmpty || cleanedUsername.range(of: "^[a-z0-9_]{3,24}$", options: .regularExpression) != nil
+    }
 
     var body: some View {
         let totals = RiderTotals(recorder.history)
-        ScrollView {
+        let badges = RiderAchievement.milestones(totals, followers: mine?.followers ?? 0)
+        return ScrollView {
             VStack(spacing: 18) {
-                profile(totals)
+                profile
                 NavigationLink(value: RiderDestination.statistics) {
                     shortcut("Личная статистика", subtitle: "Сессии, маршруты и комплекты", icon: "chart.bar.xaxis")
                 }
                 .buttonStyle(.plain)
                 records(totals)
-                achievements(totals)
+                Button { showingAchievements = true } label: {
+                    shortcut("Ачивок: \(badges.filter(\.unlocked).count) из \(badges.count)",
+                             subtitle: "Полученные и закрытые", icon: "medal")
+                }
+                .buttonStyle(.plain)
                 NavigationLink {
-                    RiderCommunityView(totals: totals)
+                    RiderCommunityView(totals: totals, records: RiderJumpScore.records(in: recorder.history),
+                                       didLoad: { mine = $0.mine })
                 } label: {
                     shortcut("Райдеры", subtitle: "Публичные профили и подписки", icon: "person.2")
                 }
                 .buttonStyle(.plain)
+                postsGrid
             }
             .padding(20)
         }
         .background(RiderTheme.canvas.ignoresSafeArea())
         .navigationTitle("Райдер")
         .navigationBarTitleDisplayMode(.inline)
+        .sheet(isPresented: $composing) { RiderPostComposer(spots: recorder.spots) }
+        .sheet(isPresented: $showingAchievements) {
+            NavigationStack {
+                ScrollView { achievements(badges).padding(16) }
+                    .background(RiderTheme.canvas.ignoresSafeArea())
+                    .navigationTitle("Ачивки")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) { Button("Готово") { showingAchievements = false } }
+                    }
+            }
+        }
+        .task {
+            guard RiderCommunity.endpoint != nil else { return }
+            if let state = try? await RiderCommunity.request("riders"), !Task.isCancelled { mine = state.mine }
+        }
         .sheet(isPresented: $editing) {
             NavigationStack {
                 Form {
                     TextField("Имя", text: $name)
                         .onChange(of: name) { _, value in if value.count > 50 { name = String(value.prefix(50)) } }
+                    Section {
+                        TextField("@юзернейм", text: $draftUsername)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                    } footer: {
+                        Text("3–24 строчные латинские буквы, цифры или _.")
+                    }
                     TextField("О себе", text: $bio, axis: .vertical)
                         .lineLimit(3...5)
                         .onChange(of: bio) { _, value in if value.count > 160 { bio = String(value.prefix(160)) } }
@@ -137,7 +218,12 @@ struct RiderProfileView: View {
                 .navigationTitle("Профиль")
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
-                    ToolbarItem(placement: .confirmationAction) { Button("Готово") { editing = false } }
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Готово") {
+                            username = cleanedUsername
+                            editing = false
+                        }.disabled(!usernameValid)
+                    }
                 }
             }
         }
@@ -154,7 +240,7 @@ struct RiderProfileView: View {
         }
     }
 
-    private func profile(_ totals: RiderTotals) -> some View {
+    private var profile: some View {
         VStack(alignment: .leading, spacing: 13) {
             HStack(spacing: 15) {
                 PhotosPicker(selection: $picked, matching: .images) {
@@ -166,16 +252,27 @@ struct RiderProfileView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     let title = name.trimmingCharacters(in: .whitespacesAndNewlines)
                     Text(title.isEmpty ? "Райдер" : title).font(.title2.bold())
-                    Text("Сессии · \(totals.sessions)").font(.subheadline).foregroundStyle(RiderTheme.foam)
+                    if !username.isEmpty {
+                        Text("@" + username).font(.subheadline).foregroundStyle(RiderTheme.foam)
+                    }
                 }
                 Spacer(minLength: 0)
-                Button { editing = true } label: {
+                Button {
+                    draftUsername = username
+                    editing = true
+                } label: {
                     Image(systemName: "pencil").font(.headline).padding(10)
                         .background(.white.opacity(0.17), in: Circle())
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Изменить профиль")
             }
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 16) { followCounts }
+                VStack(alignment: .leading, spacing: 4) { followCounts }
+            }
+            .font(.subheadline.monospacedDigit())
+            .foregroundStyle(RiderTheme.foam)
             if !bio.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 Text(bio).font(.subheadline).fixedSize(horizontal: false, vertical: true)
             }
@@ -184,6 +281,37 @@ struct RiderProfileView: View {
         .padding(17)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RiderTheme.lagoon, in: RoundedRectangle(cornerRadius: 24))
+    }
+
+    @ViewBuilder private var followCounts: some View {
+        Text("Подписчики: \(mine?.followers ?? 0)")
+        Text("Подписан: \(mine?.followingCount ?? 0)")
+    }
+
+    private var postsGrid: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack {
+                Text("Посты").font(.title3.bold()).accessibilityAddTraits(.isHeader)
+                Spacer()
+                Button { composing = true } label: {
+                    Label("Добавить пост", systemImage: "plus").font(.subheadline.weight(.semibold))
+                }.buttonStyle(.bordered)
+            }
+            if social.posts.isEmpty {
+                Text("Здесь будут твои фото с каталок.").font(.subheadline).foregroundStyle(.secondary)
+            } else {
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: 3), spacing: 3) {
+                    ForEach(social.posts) { post in
+                        NavigationLink {
+                            RiderPostDetail(original: post, author: name, username: username, editable: true)
+                        } label: {
+                            RiderPostSquare(post: post)
+                        }.buttonStyle(.plain)
+                    }
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+            }
+        }
     }
 
     private func shortcut(_ title: String, subtitle: String, icon: String) -> some View {
@@ -232,15 +360,8 @@ struct RiderProfileView: View {
         .accessibilityElement(children: .combine)
     }
 
-    private func achievements(_ totals: RiderTotals) -> some View {
-        let badges = RiderAchievement.milestones(totals)
-        return VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("Ачивки").font(.title3.bold()).accessibilityAddTraits(.isHeader)
-                Spacer()
-                Text("\(badges.filter(\.unlocked).count) из \(badges.count)")
-                    .font(.subheadline.monospacedDigit()).foregroundStyle(.secondary)
-            }
+    private func achievements(_ badges: [RiderAchievement]) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 145), spacing: 10)], spacing: 10) {
                 ForEach(badges) { badge in
                     VStack(alignment: .leading, spacing: 7) {
@@ -265,7 +386,7 @@ struct RiderProfileView: View {
     }
 }
 
-private struct RiderAvatar: View {
+struct RiderAvatar: View {
     let photo: Data
     let size: CGFloat
 
@@ -285,8 +406,12 @@ private struct RiderAvatar: View {
 }
 
 private struct RiderCommunityView: View {
+    @EnvironmentObject private var social: RiderSocialStore
     let totals: RiderTotals
+    let records: [RiderJumpScore]
+    let didLoad: (CommunityState) -> Void
     @AppStorage("rider.profileName") private var name = "Райдер"
+    @AppStorage("rider.username") private var username = ""
     @AppStorage("rider.profileBio") private var bio = ""
     @AppStorage("rider.profilePhoto") private var photo = Data()
     @State private var community: CommunityState?
@@ -303,14 +428,16 @@ private struct RiderCommunityView: View {
                     if let community {
                         if let me = community.mine {
                             LabeledContent("Подписчики", value: String(me.followers))
+                            LabeledContent("Подписан", value: String(me.followingCount ?? 0))
                         }
                         Button(community.mine == nil ? "Опубликовать профиль" : "Обновить профиль") {
                             let title = name.trimmingCharacters(in: .whitespacesAndNewlines)
                             let description = bio.trimmingCharacters(in: .whitespacesAndNewlines)
                             perform("me", method: "PUT", payload: RiderPublication(
                                 name: title.isEmpty ? "Райдер" : String(title.prefix(50)),
+                                username: username.isEmpty ? nil : username,
                                 bio: description.isEmpty ? nil : String(description.prefix(160)),
-                                totals: totals, avatar: photo.isEmpty ? nil : photo
+                                totals: totals, avatar: photo.isEmpty ? nil : photo, records: records
                             ))
                         }
                         if community.mine != nil {
@@ -320,7 +447,7 @@ private struct RiderCommunityView: View {
                 } header: {
                     Text("Мой публичный профиль")
                 } footer: {
-                    Text("Публикуются имя, фото, описание и суммарные рекорды.")
+                    Text("Публикуются имя, юзернейм, фото, описание и рекорды по спотам со снаряжением для таблицы лидеров.")
                 }
                 Section("Другие райдеры") {
                     if community?.riders.isEmpty == true {
@@ -339,7 +466,10 @@ private struct RiderCommunityView: View {
                         } label: {
                             HStack(spacing: 9) {
                                 RiderAvatar(photo: rider.profile.avatar ?? Data(), size: 34)
-                                Text(rider.profile.name).font(.headline)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(rider.profile.name).font(.headline)
+                                    if let tag = rider.profile.username { Text("@" + tag).font(.caption).foregroundStyle(.secondary) }
+                                }
                             }
                         }
                     }
@@ -361,8 +491,17 @@ private struct RiderCommunityView: View {
         busy = true
         Task {
             defer { busy = false }
-            do { community = try await RiderCommunity.request(path, method: method, payload: payload); message = nil }
-            catch { message = "Нет подтверждения от сервера. Проверьте связь и обновите данные." }
+            do {
+                let result = try await RiderCommunity.request(path, method: method, payload: payload)
+                community = result
+                didLoad(result)
+                if path == "me", method == "DELETE" { social.makePostsPrivate() }
+                message = nil
+            } catch RiderCommunity.Rejection.conflict {
+                message = "Этот юзернейм уже занят. Выбери другой в профиле."
+            } catch {
+                message = "Нет подтверждения от сервера. Проверьте связь и обновите данные."
+            }
         }
     }
 }
