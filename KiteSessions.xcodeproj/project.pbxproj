@@ -17,6 +17,7 @@
         C00100000000000000000009 /* EventViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0020000000000000000000B /* EventViews.swift */; };
         C0010000000000000000000A /* CardArtwork.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0020000000000000000000C /* CardArtwork.swift */; };
         C0010000000000000000000B /* SpotViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0020000000000000000000D /* SpotViews.swift */; };
+        C0010000000000000000000C /* RiderProfile.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0020000000000000000000E /* RiderProfile.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -33,6 +34,7 @@
         C0020000000000000000000B /* EventViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EventViews.swift; sourceTree = "<group>"; };
         C0020000000000000000000C /* CardArtwork.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CardArtwork.swift; sourceTree = "<group>"; };
         C0020000000000000000000D /* SpotViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpotViews.swift; sourceTree = "<group>"; };
+        C0020000000000000000000E /* RiderProfile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RiderProfile.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -64,6 +66,7 @@
                 C00200000000000000000007 /* JumpDetector.swift */,
                 C0020000000000000000000C /* CardArtwork.swift */,
                 C0020000000000000000000D /* SpotViews.swift */,
+                C0020000000000000000000E /* RiderProfile.swift */,
                 C0020000000000000000000B /* EventViews.swift */,
                 C0020000000000000000000A /* EventReview.swift */,
                 C00200000000000000000009 /* InsightsViews.swift */,
@@ -144,6 +147,7 @@
                 C00100000000000000000005 /* JumpDetector.swift in Sources */,
                 C0010000000000000000000A /* CardArtwork.swift in Sources */,
                 C0010000000000000000000B /* SpotViews.swift in Sources */,
+                C0010000000000000000000C /* RiderProfile.swift in Sources */,
                 C00100000000000000000009 /* EventViews.swift in Sources */,
                 C00100000000000000000008 /* EventReview.swift in Sources */,
                 C00100000000000000000007 /* InsightsViews.swift in Sources */,
@@ -185,10 +189,10 @@
             buildSettings = {
                 ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
                 CODE_SIGN_STYLE = Automatic;
-                CURRENT_PROJECT_VERSION = 18;
+                CURRENT_PROJECT_VERSION = 19;
                 GENERATE_INFOPLIST_FILE = NO;
                 INFOPLIST_FILE = Info.plist;
-                MARKETING_VERSION = 0.9.5;
+                MARKETING_VERSION = 0.10.0;
                 PRODUCT_BUNDLE_IDENTIFIER = local.kitesessions.prototype;
                 PRODUCT_NAME = "$(TARGET_NAME)";
                 SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -201,10 +205,10 @@
             buildSettings = {
                 ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
                 CODE_SIGN_STYLE = Automatic;
-                CURRENT_PROJECT_VERSION = 18;
+                CURRENT_PROJECT_VERSION = 19;
                 GENERATE_INFOPLIST_FILE = NO;
                 INFOPLIST_FILE = Info.plist;
-                MARKETING_VERSION = 0.9.5;
+                MARKETING_VERSION = 0.10.0;
                 PRODUCT_BUNDLE_IDENTIFIER = local.kitesessions.prototype;
                 PRODUCT_NAME = "$(TARGET_NAME)";
                 SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
