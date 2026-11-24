@@ -498,7 +498,7 @@ struct RiderTopsView: View {
                 RiderAvatar(photo: entry.avatar ?? Data(), size: 42).accessibilityHidden(true)
                 riderName(entry)
                 Spacer(minLength: 4)
-                Text(metric(score.value(for: entry), unit: score.unit))
+                Text(metric(entry.value(for: score), unit: score.unit))
                     .font(.title3.bold().monospacedDigit()).multilineTextAlignment(.trailing)
             }
             if let kite = entry.kite {
@@ -522,7 +522,7 @@ struct RiderTopsView: View {
                 .accessibilityLabel("Место \(place)")
             riderName(entry)
             Spacer(minLength: 4)
-            Text(metric(score.value(for: entry), unit: score.unit)).font(.headline.monospacedDigit())
+            Text(metric(entry.value(for: score), unit: score.unit)).font(.headline.monospacedDigit())
         }
     }
 
