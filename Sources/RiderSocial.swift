@@ -2,6 +2,7 @@ import ImageIO
 import PhotosUI
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 
 struct RiderPostLocation: Codable {
     let name: String
@@ -14,6 +15,64 @@ struct RiderPostLocation: Codable {
     }
 }
 
+struct RiderPostEquipment: Codable, Hashable {
+    let name: String
+    let kite: String
+    let board: String
+
+    init(_ preset: GearPreset) {
+        let setup = preset.applying(to: SessionSetup())
+        name = preset.name
+        kite = setup.kiteTitle
+        board = setup.boardTitle
+    }
+}
+
+struct RiderPerson: Decodable, Identifiable {
+    let id: String
+    let name: String
+    let username: String?
+    let avatar: Data?
+
+    var handle: String { riderHandle(username, or: name) }
+}
+
+private func riderHandle(_ username: String?, or name: String) -> String {
+    guard let username, !username.isEmpty else { return name }
+    return "@" + username
+}
+
+struct RiderReaction: Decodable {
+    let total: Int
+    let mine: Bool
+    let people: [RiderPerson]
+}
+
+struct RiderActivity: Decodable {
+    let kind: String
+    let person: RiderPerson
+    let postID: UUID?
+    let createdAt: TimeInterval
+
+    var description: String {
+        switch kind {
+        case "shaka": return "поставил(а) 🤙 твоему посту"
+        case "comment": return "оставил(а) комментарий"
+        case "repost": return "поделился(-ась) твоим постом"
+        default: return "подписался(-ась) на тебя"
+        }
+    }
+}
+
+struct RiderMessage: Decodable, Identifiable {
+    let id: UUID
+    let mine: Bool
+    let text: String
+    let createdAt: TimeInterval
+    let postID: UUID?
+    let postCaption: String?
+}
+
 struct RiderPost: Codable, Identifiable {
     let id: UUID
     let createdAt: TimeInterval
@@ -22,10 +81,19 @@ struct RiderPost: Codable, Identifiable {
     let photo: Data?
     var published: Bool?
     var uploadAttempted: Bool?
+    var equipment: RiderPostEquipment?
+    var sourceID: UUID?
+    var sourceAuthor: String?
+    var sourceUsername: String?
 
     var date: Date { Date(timeIntervalSince1970: createdAt) }
+    var contentID: UUID { sourceID ?? id }
     var remotePhoto: URL? {
-        RiderCommunity.endpoint?.appendingPathComponent("posts/\(id.uuidString.lowercased())/photo")
+        RiderCommunity.endpoint?.appendingPathComponent("posts/\(contentID.uuidString.lowercased())/photo")
+    }
+    var publicURL: URL? {
+        guard published == true else { return nil }
+        return RiderCommunity.endpoint?.appendingPathComponent("posts/\(contentID.uuidString.lowercased())/view")
     }
 }
 
@@ -34,6 +102,11 @@ struct RiderFeedEntry: Decodable, Identifiable {
     let author: String
     let username: String?
     let avatar: Data?
+    let authorID: String?
+    let following: Bool?
+    let mine: Bool?
+    let reposted: Bool?
+    let reaction: RiderReaction?
     var id: UUID { post.id }
 }
 
@@ -79,6 +152,25 @@ struct RiderTopFilter: Encodable, Equatable {
 
 final class RiderSocialStore: ObservableObject {
     @Published private(set) var posts: [RiderPost] = []
+    @Published private(set) var reposts: [RiderFeedEntry] = []
+    @Published var reactions: [UUID: RiderReaction] = [:]
+    @Published var follows: [String: Bool] = [:]
+    @Published var reposted: [UUID: Bool] = [:]
+    @Published private(set) var localShakas = Set(UserDefaults.standard.stringArray(forKey: "rider.localShakas") ?? [])
+
+    @MainActor func toggleLocalShaka(for post: UUID) {
+        let key = post.uuidString
+        if localShakas.contains(key) { localShakas.remove(key) } else { localShakas.insert(key) }
+        UserDefaults.standard.set(Array(localShakas), forKey: "rider.localShakas")
+    }
+
+    @MainActor func refreshReposts() async {
+        guard RiderCommunity.endpoint != nil else { return }
+        do {
+            let entries = try await RiderCommunity.myReposts()
+            if !Task.isCancelled { reposts = entries }
+        } catch { /* Keep the previous list during a temporary network failure. */ }
+    }
     private let directory = URL.applicationSupportDirectory.appendingPathComponent("RiderPosts", isDirectory: true)
 
     init() {
@@ -209,7 +301,12 @@ struct RiderPostDetail: View {
     private var postContent: some View {
         VStack(alignment: .leading, spacing: 12) {
             RiderPostHeader(author: author, username: username, avatar: avatar)
+            if let source = post.sourceAuthor {
+                Label(riderHandle(post.sourceUsername, or: source), systemImage: "arrow.2.squarepath")
+                    .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            }
             RiderPostSquare(post: post).clipShape(RoundedRectangle(cornerRadius: 16))
+            RiderPostEquipmentTag(equipment: post.equipment)
             if !post.caption.isEmpty { Text(post.caption).textSelection(.enabled) }
             if let location = post.location {
                 if let url = location.mapURL {
@@ -218,14 +315,14 @@ struct RiderPostDetail: View {
                     Label(location.name, systemImage: "mappin")
                 }
             }
-            Text(post.date, format: .dateTime.day().month().year()).font(.caption).foregroundStyle(.secondary)
+            RiderPostDate(date: post.date)
             if editable {
                 if post.published == true {
                     Label("Опубликовано", systemImage: "checkmark.circle").font(.footnote)
                 } else if RiderCommunity.endpoint != nil {
                     Button("Опубликовать") { update(deleting: false) }
                         .buttonStyle(.borderedProminent)
-                    Text("В ленте будут видны фото, подпись и выбранная геометка.")
+                    Text("В ленте будут видны фото, подпись, выбранная геометка и комплект.")
                         .font(.footnote).foregroundStyle(.secondary)
                 } else {
                     Text("Сохранено на этом iPhone").font(.footnote).foregroundStyle(.secondary)
@@ -238,7 +335,7 @@ struct RiderPostDetail: View {
 
     @ViewBuilder private var commentsSection: some View {
         if RiderCommunity.endpoint != nil && (!editable || post.published == true) {
-            RiderCommentsView(postID: post.id)
+            RiderCommentsView(postID: post.contentID)
         } else {
             VStack(alignment: .leading, spacing: 7) {
                 Text("Комментарии").font(.headline)
@@ -407,6 +504,8 @@ struct RiderPostComposer: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var social: RiderSocialStore
     let spots: [RiderSpot]
+    let presets: [GearPreset]
+    @State private var equipmentID: UUID?
     @State private var picked: PhotosPickerItem?
     @State private var photo: Data?
     @State private var caption = ""
@@ -433,6 +532,12 @@ struct RiderPostComposer: View {
                     RiderPostLocationChoice(spots: spots, selection: $location)
                 } label: {
                     LabeledContent("Геометка", value: location?.name ?? "Добавить")
+                }
+                if !presets.isEmpty {
+                    Picker("Кайт-комплект", selection: $equipmentID) {
+                        Text("Без комплекта").tag(nil as UUID?)
+                        ForEach(presets) { preset in Text(preset.name).tag(Optional(preset.id)) }
+                    }
                 }
                 if let error { Text(error).foregroundStyle(.secondary) }
                 Button("Сохранить пост") { save() }
@@ -480,7 +585,8 @@ struct RiderPostComposer: View {
         guard let photo else { return }
         let post = RiderPost(id: UUID(), createdAt: Date().timeIntervalSince1970,
                              caption: caption.trimmingCharacters(in: .whitespacesAndNewlines),
-                             location: location, photo: photo)
+                             location: location, photo: photo,
+                             equipment: presets.first { $0.id == equipmentID }.map(RiderPostEquipment.init))
         do { try social.save(post); dismiss() }
         catch { self.error = "Не удалось сохранить пост на iPhone." }
     }
@@ -554,7 +660,7 @@ struct RiderFeedView: View {
                         .foregroundStyle(.secondary)
                 }
                 ForEach(entries) { entry in
-                    RiderFeedCard(post: entry.post, author: entry.author, username: entry.username, avatar: entry.avatar)
+                    RiderFeedCard(post: entry.post, author: entry.author, username: entry.username, avatar: entry.avatar, entry: entry)
                 }
             } else if failed {
                 Button("Повторить загрузку") { Task { await load(feed) } }
@@ -583,41 +689,568 @@ struct RiderFeedView: View {
 }
 
 private struct RiderFeedCard: View {
+    @EnvironmentObject private var social: RiderSocialStore
     let post: RiderPost
     let author: String
     let username: String?
     let avatar: Data?
     var editable = false
+    var entry: RiderFeedEntry?
+    @State private var changingReaction = false
+    @State private var changingFollow = false
+    @State private var changingRepost = false
+    @State private var sharing = false
+    @State private var showingReactions = false
+    @State private var error: String?
+
+    private var reaction: RiderReaction {
+        if post.publicURL != nil {
+            return social.reactions[post.contentID] ?? entry?.reaction ?? RiderReaction(total: 0, mine: false, people: [])
+        }
+        let mine = social.localShakas.contains(post.id.uuidString)
+        let user = RiderPerson(id: "local", name: author, username: username, avatar: avatar)
+        return RiderReaction(total: mine ? 1 : 0, mine: mine, people: mine ? [user] : [])
+    }
+
+    private var following: Bool {
+        entry?.authorID.flatMap { social.follows[$0] } ?? entry?.following ?? false
+    }
+
+    private var reposted: Bool {
+        social.reposted[post.contentID] ?? entry?.reposted ?? false
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            RiderPostHeader(author: author, username: username, avatar: avatar)
+        VStack(alignment: .leading, spacing: 11) {
+            header
+            if let source = post.sourceAuthor {
+                Label("Репост · " + riderHandle(post.sourceUsername, or: source), systemImage: "arrow.2.squarepath")
+                    .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            }
             NavigationLink {
-                RiderPostDetail(original: post, author: author, username: username, avatar: avatar, editable: editable)
+                detail()
             } label: {
-                RiderPostSquare(post: post).clipShape(RoundedRectangle(cornerRadius: 12))
+                RiderPostSquare(post: post).clipShape(RoundedRectangle(cornerRadius: 14))
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Открыть пост \(author)")
+
+            HStack(spacing: 8) {
+                actions
+                Spacer(minLength: 0)
+                RiderPostEquipmentTag(equipment: post.equipment)
+            }
+            if reaction.total > 0 { reactionSummary }
             if !post.caption.isEmpty {
-                Text(post.caption).font(.subheadline).lineLimit(2)
+                (Text(riderHandle(post.sourceUsername ?? (post.sourceID == nil ? username : nil),
+                                  or: post.sourceAuthor ?? author)).fontWeight(.bold)
+                    + Text(" ") + Text(post.caption))
+                    .font(.subheadline)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 2)
             }
             if let location = post.location {
                 Label(location.name, systemImage: "mappin").font(.caption).foregroundStyle(.secondary)
             }
-            NavigationLink {
-                RiderPostDetail(original: post, author: author, username: username,
-                                avatar: avatar, editable: editable, openComments: true)
-            } label: {
-                Label("Комментировать", systemImage: "bubble")
-                    .font(.footnote.weight(.semibold)).foregroundStyle(RiderTheme.accent)
-            }
-            .buttonStyle(.borderless)
+            RiderPostDate(date: post.date)
+            if let error { Text(error).font(.footnote).foregroundStyle(.secondary) }
         }
         .lagoonCard()
-        .listRowInsets(EdgeInsets(top: 5, leading: 10, bottom: 5, trailing: 10))
+        .listRowInsets(EdgeInsets(top: 5, leading: 10, bottom: 7, trailing: 10))
         .listRowSeparator(.hidden)
         .listRowBackground(Color.clear)
+        .sheet(isPresented: $sharing) { shareMenu }
+        .sheet(isPresented: $showingReactions) { reactionsSheet }
+    }
+
+    private var header: some View {
+        HStack {
+            RiderPostHeader(author: author, username: username, avatar: avatar)
+            if let target = entry?.authorID, entry?.mine != true {
+                Button(following ? "Подписан" : "Подписаться") { toggleFollow(target) }
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(following ? Color.primary : RiderTheme.foam)
+                    .padding(.horizontal, 10)
+                    .frame(minHeight: 36)
+                    .background(following ? RiderTheme.canvas : RiderTheme.action, in: Capsule())
+                    .buttonStyle(.borderless)
+                    .disabled(changingFollow)
+                    .accessibilityAddTraits(following ? .isSelected : [])
+            }
+        }
+    }
+
+    private var actions: some View {
+        HStack(spacing: 2) {
+            Button(action: toggleShaka) {
+                HStack(spacing: 4) {
+                    Text("🤙").font(.title2)
+                    Text(reaction.total.formatted()).font(.caption.weight(.bold)).monospacedDigit()
+                }
+                .foregroundStyle(reaction.mine ? RiderTheme.accent : .primary)
+                .padding(.horizontal, 7)
+                .frame(minWidth: 48, minHeight: 44)
+                .background(reaction.mine ? RiderTheme.accent.opacity(0.15) : .clear, in: Capsule())
+            }
+            .buttonStyle(.borderless)
+            .disabled(changingReaction)
+            .accessibilityLabel(reaction.mine ? "Убрать шака" : "Поставить шака")
+            .accessibilityValue(reaction.total.formatted())
+            NavigationLink {
+                detail(comments: true)
+            } label: {
+                Image(systemName: "bubble").font(.title3).frame(width: 44, height: 44)
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel("Комментарии")
+            Button { sharing = true } label: {
+                Image(systemName: "paperplane").font(.title3).frame(width: 44, height: 44)
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel("Поделиться")
+        }
+        .foregroundStyle(RiderTheme.accent)
+    }
+
+    private var reactionSummary: some View {
+        Button { showingReactions = true } label: {
+            HStack(spacing: 7) {
+                HStack(spacing: -6) {
+                    ForEach(reaction.people) { rider in
+                        RiderAvatar(photo: rider.avatar ?? Data(), size: 22)
+                            .overlay { Circle().strokeBorder(RiderTheme.surface, lineWidth: 1.5) }
+                    }
+                }.accessibilityHidden(true)
+                if let first = reaction.people.first {
+                    let others = reaction.total - 1
+                    Text(others > 0 ? "Шака от \(first.handle) и ещё \(others)" : "Шака от \(first.handle)")
+                        .lineLimit(1)
+                } else {
+                    Text("Шака · \(reaction.total)")
+                }
+            }
+            .font(.caption.weight(.medium)).foregroundStyle(.secondary)
+        }
+        .buttonStyle(.borderless)
+    }
+
+    private var reactionsSheet: some View {
+        NavigationStack {
+            List {
+                Text("Всего 🤙 \(reaction.total)").font(.headline)
+                ForEach(reaction.people) { rider in
+                    RiderPostHeader(author: rider.name, username: rider.username, avatar: rider.avatar)
+                }
+            }
+            .navigationTitle("Шака")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Готово") { showingReactions = false } } }
+        }
+        .presentationDetents([.medium, .large])
+    }
+
+    private var shareMenu: some View {
+        NavigationStack {
+            List {
+                if let url = post.publicURL {
+                    NavigationLink {
+                        RiderInboxView(shared: post, onSent: { sharing = false })
+                    } label: {
+                        Label("Отправить в Директ", systemImage: "paperplane")
+                    }
+                    if (entry != nil && entry?.mine != true) || reposted {
+                        Button {
+                            toggleRepost()
+                        } label: {
+                            Label(reposted ? "Убрать репост" : "Репост в профиль", systemImage: "arrow.2.squarepath")
+                        }
+                        .disabled(changingRepost)
+                    }
+                    ShareLink(item: url) { Label("Поделиться ссылкой", systemImage: "square.and.arrow.up") }
+                } else if let bytes = post.photo, let image = UIImage(data: bytes) {
+                    ShareLink(item: RiderPostPhoto(bytes: bytes),
+                              message: Text(post.caption), preview: SharePreview("Фото Rider", image: Image(uiImage: image))) {
+                        Label("Поделиться фото", systemImage: "square.and.arrow.up")
+                    }
+                }
+                if let error { Text(error).font(.footnote).foregroundStyle(.secondary) }
+            }
+            .navigationTitle("Поделиться")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Закрыть") { sharing = false } } }
+        }
+    }
+
+    private func detail(comments: Bool = false) -> some View {
+        RiderPostDetail(original: post, author: author, username: username, avatar: avatar,
+                        editable: editable, openComments: comments)
+    }
+
+    private func toggleShaka() {
+        guard post.publicURL != nil else {
+            social.toggleLocalShaka(for: post.id)
+            return
+        }
+        let next = !reaction.mine
+        changingReaction = true
+        error = nil
+        Task {
+            defer { changingReaction = false }
+            do { social.reactions[post.contentID] = try await RiderCommunity.reaction(for: post.contentID, enabled: next) }
+            catch { showActionError(error) }
+        }
+    }
+
+    private func toggleFollow(_ target: String) {
+        let next = !following
+        changingFollow = true
+        error = nil
+        Task {
+            defer { changingFollow = false }
+            do {
+                try await RiderCommunity.follow(target, enabled: next)
+                social.follows[target] = next
+            } catch { showActionError(error) }
+        }
+    }
+
+    private func toggleRepost() {
+        let next = !reposted
+        changingRepost = true
+        error = nil
+        Task {
+            defer { changingRepost = false }
+            do {
+                try await RiderCommunity.repost(post.contentID, enabled: next)
+                social.reposted[post.contentID] = next
+                await social.refreshReposts()
+                sharing = false
+            } catch { showActionError(error) }
+        }
+    }
+
+    private func showActionError(_ failure: Error) {
+        if case RiderCommunity.Rejection.forbidden = failure {
+            error = "Сначала опубликуй профиль в разделе «Райдеры»."
+        } else {
+            error = "Не удалось сохранить действие. Попробуй ещё раз."
+        }
+    }
+}
+
+private struct RiderPostPhoto: Transferable {
+    let bytes: Data
+    static var transferRepresentation: some TransferRepresentation {
+        DataRepresentation(exportedContentType: .jpeg) { $0.bytes }
+    }
+}
+
+private struct RiderPostEquipmentTag: View {
+    let equipment: RiderPostEquipment?
+    @State private var showing = false
+
+    var body: some View {
+        if let equipment {
+            Button { showing = true } label: {
+                Label(equipment.name, systemImage: "wind")
+                    .font(.caption.weight(.semibold))
+                    .lineLimit(1)
+                    .padding(.horizontal, 9).padding(.vertical, 7)
+                    .foregroundStyle(RiderTheme.accent)
+                    .background(RiderTheme.canvas, in: Capsule())
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel("Кайт-комплект \(equipment.name)")
+            .popover(isPresented: $showing) {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text(equipment.name).font(.headline)
+                    Label(equipment.kite, systemImage: "wind")
+                    Label(equipment.board, systemImage: "rectangle.roundedbottom")
+                }
+                .padding(20)
+                .presentationCompactAdaptation(.popover)
+            }
+            .frame(maxWidth: .infinity, alignment: .trailing)
+        }
+    }
+}
+
+private struct RiderPostDate: View {
+    let date: Date
+    var body: some View {
+        TimelineView(.everyMinute) { context in
+            let calendar = Calendar.current
+            let day = calendar.isDate(date, inSameDayAs: context.date) ? "Сегодня" :
+                (calendar.date(byAdding: .day, value: -1, to: context.date).map { calendar.isDate(date, inSameDayAs: $0) } == true
+                 ? "Вчера" : date.formatted(.dateTime.day().month().year().locale(Locale(identifier: "ru_RU"))))
+            Text("\(day), \(date.formatted(.dateTime.hour(.twoDigits(amPM: .omitted)).minute(.twoDigits).locale(Locale(identifier: "ru_RU"))))")
+                .font(.caption2).foregroundStyle(.secondary)
+        }
+    }
+}
+
+struct RiderSharedPostView: View {
+    let id: UUID
+    @State private var entry: RiderFeedEntry?
+    @State private var failed = false
+
+    var body: some View {
+        ScrollView {
+            if let entry {
+                RiderFeedCard(post: entry.post, author: entry.author, username: entry.username, avatar: entry.avatar, entry: entry)
+                    .padding(14)
+            } else if failed {
+                ContentUnavailableView("Публикация недоступна", systemImage: "photo")
+            } else {
+                ProgressView().padding(24)
+            }
+        }
+        .background(RiderTheme.canvas)
+        .navigationTitle("Публикация")
+        .navigationBarTitleDisplayMode(.inline)
+        .task(id: id) {
+            do { entry = try await RiderCommunity.postDetails(id) }
+            catch { if !Task.isCancelled { failed = true } }
+        }
+    }
+}
+
+struct RiderNotificationsView: View {
+    @State private var items: [RiderActivity]?
+    @State private var failed = false
+
+    var body: some View {
+        List {
+            if RiderCommunity.endpoint == nil {
+                ContentUnavailableView("Уведомления", systemImage: "bell",
+                                       description: Text("Уведомления появятся после подключения сервера Rider."))
+            } else if let items {
+                if items.isEmpty {
+                    ContentUnavailableView("Пока тихо", systemImage: "bell",
+                                           description: Text("Здесь появятся реакции, комментарии, репосты и подписки."))
+                }
+                ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                    if let post = item.postID {
+                        NavigationLink { RiderSharedPostView(id: post) } label: { activityRow(item) }
+                    } else {
+                        activityRow(item)
+                    }
+                }
+            } else if failed {
+                Button("Повторить загрузку") { Task { await load() } }
+            } else {
+                ProgressView("Загружаем уведомления")
+            }
+        }
+        .scrollContentBackground(.hidden)
+        .background(RiderTheme.canvas)
+        .navigationTitle("Уведомления")
+        .navigationBarTitleDisplayMode(.inline)
+        .task { await load() }
+        .refreshable { await load() }
+    }
+
+    private func activityRow(_ item: RiderActivity) -> some View {
+        HStack(spacing: 10) {
+            RiderAvatar(photo: item.person.avatar ?? Data(), size: 38)
+            VStack(alignment: .leading, spacing: 3) {
+                (Text(item.person.handle).bold() + Text(" " + item.description)).font(.subheadline)
+                RiderPostDate(date: Date(timeIntervalSince1970: item.createdAt))
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    @MainActor private func load() async {
+        guard RiderCommunity.endpoint != nil else { return }
+        do {
+            let result = try await RiderCommunity.activity()
+            if !Task.isCancelled { items = result; failed = false }
+        } catch { if !Task.isCancelled { failed = true } }
+    }
+}
+
+struct RiderInboxView: View {
+    var shared: RiderPost?
+    var onSent: (() -> Void)?
+    @State private var people: [RiderPerson]?
+    @State private var composing = false
+    @State private var failed = false
+    @State private var search = ""
+
+    private var choosingRecipient: Bool { shared != nil || composing }
+
+    var body: some View {
+        List {
+            if RiderCommunity.endpoint == nil {
+                ContentUnavailableView("Директ", systemImage: "paperplane",
+                                       description: Text("Личные сообщения появятся после подключения сервера Rider."))
+            } else if let people {
+                if people.isEmpty {
+                    Text(choosingRecipient ? "Пока нет доступных райдеров." : "Пока нет переписок.")
+                        .foregroundStyle(.secondary)
+                }
+                ForEach(people.filter { search.isEmpty || $0.name.localizedCaseInsensitiveContains(search)
+                    || $0.handle.localizedCaseInsensitiveContains(search) }) { rider in
+                    NavigationLink {
+                        RiderThreadView(peer: rider, shared: shared, onSent: onSent)
+                    } label: {
+                        RiderPostHeader(author: rider.name, username: rider.username, avatar: rider.avatar)
+                            .padding(.vertical, 4)
+                    }
+                }
+            } else if failed {
+                Button("Повторить загрузку") { Task { await load() } }
+            } else {
+                ProgressView()
+            }
+        }
+        .scrollContentBackground(.hidden)
+        .background(RiderTheme.canvas)
+        .searchable(text: $search, prompt: "Имя или @юзернейм")
+        .navigationTitle(shared != nil ? "Кому отправить" : composing ? "Новое сообщение" : "Директ")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            if RiderCommunity.endpoint != nil && shared == nil {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { people = nil; composing.toggle() } label: {
+                        Label(composing ? "Переписки" : "Новое сообщение", systemImage: composing ? "tray" : "square.and.pencil")
+                    }
+                }
+            }
+        }
+        .task(id: choosingRecipient) { await load() }
+        .refreshable { await load() }
+    }
+
+    @MainActor private func load() async {
+        guard RiderCommunity.endpoint != nil else { return }
+        let choosing = choosingRecipient
+        do {
+            let result = choosing ? try await RiderCommunity.recipients() : try await RiderCommunity.conversations()
+            if !Task.isCancelled && choosing == choosingRecipient { people = result; failed = false }
+        } catch {
+            if !Task.isCancelled && choosing == choosingRecipient { failed = true }
+        }
+    }
+}
+
+private struct RiderThreadView: View {
+    let peer: RiderPerson
+    let shared: RiderPost?
+    var onSent: (() -> Void)?
+    @State private var messages: [RiderMessage] = []
+    @State private var messageRevision = 0
+    @State private var draft = ""
+    @State private var draftID = UUID()
+    @State private var sending = false
+    @State private var attached = true
+    @State private var error: String?
+
+    private var attachment: RiderPost? { attached ? shared : nil }
+    private var text: String { draft.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    var body: some View {
+        ScrollViewReader { scroll in
+            ScrollView {
+                LazyVStack(spacing: 9) {
+                    ForEach(messages) { message in
+                        bubble(message)
+                    }
+                }
+                .padding(14)
+            }
+            .defaultScrollAnchor(.bottom)
+            .onChange(of: messages.last?.id) { _, id in
+                if let id { scroll.scrollTo(id, anchor: .bottom) }
+            }
+            .refreshable { await load() }
+        }
+        .safeAreaInset(edge: .bottom) { composer }
+        .background(RiderTheme.canvas)
+        .navigationTitle(peer.handle)
+        .navigationBarTitleDisplayMode(.inline)
+        .task(id: peer.id) { await load() }
+    }
+
+    private var composer: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            if let attachment {
+                HStack {
+                    Label(attachment.caption.isEmpty ? "Публикация Rider" : attachment.caption, systemImage: "photo")
+                        .font(.caption).lineLimit(1)
+                    Spacer()
+                    Button { attached = false; draftID = UUID() } label: { Image(systemName: "xmark.circle") }
+                        .accessibilityLabel("Убрать публикацию").disabled(sending)
+                }
+            }
+            if let error { Text(error).font(.footnote).foregroundStyle(.secondary) }
+            HStack(alignment: .bottom) {
+                TextField("Сообщение", text: $draft, axis: .vertical)
+                    .textFieldStyle(.roundedBorder).lineLimit(1...4)
+                    .onChange(of: draft) { _, value in
+                        if !sending { draftID = UUID() }
+                        if value.count > 1000 { draft = String(value.prefix(1000)) }
+                    }
+                    .disabled(sending)
+                Button(action: send) { Image(systemName: "arrow.up").font(.body.bold()).frame(minHeight: 27) }
+                    .buttonStyle(.borderedProminent)
+                    .accessibilityLabel("Отправить")
+                    .disabled(sending || (text.isEmpty && attachment == nil))
+            }
+        }
+        .padding(12)
+        .background(.bar)
+    }
+
+    private func bubble(_ message: RiderMessage) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            if let post = message.postID {
+                NavigationLink { RiderSharedPostView(id: post) } label: {
+                    Label(message.postCaption ?? "Публикация Rider", systemImage: "photo")
+                        .font(.subheadline.weight(.semibold)).lineLimit(2)
+                }
+            }
+            if !message.text.isEmpty { Text(message.text).textSelection(.enabled) }
+            RiderPostDate(date: Date(timeIntervalSince1970: message.createdAt))
+        }
+        .padding(10)
+        .background(message.mine ? RiderTheme.accent.opacity(0.15) : RiderTheme.surface, in: RoundedRectangle(cornerRadius: 14))
+        .frame(maxWidth: .infinity, alignment: message.mine ? .trailing : .leading)
+    }
+
+    @MainActor private func load() async {
+        guard !sending else { return }
+        let revision = messageRevision
+        do {
+            let result = try await RiderCommunity.messages(with: peer.id)
+            if !Task.isCancelled && !sending && revision == messageRevision { messages = result; error = nil }
+        } catch {
+            if !Task.isCancelled && !sending && revision == messageRevision { error = "Не удалось загрузить переписку." }
+        }
+    }
+
+    private func send() {
+        let body = text
+        let post = attachment?.contentID
+        guard !sending, !body.isEmpty || post != nil else { return }
+        sending = true
+        error = nil
+        Task {
+            defer { sending = false }
+            do {
+                messages = try await RiderCommunity.sendMessage(to: peer.id, id: draftID, text: body, post: post)
+                messageRevision += 1
+                draftID = UUID()
+                draft = ""
+                attached = false
+                if post != nil { onSent?() }
+            } catch RiderCommunity.Rejection.forbidden {
+                error = "Сначала опубликуй профиль в разделе «Райдеры»."
+            } catch {
+                self.error = "Не удалось отправить сообщение. Попробуй ещё раз."
+            }
+        }
     }
 }
 

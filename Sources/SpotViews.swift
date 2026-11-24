@@ -578,8 +578,6 @@ private struct BestSpotsToday: View {
             if region.isEmpty {
                 if recorder.locating { ProgressView("Определяем регион") }
                 else { Button("Определить регион по GPS") { recorder.locateSpot() } }
-            } else if windows.isEmpty {
-                Text("Первое окно откроется в 07:00.").foregroundStyle(.secondary)
             } else if loading {
                 ProgressView("Сравниваем прогнозы")
             } else {

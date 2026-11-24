@@ -681,7 +681,7 @@ struct SpotForecast: Decodable {
         func visibleWindows(at date: Date, calendar: Calendar = .current) -> [Window] {
             if self == .tomorrow { return Window.allCases }
             let hour = calendar.component(.hour, from: date)
-            return Window.allCases.filter { ($0.rawValue..<$0.endHour).contains(hour) }
+            return Window.allCases.filter { hour < $0.endHour }
         }
 
         static func forEveningSwitch(at date: Date, calendar: Calendar = .current) -> Self {

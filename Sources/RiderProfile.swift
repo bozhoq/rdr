@@ -105,6 +105,54 @@ enum RiderCommunity {
         return id.map { path + "/" + $0.uuidString.lowercased() } ?? path
     }
 
+    static func follow(_ user: String, enabled: Bool) async throws {
+        _ = try await requestData("follow/" + user, method: enabled ? "PUT" : "DELETE", body: nil)
+    }
+
+    static func reaction(for post: UUID, enabled: Bool) async throws -> RiderReaction {
+        try await decode("posts/\(post.uuidString.lowercased())/shaka", method: enabled ? "PUT" : "DELETE")
+    }
+
+    static func postDetails(_ id: UUID) async throws -> RiderFeedEntry {
+        try await decode("posts/\(id.uuidString.lowercased())/details")
+    }
+
+    static func myReposts() async throws -> [RiderFeedEntry] { try await decode("feed/my-reposts") }
+
+    static func repost(_ post: UUID, enabled: Bool) async throws {
+        let data = enabled ? try JSONEncoder().encode(["id": UUID()]) : nil
+        _ = try await requestData("posts/\(post.uuidString.lowercased())/repost", method: enabled ? "PUT" : "DELETE", body: data)
+    }
+
+    static func activity() async throws -> [RiderActivity] { try await decode("activity") }
+
+    static func conversations() async throws -> [RiderPerson] { try await decode("messages") }
+
+    static func recipients() async throws -> [RiderPerson] {
+        try await request("riders").riders.map { rider in
+            RiderPerson(id: rider.id, name: rider.profile.name, username: rider.profile.username, avatar: rider.profile.avatar)
+        }
+    }
+
+    static func messages(with peer: String) async throws -> [RiderMessage] {
+        try await decode("messages/" + peer)
+    }
+
+    private struct MessageBody: Encodable {
+        let text: String
+        let postID: UUID?
+    }
+
+    static func sendMessage(to peer: String, id: UUID, text: String, post: UUID?) async throws -> [RiderMessage] {
+        let body = try JSONEncoder().encode(MessageBody(text: text, postID: post))
+        return try await decode("messages/\(peer)/\(id.uuidString.lowercased())", method: "PUT", body: body)
+    }
+
+    private static func decode<T: Decodable>(_ path: String, method: String = "GET", body: Data? = nil) async throws -> T {
+        let data = try await requestData(path, method: method, body: body)
+        return try JSONDecoder().decode(T.self, from: data)
+    }
+
     enum Rejection: Error { case conflict, forbidden }
 
     private static func requestData(_ path: String, method: String, body: Data?) async throws -> Data {
@@ -204,7 +252,20 @@ struct RiderProfileView: View {
         .background(RiderTheme.canvas.ignoresSafeArea())
         .navigationTitle("Райдер")
         .navigationBarTitleDisplayMode(.inline)
-        .sheet(isPresented: $composing) { RiderPostComposer(spots: recorder.spots) }
+        .toolbar {
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                NavigationLink { RiderNotificationsView() } label: {
+                    Label("Уведомления", systemImage: "bell").labelStyle(.iconOnly)
+                }
+                NavigationLink { RiderInboxView() } label: {
+                    Label("Директ", systemImage: "paperplane").labelStyle(.iconOnly)
+                }
+            }
+        }
+        .task { await social.refreshReposts() }
+        .sheet(isPresented: $composing) {
+            RiderPostComposer(spots: recorder.spots, presets: recorder.gearPresets)
+        }
         .sheet(isPresented: $showingAchievements) {
             NavigationStack {
                 ScrollView { achievements(badges).padding(16) }
@@ -318,7 +379,7 @@ struct RiderProfileView: View {
                     Label("Добавить пост", systemImage: "plus").font(.subheadline.weight(.semibold))
                 }.buttonStyle(.bordered)
             }
-            if social.posts.isEmpty {
+            if social.posts.isEmpty && social.reposts.isEmpty {
                 Text("Здесь будут твои фото с каталок.").font(.subheadline).foregroundStyle(.secondary)
             } else {
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: 3), spacing: 3) {
@@ -329,6 +390,16 @@ struct RiderProfileView: View {
                         } label: {
                             RiderPostSquare(post: post)
                         }.buttonStyle(.plain)
+                    }
+                    ForEach(social.reposts) { entry in
+                        NavigationLink { RiderSharedPostView(id: entry.id) } label: {
+                            RiderPostSquare(post: entry.post).overlay(alignment: .topTrailing) {
+                                Image(systemName: "arrow.2.squarepath")
+                                    .font(.caption.bold()).padding(6).background(.regularMaterial, in: Circle())
+                                    .padding(4)
+                            }
+                        }.buttonStyle(.plain)
+                        .accessibilityLabel("Репост")
                     }
                 }
                 .clipShape(RoundedRectangle(cornerRadius: 12))
