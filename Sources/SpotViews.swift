@@ -567,7 +567,9 @@ private struct BestSpotsToday: View {
     private func rankingList(now: Date, day: SpotForecast.RankingDay) -> some View {
         let dayStart = Calendar.current.startOfDay(for: now)
         let origin = routeOrigin(at: now)
-        let batch = TravelBatch(timestamp: origin?.timestamp, spots: visibleRouteTargets)
+        let windows = day.visibleWindows(at: now)
+        let visibleResults = results.filter { windows.contains($0.window) }
+        let batch = TravelBatch(timestamp: origin?.timestamp, spots: routeTargets(for: visibleResults))
         return List {
             Picker("Регион", selection: $region) {
                 Text("Выберите регион").tag("")
@@ -576,14 +578,16 @@ private struct BestSpotsToday: View {
             if region.isEmpty {
                 if recorder.locating { ProgressView("Определяем регион") }
                 else { Button("Определить регион по GPS") { recorder.locateSpot() } }
+            } else if windows.isEmpty {
+                Text("Первое окно откроется в 07:00.").foregroundStyle(.secondary)
             } else if loading {
                 ProgressView("Сравниваем прогнозы")
             } else {
-                if results.contains(where: { !$0.spots.isEmpty }) {
+                if visibleResults.contains(where: { !$0.spots.isEmpty }) {
                     if origin == nil && !batch.spots.isEmpty {
                         locationRow
                     }
-                    ForEach(results) { ranking in
+                    ForEach(visibleResults) { ranking in
                         Section {
                             if let best = ranking.spots.first {
                                 rankedLink(best, in: ranking.window, origin: origin)
@@ -607,7 +611,7 @@ private struct BestSpotsToday: View {
                         }
                     }
                 } else {
-                    Text(checked == 0 ? "Прогнозы не загрузились." : "Нет почасовых данных о ветре за 07:00–20:00.")
+                    Text(checked == 0 ? "Прогнозы не загрузились." : "Нет данных о ветре для выбранного времени.")
                 }
                 Text("Прогноз получен для \(checked) из \(total) спотов").font(.footnote)
                 Button("Обновить прогноз") {
@@ -654,7 +658,7 @@ private struct BestSpotsToday: View {
                 let weather = item.weather
                 VStack(alignment: .leading, spacing: 8) {
                     Text(item.spot.name).font(.headline)
-                    ForecastWindPill(text: weather.windLevel.description, level: weather.windLevel == .calm ? .calm : .light)
+                    ForecastWindPill(text: weather.windLevel.description, level: weather.windLevel)
                     ViewThatFits(in: .horizontal) {
                         HStack(spacing: 12) { windMetrics(weather) }
                         VStack(alignment: .leading, spacing: 6) { windMetrics(weather) }
@@ -748,9 +752,9 @@ private struct BestSpotsToday: View {
         })
     }
 
-    private var visibleRouteTargets: [RiderSpot] {
+    private func routeTargets(for rankings: [SpotForecast.Ranking]) -> [RiderSpot] {
         var seen: Set<UUID> = []
-        return results.flatMap { ranking in
+        return rankings.flatMap { ranking in
             ranking.spots.prefix(expandedWindows.contains(ranking.window) ? ranking.spots.count : 1)
         }.map(\.spot).filter { $0.areaOnly != true && seen.insert($0.id).inserted }
     }

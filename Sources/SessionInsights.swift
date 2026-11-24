@@ -678,6 +678,12 @@ struct SpotForecast: Decodable {
             self == .today ? "Лучший спот на сегодня" : "Лучший спот на завтра"
         }
 
+        func visibleWindows(at date: Date, calendar: Calendar = .current) -> [Window] {
+            if self == .tomorrow { return Window.allCases }
+            let hour = calendar.component(.hour, from: date)
+            return Window.allCases.filter { ($0.rawValue..<$0.endHour).contains(hour) }
+        }
+
         static func forEveningSwitch(at date: Date, calendar: Calendar = .current) -> Self {
             calendar.component(.hour, from: date) >= 20 ? .tomorrow : .today
         }
