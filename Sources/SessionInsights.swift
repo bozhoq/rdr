@@ -362,38 +362,109 @@ struct SpotForecast: Decodable {
         return ["↓","↙","←","↖","↑","↗","→","↘"][Int((direction / 45).rounded()) % 8]
     }
 
-    struct Day {
+    enum WindLevel: Equatable {
+        case calm, light, medium, strong
+
+        static func average(_ speed: Double) -> Self {
+            switch speed {
+            case ..<6: return .calm
+            case ..<8: return .light
+            case ..<10: return .medium
+            default: return .strong
+            }
+        }
+
+        static func gust(_ speed: Double) -> Self {
+            if speed > 13 { return .strong }
+            return speed >= 9 ? .medium : .light
+        }
+
+        var description: String {
+            switch self {
+            case .calm: return "Подходящего ветра нет"
+            case .light: return "Обнаружен лайтвинд"
+            case .medium: return "Обнаружен средний ветер"
+            case .strong: return "Обнаружен сильный ветер"
+            }
+        }
+    }
+
+    enum Window: Int, CaseIterable, Identifiable {
+        case morning = 7
+        case lateMorning = 10
+        case afternoon = 13
+        case evening = 16
+
+        var id: Int { rawValue }
+        var endHour: Int { self == .evening ? 20 : rawValue + 3 }
+        var title: String { String(format: "%02d:00–%02d:00", rawValue, endHour) }
+
+        // Divide the hourly readings without repeating boundary hours. Include the final 20:00 reading.
+        var forecastHours: Range<Int> { rawValue..<(self == .evening ? endHour + 1 : endHour) }
+    }
+
+    struct WindowSummary {
         let meanWind: Double
         let maxGust: Double?
         let meanTemperature: Double?
         let thunder: Bool
         let hours: Int
 
-        static func description(for speed: Double) -> String {
-            switch speed {
-            case ..<6: return "Подходящего ветра нет"
-            case ..<8: return "Обнаружен лайтвинд"
-            case ..<10: return "Обнаружен средний ветер"
-            default: return "Обнаружен сильный ветер"
-            }
-        }
+        var windLevel: WindLevel { .average(meanWind) }
+        var gustLevel: WindLevel? { maxGust.map(WindLevel.gust) }
     }
 
-    func daySummary(today now: Date) -> Day? {
-        guard let zone = TimeZone(identifier: timezone) else { return nil }
+    struct RankedSpot: Identifiable {
+        let spot: RiderSpot
+        let weather: WindowSummary
+        var id: UUID { spot.id }
+    }
+
+    struct Ranking: Identifiable {
+        let window: Window
+        let spots: [RankedSpot]
+        var id: Window { window }
+    }
+
+    func windowSummaries(today now: Date) -> [Window: WindowSummary] {
+        guard let zone = TimeZone(identifier: timezone) else { return [:] }
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = zone
-        let hours = allHours.filter {
-            calendar.isDate($0.time, inSameDayAs: now) && (7...20).contains(calendar.component(.hour, from: $0.time))
-        }
-        guard !hours.isEmpty else { return nil }
+        let today = allHours.filter { calendar.isDate($0.time, inSameDayAs: now) }
+        let byHour = Dictionary(grouping: today) { calendar.component(.hour, from: $0.time) }
         let scale = SessionWind.metersPerSecondPerKnot
-        let temps = hours.compactMap(\.temperature)
-        return Day(meanWind: hours.reduce(0) { $0 + $1.speed } * scale / Double(hours.count),
-                   maxGust: hours.compactMap(\.gust).max().map { $0 * scale },
-                   meanTemperature: temps.isEmpty ? nil : temps.reduce(0,+) / Double(temps.count),
-                   thunder: hours.contains { [95, 96, 99].contains($0.weatherCode ?? -1) },
-                   hours: hours.count)
+        var summaries: [Window: WindowSummary] = [:]
+        for window in Window.allCases {
+            let hours = window.forecastHours.flatMap { byHour[$0] ?? [] }
+            guard !hours.isEmpty else { continue }
+            let temperatures = hours.compactMap(\.temperature)
+            summaries[window] = WindowSummary(
+                meanWind: hours.reduce(0) { $0 + $1.speed } * scale / Double(hours.count),
+                maxGust: hours.compactMap(\.gust).max().map { $0 * scale },
+                meanTemperature: temperatures.isEmpty ? nil : temperatures.reduce(0, +) / Double(temperatures.count),
+                thunder: hours.contains { [95, 96, 99].contains($0.weatherCode ?? -1) },
+                hours: hours.count
+            )
+        }
+        return summaries
+    }
+
+    static func rankings(today now: Date, forecasts: [(RiderSpot, SpotForecast)]) -> [Ranking] {
+        var byWindow: [Window: [RankedSpot]] = [:]
+        for (spot, forecast) in forecasts {
+            for (window, summary) in forecast.windowSummaries(today: now) {
+                byWindow[window, default: []].append(RankedSpot(spot: spot, weather: summary))
+            }
+        }
+        return Window.allCases.map { window in
+            let sorted = (byWindow[window] ?? []).sorted {
+                if $0.weather.meanWind != $1.weather.meanWind { return $0.weather.meanWind > $1.weather.meanWind }
+                if $0.weather.hours != $1.weather.hours { return $0.weather.hours > $1.weather.hours }
+                if $0.spot.name != $1.spot.name { return $0.spot.name < $1.spot.name }
+                return $0.id.uuidString < $1.id.uuidString
+            }
+            return Ranking(window: window, spots: Array(sorted.prefix(5)))
+        }
     }
 
     static func compass(_ direction: Double?) -> String {

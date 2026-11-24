@@ -375,14 +375,8 @@ private struct BestSpotsToday: View {
     @State private var loading = false
     @State private var checked = 0
     @State private var total = 0
-    @State private var results: [Ranked] = []
+    @State private var results: [SpotForecast.Ranking] = []
     private var regions: [String] { Set(recorder.spots.compactMap(\.region)).sorted() }
-
-    private struct Ranked: Identifiable {
-        let spot: RiderSpot
-        let day: SpotForecast.Day
-        var id: UUID { spot.id }
-    }
 
     var body: some View {
         List {
@@ -396,36 +390,36 @@ private struct BestSpotsToday: View {
             } else if loading {
                 ProgressView("Сравниваем прогнозы")
             } else {
-                if let best = results.first {
-                    Text(SpotForecast.Day.description(for: best.day.meanWind))
-                        .font(.headline).foregroundStyle(RiderTheme.accent)
-                }
-                ForEach(results) { item in
-                    NavigationLink {
-                        SpotDetailView(recorder: recorder, original: item.spot, goToRecording: goToRecording)
-                    } label: {
-                        VStack(alignment: .leading, spacing: 5) {
-                            Text(item.spot.name).font(.headline)
-                            Text("Средний ветер " + metric(item.day.meanWind, unit: "м/с", digits: 1)).font(.subheadline)
-                            Text(SpotForecast.Day.description(for: item.day.meanWind)).font(.caption)
-                            Text("Порывы до " + metric(item.day.maxGust, unit: "м/с") + " · " + metric(item.day.meanTemperature, unit: "°C", digits: 0)).font(.caption)
-                            Text("07:00–20:00 · часов с прогнозом \(item.day.hours) из 14").font(.caption)
-                            if item.day.thunder { Label("В прогнозе гроза", systemImage: "cloud.bolt.rain").font(.caption) }
-                            if item.spot.areaOnly == true { Text("Ориентир района").font(.caption) }
+                if results.contains(where: { !$0.spots.isEmpty }) {
+                    ForEach(results) { ranking in
+                        Section(ranking.window.title) {
+                            if let best = ranking.spots.first {
+                                rankedLink(best, in: ranking.window)
+                                if ranking.spots.count > 1 {
+                                    DisclosureGroup("Другие споты в топ-\(ranking.spots.count)") {
+                                        ForEach(ranking.spots.dropFirst()) { item in
+                                            rankedLink(item, in: ranking.window)
+                                        }
+                                    }
+                                }
+                            } else {
+                                Text("Прогноз недоступен").foregroundStyle(.secondary)
+                            }
                         }
                     }
-                }
-                if results.isEmpty {
+                } else {
                     Text(checked == 0 ? "Прогнозы не загрузились." : "Нет почасовых данных о ветре за 07:00–20:00.")
                 }
                 Text("Прогноз получен для \(checked) из \(total) спотов").font(.footnote)
                 Button("Обновить прогноз") { revision += 1 }
             }
             DisclosureGroup("Как выбираем") {
-                Text("Сравниваем средний ветер по доступным часам с 07:00 до 20:00 включительно по местному времени спота. Выше спот с более сильным средним ветром. При равенстве выбираем более полный прогноз. Порывы и грозы указаны отдельно.")
+                Text("С 07:00 до 20:00 по местному времени сравниваем средний ветер отдельно для каждого окна. При равенстве выше спот с более полным прогнозом. Порывы показываем по максимуму за окно.")
             }
             Link("Прогноз Open-Meteo", destination: URL(string: "https://open-meteo.com/")!)
         }
+        .scrollContentBackground(.hidden)
+        .background(RiderTheme.canvas.ignoresSafeArea())
         .navigationTitle("Лучший спот на сегодня")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear { if region.isEmpty && recorder.usableFix == nil { recorder.locateSpot() } }
@@ -439,6 +433,64 @@ private struct BestSpotsToday: View {
             } else if let nearby = nearbyRegion(fix, within: 80000) { region = nearby }
         }
         .task(id: "\(region)/\(revision)") { await compare() }
+    }
+
+    private func rankedLink(_ item: SpotForecast.RankedSpot, in window: SpotForecast.Window) -> some View {
+        NavigationLink {
+            SpotDetailView(recorder: recorder, original: item.spot, goToRecording: goToRecording)
+        } label: {
+            let weather = item.weather
+            VStack(alignment: .leading, spacing: 8) {
+                Text(item.spot.name).font(.headline)
+                windPill(weather.windLevel.description, level: weather.windLevel == .calm ? .calm : .light)
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 12) { windMetrics(weather) }
+                    VStack(alignment: .leading, spacing: 6) { windMetrics(weather) }
+                }
+                if let temperature = weather.meanTemperature {
+                    Text("Средняя температура " + metric(temperature, unit: "°C", digits: 0))
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                if weather.hours < window.forecastHours.count {
+                    Text("Прогноз за \(weather.hours) из \(window.forecastHours.count) ч")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                if weather.thunder { Label("В прогнозе гроза", systemImage: "cloud.bolt.rain").font(.caption) }
+                if item.spot.areaOnly == true { Text("Ориентир района").font(.caption).foregroundStyle(.secondary) }
+            }
+            .padding(.vertical, 4)
+        }
+    }
+
+    @ViewBuilder private func windMetrics(_ weather: SpotForecast.WindowSummary) -> some View {
+        windMetric("Средний ветер", speed: weather.meanWind, level: weather.windLevel)
+        windMetric("Порывы до", speed: weather.maxGust, level: weather.gustLevel ?? .calm)
+    }
+
+    private func windMetric(_ label: String, speed: Double?, level: SpotForecast.WindLevel) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(label).font(.caption).foregroundStyle(.secondary)
+            windPill(metric(speed, unit: "м/с"), level: level).monospacedDigit()
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    private func windPill(_ text: String, level: SpotForecast.WindLevel) -> some View {
+        Text(text)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(level == .calm ? Color.secondary : Color.black)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(windFill(level), in: Capsule())
+    }
+
+    private func windFill(_ level: SpotForecast.WindLevel) -> Color {
+        switch level {
+        case .calm: return RiderTheme.canvas
+        case .light: return Color(red: 0.80, green: 0.95, blue: 0.82)
+        case .medium: return Color(red: 0.69, green: 0.91, blue: 0.36)
+        case .strong: return Color(red: 1.0, green: 0.61, blue: 0.59)
+        }
     }
 
     private func nearbyRegion(_ fix: CLLocation, within radius: Double) -> String? {
@@ -460,8 +512,7 @@ private struct BestSpotsToday: View {
             return nearbyRegion(CLLocation(latitude: spot.latitude, longitude: spot.longitude), within: 30000) == region
         }
         let now = Date()
-        var fetched = 0
-        var ranks: [Ranked] = []
+        var forecasts: [(RiderSpot, SpotForecast)] = []
         for offset in stride(from: 0, to: candidates.count, by: 4) {
             guard !Task.isCancelled else { return }
             await withTaskGroup(of: (RiderSpot, SpotForecast?).self) { group in
@@ -470,22 +521,13 @@ private struct BestSpotsToday: View {
                 }
                 for await (spot, data) in group {
                     guard let data else { continue }
-                    fetched += 1
-                    if let day = data.daySummary(today: now) {
-                        ranks.append(Ranked(spot: spot, day: day))
-                    }
+                    forecasts.append((spot, data))
                 }
             }
         }
         guard !Task.isCancelled else { return }
-        let sorted = ranks.sorted {
-            if $0.day.meanWind != $1.day.meanWind { return $0.day.meanWind > $1.day.meanWind }
-            if $0.day.hours != $1.day.hours { return $0.day.hours > $1.day.hours }
-            if $0.spot.name != $1.spot.name { return $0.spot.name < $1.spot.name }
-            return $0.id.uuidString < $1.id.uuidString
-        }
-        results = Array(sorted.prefix(3))
-        checked = fetched
+        results = SpotForecast.rankings(today: now, forecasts: forecasts)
+        checked = forecasts.count
         total = candidates.count
         loading = false
     }
