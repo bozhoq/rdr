@@ -6,6 +6,8 @@
 
 Для общего профиля нужен HTTPS-сервис Rider. WSGI-приложение rider_community:application использует SQLite. Задайте RIDER_DB на постоянном диске, настройте HTTPS, лимиты запросов и размер тела 150000 байт на прокси. Адрес задаётся строкой RiderProfileServer в Info.plist. Публикуются выбранное имя, фото и суммарные показатели. Закрытие профиля удаляет карточку и входящие подписки. Доступ владельца привязан к ключу этого устройства.
 
+Чтобы Rider показывал время поездки по Яндекс Картам, задайте ключ API Матрицы расстояний в переменной окружения RIDER_YANDEX_ROUTING_KEY на сервере Rider. Клиент использует тот же HTTPS-адрес RiderProfileServer. Прокси передаёт начальную точку и до 20 спотов за один запрос. Перед включением установите лимит запросов на прокси и квоту у провайдера. При недоступности Яндекса время рассчитывает Apple Maps, источник показан в карточке. Кнопка маршрута открывает Яндекс Карты.
+
 Источники включают [карту спотов](https://kite-spb.ru/countries/russia), [Desperado](https://desperadoboards.com/kiteboards), [MDAY](https://shop.m-day.ru/), [Molokov Craft Boards](https://kiteforum.pro/viewtopic.php?id=16468&p=2), [Ozone](https://ozonekites.com/kite/news/code-vs-torque-twin-tip-guidance/) и [Lieuwe](https://lieuweboards.com/pages/kiteboard-size-chart).
 
 ## Запись в 0.9.5

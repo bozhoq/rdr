@@ -33,6 +33,34 @@ import FoundationXML
         check(LiveJumpEstimate.spokenHeight(2) == "два метра", "Russian plural for integer height")
         check(LiveJumpEstimate.spokenHeight(10.1) == "десять целых одна десятая метра", "Russian speech preserves tenths")
 
+        var rideForProfile = SessionSummary(startedAt: origin, gpsEnabledAtStart: false, batteryAtStartPercent: nil)
+        rideForProfile.status = .finished
+        rideForProfile.setup = SessionSetup(sport: .kite)
+        rideForProfile.durationSeconds = 7 * 3600
+        let unmeasuredJump = JumpCandidate(startSeconds: 20, endSeconds: 30, minimumLoadG: 0.2,
+                                           returnPeakG: 4, maximumRotationRadiansPerSecond: 2)
+        rideForProfile.jumpAnalysis = JumpAnalysis(candidates: [event, unmeasuredJump])
+        rideForProfile.liveJumpEstimates = [
+            SessionReview.key(for: event, version: JumpDetector.version):
+                LiveJumpEstimate(heightMeters: 5, airtimeSeconds: 3, distanceMeters: nil),
+            SessionReview.key(for: unmeasuredJump, version: JumpDetector.version):
+                LiveJumpEstimate(heightMeters: nil, airtimeSeconds: 10, distanceMeters: nil),
+        ]
+        var interruptedRideForProfile = rideForProfile
+        interruptedRideForProfile.status = .interrupted
+        interruptedRideForProfile.durationSeconds = 3 * 3600 + 120
+        interruptedRideForProfile.jumpAnalysis = nil
+        var landTestForProfile = rideForProfile
+        landTestForProfile.recordingMode = .test
+        let profileTotals = RiderTotals([rideForProfile, interruptedRideForProfile, landTestForProfile])
+        check(profileTotals.sessions == 2 && profileTotals.timeOnWater == "10 ч 2 мин" &&
+              profileTotals.jumps == 1 && profileTotals.height == 5 && profileTotals.airtime == 3,
+              "Sum saved riding time and count only measured jumps, skipping land tests")
+        let profileBadges = RiderAchievement.milestones(profileTotals)
+        check(profileBadges.first(where: { $0.id == "five-meters" })?.unlocked == true &&
+              profileBadges.first(where: { $0.id == "ten-hours" })?.progress == 1 &&
+              profileBadges.first(where: { $0.id == "fifty-hours" })?.unlocked == false,
+              "Unlock achievements at the exact thresholds and clamp progress")
         let smallToss = JumpCandidate(startSeconds: 0, endSeconds: 0.64, minimumLoadG: 0.1,
                                      returnPeakG: 7, maximumRotationRadiansPerSecond: 1)
         let toss = LiveJumpEstimate.phoneToss(smallToss)
@@ -123,12 +151,33 @@ import FoundationXML
         check(restoredGear.kite == "CORE XR8" && restoredGear.kiteAreaSquareMeters == 9.5 &&
               restoredGear.boardDetails == equipment.boardDetails && restoredGear.boardTitle.contains("136 × 41 см"),
               "Kite area and board brand, model, size survive saving")
+        let gearPreset = GearPreset(name: "  Флэт  ", setup: equipment)!
+        let savedPreset = try JSONDecoder().decode(GearPreset.self, from: JSONEncoder().encode(gearPreset))
+        let otherSetup = SessionSetup(sport: .kite, spot: "Донузлав", placement: .chest)
+        let applied = savedPreset.applying(to: otherSetup)
+        check(savedPreset.id == gearPreset.id && savedPreset.name == "Флэт" && savedPreset.matches(applied) &&
+              applied.kiteAreaSquareMeters == 9.5 && applied.boardDetails == equipment.boardDetails &&
+              applied.spot == otherSetup.spot && applied.placement == otherSetup.placement,
+              "Apply a stored equipment pair without changing spot or phone placement")
+        var otherSize = equipment
+        otherSize.kiteAreaSquareMeters = 12
+        check(!gearPreset.matches(otherSize) && GearPreset(name: "Пустой", setup: otherSetup) == nil,
+              "Kite sizes distinguish presets and incomplete gear cannot create a preset")
         let duotoneBoards = BoardCatalog.brands.first { $0.matches("дуотон") }?.models ?? []
         let jaimeSLS = duotoneBoards.first { $0.name == "Jaime SLS" }
         check(jaimeSLS?.sizes.contains("136 × 41 см") == true, "Search by Cyrillic and keep the board model's verified dimensions")
 
         let spot = RiderSpot(name: "  Тестовый спот  ", latitude: "55,75", longitude: "37.62")!
         check(spot.name == "Тестовый спот" && spot.latitude == 55.75 && spot.longitude == 37.62, "Parse decimal commas in spot coordinates")
+        var spotWithShore = spot
+        spotWithShore.waterBearing = 0
+        let restoredShore = try JSONDecoder().decode(RiderSpot.self, from: JSONEncoder().encode(spotWithShore))
+        check(restoredShore.waterBearing == 0 && restoredShore.id == spot.id && spot.waterBearing == nil &&
+              SpotForecast.shoreWind(from: 360, waterBearing: 0) == "К берегу" &&
+              SpotForecast.shoreWind(from: 180, waterBearing: 0) == "От берега" &&
+              SpotForecast.shoreWind(from: 270, waterBearing: 0) == "Вдоль берега" &&
+              SpotForecast.shoreWind(from: 0, waterBearing: nil) == nil,
+              "Preserve a configured shoreline and interpret weather bearings as wind origin")
         check(RiderSpot(name: "Bad", latitude: "91", longitude: "37") == nil &&
               RiderSpot(name: "Bad", latitude: "nan", longitude: "37") == nil, "Invalid coordinates cannot create a spot")
         let legacyWind = SessionWind(knots: 10, direction: 315, date: Date(), source: "test")
@@ -151,6 +200,10 @@ import FoundationXML
         check(yandex?.first(where: { $0.name == "ll" })?.value == "37.62,55.75", "Yandex longitude and latitude are in the right order")
         let fallback = URLComponents(url: spot.routeWebURL!, resolvingAgainstBaseURL: false)?.queryItems
         check(fallback?.first(where: { $0.name == "rtext" })?.value == "~55.75,37.62", "Route leaves origin to current location")
+        check(SpotRoadTravel.durationLabel(2695) == "45 мин" &&
+              SpotRoadTravel.durationLabel(4500) == "1 ч 15 мин" &&
+              SpotRoadTravel.durationLabel(0) == "1 мин" && SpotRoadTravel.durationLabel(.infinity) == nil,
+              "Show short, long and unavailable automobile travel times")
         let appRoute = URLComponents(url: spot.routeAppURL!, resolvingAgainstBaseURL: false)
         check(appRoute?.scheme == "yandexmaps" && appRoute?.queryItems?.first(where: { $0.name == "lat_to" })?.value == "55.75",
               "Pass coordinates to the native Maps route")
@@ -188,7 +241,7 @@ import FoundationXML
 
         let rankingForecast = try windowForecast { hour in Double(hour) }
         let late = midnight.addingTimeInterval(23 * 3600)
-        let summaries = rankingForecast.windowSummaries(today: late)
+        let summaries = rankingForecast.windowSummaries(relativeTo: late)
         let windows = SpotForecast.Window.allCases
         check(windows.map(\.title) == ["07:00–10:00", "10:00–13:00", "13:00–16:00", "16:00–20:00"] &&
               windows.compactMap { summaries[$0]?.hours } == [3, 3, 3, 5],
@@ -197,7 +250,7 @@ import FoundationXML
         check(averages.count == 4 && zip(averages, [8.0, 11, 14, 18]).allSatisfy { pair in abs(pair.0 - pair.1) < 0.00001 } &&
               summaries[.afternoon]?.thunder == true && abs((summaries[.afternoon]?.maxGust ?? 0) - 15) < 0.00001,
               "Keep the earlier forecasts, peak gusts and thunder in the right window")
-        check(rankingForecast.windowSummaries(today: midnight.addingTimeInterval(-1)).isEmpty,
+        check(rankingForecast.windowSummaries(relativeTo: midnight.addingTimeInterval(-1)).isEmpty,
               "Missing day has no window summaries")
 
         let windyMorning = try windowForecast { hour in (7..<10).contains(hour) ? 9 : 2 }
@@ -208,17 +261,47 @@ import FoundationXML
             let extra = RiderSpot(name: "Спот \(i)", latitude: "55.75", longitude: "37.62")!
             regionForecasts.append((extra, weakForecast))
         }
-        let rankings = SpotForecast.rankings(today: late, forecasts: regionForecasts)
+        let rankings = SpotForecast.rankings(relativeTo: late, forecasts: regionForecasts)
         check(rankings.allSatisfy { $0.spots.count == 5 } &&
               rankings.first?.spots.first?.id == spot.id && rankings.last?.spots.first?.id == nearby.id &&
               rankings[1].spots.allSatisfy { $0.weather.windLevel == .calm },
               "Pick a separate winner for each window and still show five results in weak wind")
+        let beforeMorning = midnight.addingTimeInterval(6 * 3600)
+        var localCalendar = Calendar(identifier: .gregorian)
+        localCalendar.timeZone = TimeZone(identifier: "Europe/Moscow")!
+        let atEight = midnight.addingTimeInterval(20 * 3600)
+        check(SpotForecast.RankingDay.forEveningSwitch(at: atEight.addingTimeInterval(-1), calendar: localCalendar) == .today &&
+              SpotForecast.RankingDay.forEveningSwitch(at: atEight, calendar: localCalendar) == .tomorrow &&
+              SpotForecast.RankingDay.forEveningSwitch(at: midnight.addingTimeInterval(24 * 3600), calendar: localCalendar) == .today,
+              "Rank tomorrow after the evening cutoff and today again at midnight")
+        let nextRankings = SpotForecast.rankings(for: .tomorrow, relativeTo: late, forecasts: [(spot, rankingForecast)])
+        check(nextRankings.count == 4 && abs((nextRankings.first?.spots.first?.weather.meanWind ?? 0) - 32) < 0.00001,
+              "Rank tomorrow's hours in the spot's local timezone")
+        let favoriteForecasts = [(spot, windyMorning), (nearby, windyEvening)]
+        let firstWindow = SpotForecast.nearestWindWindow(after: beforeMorning, forecasts: favoriteForecasts)
+        let eveningWindow = SpotForecast.nearestWindWindow(after: midnight.addingTimeInterval(10 * 3600),
+                                                          forecasts: favoriteForecasts)
+        check(firstWindow?.spot.id == spot.id && firstWindow?.start == midnight.addingTimeInterval(7 * 3600) &&
+              eveningWindow?.spot.id == nearby.id && eveningWindow?.start == midnight.addingTimeInterval(16 * 3600),
+              "Prefer the nearest eligible favorite window even when the later one is windier")
+        let fadingWind = try windowForecast { hour in (7..<9).contains(hour) ? 12 : 1 }
+        let tomorrowWind = try windowForecast { hour in (31..<34).contains(hour) ? 7 : 1 }
+        let activeWindow = SpotForecast.nearestWindWindow(after: midnight.addingTimeInterval(7.5 * 3600),
+                                                         forecasts: [(spot, windyMorning)])
+        let nextDay = SpotForecast.nearestWindWindow(after: midnight.addingTimeInterval(9.5 * 3600),
+                                                    forecasts: [(spot, fadingWind), (nearby, tomorrowWind)])
+        check(activeWindow?.start == midnight.addingTimeInterval(7.5 * 3600) &&
+              nextDay?.spot.id == nearby.id && nextDay?.start == midnight.addingTimeInterval(31 * 3600) &&
+              SpotForecast.nearestWindWindow(after: late, forecasts: [(spot, weakForecast)]) == nil,
+              "Use remaining hours in an active window and look at the next local day")
         let missingForecast = try windowForecast { hour in hour == 17 ? 7 : nil }
-        let partial = missingForecast.windowSummaries(today: late)
+        let partial = missingForecast.windowSummaries(relativeTo: late)
         check(partial.count == 1 && partial[.evening]?.hours == 1 && partial[.evening]?.windLevel == .light,
               "Missing hours and windows do not turn into a forecast of zero wind")
 
-        check([5.99, 6, 7.99, 8, 9.99, 10].map(SpotForecast.WindLevel.average) == [.calm, .light, .light, .medium, .medium, .strong] &&
+        check([3.99, 4, 5.6, 7.99, 8, 9.99, 10].map(SpotForecast.WindLevel.average) == [.calm, .light, .light, .light, .medium, .medium, .strong] &&
+              SpotForecast.WindLevel.average(5.6).description == "Обнаружен лайтвинд" &&
+              SpotForecast.WindLevel.average(3.99).description == "Штиль" &&
               [8.99, 9, 12, 13, 13.01].map(SpotForecast.WindLevel.gust) == [.light, .medium, .medium, .medium, .strong],
               "Classify sustained wind and gusts independently at the specified thresholds")
         let forecast = try JSONDecoder().decode(SpotForecast.self, from: Data(fixture.utf8))
