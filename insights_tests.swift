@@ -316,6 +316,12 @@ import FoundationXML
             return try JSONDecoder().decode(SpotForecast.self, from: JSONSerialization.data(withJSONObject: payload))
         }
 
+        let searchRadius = SpotForecast.SearchRadius(text: " 200,5 ")
+        check(searchRadius?.kilometers == 200.5 &&
+              searchRadius?.contains(distanceMeters: 200_500) == true &&
+              searchRadius?.contains(distanceMeters: 200_501) == false &&
+              ["", "0", "-2", "nan", "inf", "1,2,3"].allSatisfy { SpotForecast.SearchRadius(text: $0) == nil },
+              "Accept a decimal search radius and include only distances within the boundary")
         let rankingForecast = try windowForecast { hour in Double(hour) }
         let late = midnight.addingTimeInterval(23 * 3600)
         let summaries = rankingForecast.windowSummaries(relativeTo: late)
