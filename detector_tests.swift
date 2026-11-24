@@ -255,6 +255,31 @@ enum DetectorTests {
             }
         }
 
+        // A known 0.8 m excursion begins before takeoff. The phone has already
+        // risen 0.4 m at takeoff and only the remaining 0.4 m is jump height.
+        let bodySamples = (0...500).map { i -> VerticalTrajectory.Sample in
+            let t = Double(i) / 100
+            let phase = t - 1
+            let acceleration = (0..<2).contains(phase) ? 0.4 * Double.pi * Double.pi * cos(Double.pi * phase) : 0
+            return .init(time: t, acceleration: acceleration)
+        }
+        let bodyEvent = JumpCandidate(startSeconds: 1.5, endSeconds: 2.5, minimumLoadG: 0.1,
+                                      returnPeakG: 2, maximumRotationRadiansPerSecond: 1)
+        let bodyPeak = VerticalTrajectory.flightPeak(bodyEvent, samples: bodySamples)
+        check(abs((bodyPeak?.height ?? 0) - 0.4) < 0.04 && abs((bodyPeak?.time ?? 0) - 2) < 0.04,
+              "Integrate from the takeoff level to the in-flight apex")
+        check(VerticalTrajectory.flightPeak(bodyEvent, samples: bodySamples.filter { !(1.8...1.9).contains($0.time) }) == nil,
+              "A sensor gap invalidates an anchored trajectory")
+        let bodyEstimate = LiveJumpEstimate.riding(.init(event: bodyEvent, trajectory: [], settledHeight: 0,
+                                                         residualVelocity: 0, levelLandingHeight: 0.15),
+                                                  altitude: [], gps: [], motionClock: nil, motionPeak: bodyPeak)
+        check(bodyEstimate.inertialLift == true && bodyEstimate.heightMeters == bodyPeak?.height &&
+              bodyEstimate.apexSeconds == bodyPeak?.time && bodyEstimate.airtimeSeconds == 1 &&
+              bodyEstimate.isHandLift != true, "One rider event uses the anchored height and actual flight interval")
+        let historicalSetup = SessionSetup(sport: .groundTest, placement: .hand)
+        check(historicalSetup.forRecording.sport == .kite && historicalSetup.forRecording.placement == .unspecified &&
+              historicalSetup.placement == .hand, "Migrate copied settings without changing the historical session")
+
         var handAtUpperLevel = HandSimulationDetector()
         let ascentOnly = (0...450).map { i in
             let t = Double(i) / 100
