@@ -1,3 +1,4 @@
+import CoreLocation
 import Charts
 import ImageIO
 import PhotosUI
@@ -15,27 +16,40 @@ struct SpotsView: View {
             Section {
                 Button { adding = true } label: { Label("Добавить спот", systemImage: "plus") }
             }.listRowBackground(RiderTheme.surface)
-            Section("Мои споты") {
-                if recorder.spots.isEmpty {
-                    Text("Добавь спот по координатам, чтобы выбирать его перед записью.").foregroundStyle(.secondary)
-                }
-                ForEach(recorder.spots) { spot in
-                    NavigationLink {
-                        SpotDetailView(recorder: recorder, original: spot, goToRecording: goToRecording)
-                    } label: {
-                        VStack(alignment: .leading, spacing: 5) {
-                            Text(spot.name).font(.headline)
-                            Text("\(spot.latitude.formatted(.number.precision(.fractionLength(4)))), \(spot.longitude.formatted(.number.precision(.fractionLength(4))))")
-                                .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                        }
-                    }
-                }
-            }.listRowBackground(RiderTheme.surface)
+            SpotGroups(spots: recorder.spots) { spot in
+                NavigationLink {
+                    SpotDetailView(recorder: recorder, original: spot, goToRecording: goToRecording)
+                } label: { Text(spot.name) }
+            }
         }
         .scrollContentBackground(.hidden)
         .background(RiderTheme.canvas.ignoresSafeArea())
         .navigationTitle("Спот")
         .sheet(isPresented: $adding) { SpotEditor(original: nil, save: recorder.saveSpot) }
+    }
+}
+
+private struct SpotGroups<Row: View>: View {
+    let spots: [RiderSpot]
+    @ViewBuilder let row: (RiderSpot) -> Row
+
+    var body: some View {
+        let mine = spots.filter { $0.region == nil }
+        Section("Мои споты") {
+            if mine.isEmpty { Text("Пока нет личных спотов").foregroundStyle(.secondary) }
+            ForEach(mine) { row($0) }
+        }
+        let regions = Dictionary(grouping: spots.filter { $0.region != nil }, by: { $0.region ?? "" })
+        ForEach(regions.keys.sorted(), id: \.self) { region in
+            DisclosureGroup(region) {
+                let areas = Dictionary(grouping: regions[region] ?? [], by: { $0.locality ?? "Другие споты" })
+                ForEach(areas.keys.sorted(), id: \.self) { area in
+                    DisclosureGroup(area) {
+                        ForEach(areas[area] ?? []) { spot in row(spot) }
+                    }
+                }
+            }
+        }.listRowBackground(RiderTheme.surface)
     }
 }
 
@@ -49,12 +63,8 @@ struct SpotChoice: View {
     var body: some View {
         NavigationStack {
             Form {
-                if !spots.isEmpty {
-                    Section("Мои споты") {
-                        ForEach(spots) { spot in
-                            Button(spot.name) { setup.selectSpot(spot); dismiss() }
-                        }
-                    }
+                SpotGroups(spots: spots) { spot in
+                    Button(spot.name) { setup.selectSpot(spot); dismiss() }
                 }
                 let recentNames = recent.filter { candidate in !spots.contains { $0.name.caseInsensitiveCompare(candidate) == .orderedSame } }
                 if !recentNames.isEmpty {
@@ -83,7 +93,7 @@ struct SpotChoice: View {
     }
 }
 
-private struct SpotEditor: View {
+struct SpotEditor: View {
     @Environment(\.dismiss) private var dismiss
     let original: RiderSpot?
     let save: (RiderSpot) -> Bool
@@ -95,12 +105,12 @@ private struct SpotEditor: View {
     @State private var duplicate = false
     @State private var showingMap = false
 
-    init(original: RiderSpot?, save: @escaping (RiderSpot) -> Bool) {
+    init(original: RiderSpot?, suggested: CLLocationCoordinate2D? = nil, save: @escaping (RiderSpot) -> Bool) {
         self.original = original
         self.save = save
         _name = State(initialValue: original?.name ?? "")
-        _latitude = State(initialValue: original.map { String($0.latitude) } ?? "")
-        _longitude = State(initialValue: original.map { String($0.longitude) } ?? "")
+        _latitude = State(initialValue: original.map { String($0.latitude) } ?? suggested.map { String($0.latitude) } ?? "")
+        _longitude = State(initialValue: original.map { String($0.longitude) } ?? suggested.map { String($0.longitude) } ?? "")
         _notes = State(initialValue: original?.notes ?? "")
         _windyLink = State(initialValue: original?.windyLink?.absoluteString ?? "")
     }
@@ -111,6 +121,10 @@ private struct SpotEditor: View {
         if let original, candidate.latitude == original.latitude, candidate.longitude == original.longitude {
             candidate.mapLink = original.mapLink
         }
+        candidate.region = original?.region
+        candidate.locality = original?.locality
+        candidate.areaOnly = original?.areaOnly
+        candidate.source = original?.source
         return candidate
     }
 
@@ -201,8 +215,10 @@ private struct SpotDetailView: View {
     private var titleCard: some View {
         VStack(alignment: .leading, spacing: 13) {
             Text(spot.name).font(.largeTitle.bold())
+            if spot.areaOnly == true { Text("Ориентир района. Точка старта пока не уточнена.").font(.footnote) }
+            if let source = spot.source { Link("Источник координат", destination: source).font(.footnote) }
             Button(action: openRoute) {
-                Label("Маршрут к споту", systemImage: "location.fill")
+                Label(spot.areaOnly == true ? "Показать район на карте" : "Маршрут к споту", systemImage: "location.fill")
                     .font(.headline).frame(maxWidth: .infinity, minHeight: 42)
             }.buttonStyle(.borderedProminent).tint(RiderTheme.action)
             Button {
@@ -215,6 +231,7 @@ private struct SpotDetailView: View {
     }
 
     private func openRoute() {
+        if spot.areaOnly == true, let url = spot.yandexURL { openURL(url); return }
         guard let app = spot.routeAppURL, let web = spot.routeWebURL else { return }
         openURL(app) { opened in
             if !opened { openURL(web) { routeUnavailable = !$0 } }

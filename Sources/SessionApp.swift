@@ -23,7 +23,7 @@ private struct Tabs: View {
     @State private var selectedTab = Tab.record
 
     private enum Tab: Hashable {
-        case spot, record, history
+        case spot, record, history, rider
     }
 
     var body: some View {
@@ -48,6 +48,9 @@ private struct Tabs: View {
             }
             .tabItem { Label("История", systemImage: "clock.arrow.circlepath") }
             .tag(Tab.history)
+            NavigationStack { RiderProfileView(recorder: recorder) }
+                .tabItem { Label("Райдер", systemImage: "person.crop.circle") }
+                .tag(Tab.rider)
 
         }
         .tint(RiderTheme.accent)
@@ -68,6 +71,7 @@ private struct RecordingView: View {
     let onStop: () -> Void
     @State private var device = RecordingDevice.phone
     @State private var gear: GearField?
+    @State private var newGPSPoint = false
     @State private var showingTools = false
     @State private var confirmingStop = false
     @State private var showingSensorCheck = false
@@ -123,6 +127,9 @@ private struct RecordingView: View {
                 }
             }
         }
+        .sheet(isPresented: $newGPSPoint) {
+            SpotEditor(original: nil, suggested: recorder.usableFix?.coordinate, save: recorder.saveSpot)
+        }
         .sheet(isPresented: $showingTools) {
             if let session = recorder.live { tools(session) }
         }
@@ -142,10 +149,24 @@ private struct RecordingView: View {
                 Text("Новая сессия").font(.largeTitle.bold())
 
                 VStack(spacing: 0) {
-                    ActivityFields(setup: $recorder.draftSetup, ridingOnly: true)
-                        .padding(.vertical, 12)
-                    Divider()
-                    gearRow(.spot)
+                    Picker("Спот и ветер", selection: $recorder.automaticConditions) {
+                        Text("Автоматически").tag(true)
+                        Text("Вручную").tag(false)
+                    }.pickerStyle(.segmented).padding(.vertical, 12)
+                    if recorder.automaticConditions {
+                        if let fix = recorder.usableFix {
+                            if let spot = recorder.nearestSpot(to: fix) { LabeledContent("Спот", value: spot.name) }
+                            else { Button("Добавить мой спот") { newGPSPoint = true } }
+                        }
+                        Button(recorder.locating ? "Получаем координаты…" : "Определить спот по GPS",
+                               action: recorder.locateSpot).disabled(recorder.locating)
+                        Text("Ветер на старте — прогноз Open-Meteo по координатам.").font(.footnote).foregroundStyle(.secondary)
+                    } else {
+                        gearRow(.spot)
+                        TextField("Ветер, узлы", text: $recorder.manualWind).keyboardType(.decimalPad)
+                        TextField("Откуда дует, 0–360°", text: $recorder.manualDirection).keyboardType(.decimalPad)
+                        if !recorder.manualWindValid { Text("Проверьте скорость и направление ветра.").font(.footnote) }
+                    }
                     Divider()
                     gearRow(.kite)
                     Divider()
@@ -171,14 +192,13 @@ private struct RecordingView: View {
                 .buttonStyle(.borderedProminent)
                 .tint(RiderTheme.action)
                 .controlSize(.large)
-                .disabled(device == .watch || !recorder.hasRecordingSensors || recorder.analyzingSessionID != nil)
+                .disabled(device == .watch || (!recorder.automaticConditions && !recorder.manualWindValid) || !recorder.hasRecordingSensors || recorder.analyzingSessionID != nil)
 
                 DisclosureGroup("Настройки записи") {
                     VStack(spacing: 15) {
                         Picker("Где телефон", selection: $recorder.draftSetup.placement) {
                             ForEach(PhonePlacement.allCases.filter { $0 != .hand }, id: \.self) { Text($0.title).tag($0) }
                         }
-                        Toggle("Проверить датчики перед записью", isOn: $recorder.recalibrateNextSession)
                         locationControls
                     }.padding(.top, 12)
                 }.lagoonCard()
@@ -187,19 +207,22 @@ private struct RecordingView: View {
             }.padding(20)
         }
         .background(RiderTheme.canvas.ignoresSafeArea())
+        .task(id: recorder.automaticConditions) {
+            if recorder.automaticConditions && recorder.locationAuthorized { recorder.locateSpot() }
+        }
     }
 
     private func requestRecording() {
-        if recorder.needsSensorCheck { showingSensorCheck = true }
-        else { recorder.start() }
+        showingSensorCheck = true
     }
 
     private var sensorCheck: some View {
         NavigationStack {
             Form {
                 Section("Калибровка") {
+                    Text("Положите телефон плашмя на неподвижную поверхность на 5 секунд. После проверки закрепите его и начните запись.")
                     if recorder.sensorCheckRunning {
-                        ProgressView("Не двигайте телефон 3 секунды")
+                        ProgressView("Проверяем датчики 5 секунд")
                     } else if recorder.checkedCalibration != nil {
                         Label("Калибровка готова", systemImage: "checkmark.circle")
                     } else if let message = recorder.sensorCheckMessage {
@@ -220,7 +243,7 @@ private struct RecordingView: View {
                     recorder.start()
                     showingSensorCheck = false
                 }
-                .disabled(recorder.sensorCheckRunning || recorder.checkedSensors == nil || !recorder.hasRecordingSensors)
+                .disabled(!recorder.readyToStart || !recorder.hasRecordingSensors)
             }
             .navigationTitle("Проверка датчиков")
             .navigationBarTitleDisplayMode(.inline)
@@ -306,7 +329,7 @@ private struct RecordingView: View {
     private func recordingMetrics(_ session: SessionSummary) -> some View {
         let estimates = (session.liveJumpEstimates ?? [:]).values
         let height = estimates.compactMap(\.heightMeters).max()
-        let airtime = estimates.map(\.airtimeSeconds).max()
+        let airtime = estimates.filter { session.handSimulationTest == true || $0.isHandLift != true }.map(\.airtimeSeconds).max()
         let distance = estimates.compactMap(\.distanceMeters).max()
         return VStack(spacing: 0) {
             HStack(spacing: 0) {
@@ -674,6 +697,10 @@ struct SessionDetail: View {
         Button("Название и заметки") { editingNotes = true }
             .disabled(recorder.analyzingSessionID == session.id)
 
+        if let wind = session.wind {
+            LabeledContent(wind.source, value: wind.title)
+            if let gust = wind.gust { LabeledContent("Порывы", value: metric(gust, unit: "уз")) }
+        } else if session.automaticConditions == true { Text("Прогноз на старте недоступен").font(.footnote) }
         LabeledContent("Активность", value: session.setup?.activityTitle ?? "Не указано")
         if let setup = session.setup {
             if !setup.spot.isEmpty { LabeledContent("Спот", value: setup.spot) }
@@ -827,14 +854,14 @@ private struct NotesEditor: View {
 
 
 enum RiderTheme {
-    static let canvas = adaptive(light: 0xE1F7F4, dark: 0x092626)
-    static let surface = adaptive(light: 0xF6FFFD, dark: 0x113837)
+    static let canvas = adaptive(light: 0xD6F6F2, dark: 0x052D32)
+    static let surface = adaptive(light: 0xF6FFFD, dark: 0x0B4043)
     static let border = adaptive(light: 0xB5E4DE, dark: 0x285554)
-    static let accent = adaptive(light: 0x006F70, dark: 0x6CE5CE)
-    static let action = Color(uiColor: rgb(0x006F70))
+    static let accent = adaptive(light: 0x00797C, dark: 0x64EDDD)
+    static let action = Color(uiColor: rgb(0x00797C))
     static let foam = Color(uiColor: rgb(0xDDFCF6))
     static let lagoon = LinearGradient(
-        colors: [Color(uiColor: rgb(0x005C87)), Color(uiColor: rgb(0x006F73))],
+        colors: [Color(uiColor: rgb(0x006E86)), Color(uiColor: rgb(0x008B85))],
         startPoint: .topLeading,
         endPoint: .bottomTrailing
     )

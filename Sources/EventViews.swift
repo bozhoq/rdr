@@ -41,7 +41,7 @@ struct JumpHistoryTable<Destination: View>: View {
             let estimate = session.liveEstimate(for: event)
             let manualToss = session.handSimulationTest == true ? nil : event.approximateTossHeightMeters(label: label)
             return Row(index: index, event: event, height: estimate?.heightMeters ?? manualToss,
-                       airtime: estimate?.airtimeSeconds ?? manualToss.map { _ in event.unloadingSeconds }, distance: estimate?.distanceMeters)
+                       airtime: estimate?.isHandLift == true && session.handSimulationTest != true ? nil : estimate?.airtimeSeconds ?? manualToss.map { _ in event.unloadingSeconds }, distance: estimate?.distanceMeters)
         }.sorted { first, second in
             switch (first.value(for: sort), second.value(for: sort)) {
             case let (a?, b?) where a != b: return ascending ? a < b : a > b
@@ -171,7 +171,7 @@ struct EventDetailView: View {
                                            value: "≈ \(metric(estimate.airtimeSeconds, unit: "с"))")
                             LabeledContent("Дистанция", value: metric(estimate.distanceMeters, unit: "м"))
                             Text(estimateExplanation(estimate)).font(.footnote).foregroundStyle(.secondary)
-                            if estimate.heightMeters != nil, session.jumpAnalysis?.detectorVersion == RidingJumpDetector.version {
+                            if estimate.isHandLift != true, estimate.heightMeters != nil, session.jumpAnalysis?.detectorVersion == RidingJumpDetector.version {
                                 Text(session.setup?.placement == .board
                                      ? "Отсчёт — поверхность в месте отрыва. Датчик на доске измеряет подъём точки крепления."
                                      : "Высота над поверхностью в месте отрыва оценена по движению крепления. На груди она совпадает с подъёмом доски при одинаковой позе в момент отрыва и на вершине. Подтягивание ног меняет просвет под доской.")
@@ -202,6 +202,9 @@ struct EventDetailView: View {
     private func estimateExplanation(_ estimate: LiveJumpEstimate) -> String {
         if estimate.assumesLevelLanding == true {
             return "Оценка по движению. Предполагает отрыв и приземление на одной высоте."
+        }
+        if estimate.isHandLift == true && session.handSimulationTest != true {
+            return "Зафиксированы подъём и возврат телефона. Время в воздухе не подтверждено."
         }
         if estimate.inertialLift == true && session.handSimulationTest != true {
             return "Высота от отрыва до вершины по вертикальному движению закреплённого телефона."

@@ -21,7 +21,15 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
     @Published private(set) var checkedSensors: RecordingSensors?
     @Published private(set) var checkedCalibration: MotionCalibration?
     @Published private(set) var sensorCheckMessage: String?
-    @Published var recalibrateNextSession = false
+    @Published var automaticConditions = (UserDefaults.standard.object(forKey: "rider.autoConditions") as? Bool) ?? true {
+        didSet { UserDefaults.standard.set(automaticConditions, forKey: "rider.autoConditions") }
+    }
+    @Published var manualWind = ""
+    @Published var manualDirection = ""
+    @Published private(set) var previewFix: CLLocation?
+    @Published private(set) var locating = false
+    private var conditionsResolved = false
+    private var weatherTask: Task<Void, Never>?
 
     private let store = SessionStore()
     private let motion = CMMotionManager()
@@ -60,7 +68,30 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
     }
     var locationAuthorized: Bool { authorization == .authorizedWhenInUse || authorization == .authorizedAlways }
     var hasRecordingSensors: Bool { motionAvailable || pressureAvailable || locationAuthorized }
-    var needsSensorCheck: Bool { recalibrateNextSession || !UserDefaults.standard.bool(forKey: sensorCheckKey) }
+    var readyToStart: Bool {
+        !sensorCheckRunning && checkedSensors != nil && (!motionAvailable || checkedCalibration != nil)
+    }
+    var usableFix: CLLocation? {
+        guard locationAuthorized, let fix = previewFix, abs(fix.timestamp.timeIntervalSinceNow) <= 45 else { return nil }
+        return fix
+    }
+    func nearestSpot(to fix: CLLocation) -> RiderSpot? {
+        spots.filter { $0.areaOnly != true }.map { spot in
+            (spot, fix.distance(from: CLLocation(latitude: spot.latitude, longitude: spot.longitude)))
+        }.filter { $0.1 <= 1500 }.min(by: { $0.1 < $1.1 })?.0
+    }
+    func locateSpot() {
+        guard summary == nil else { return }
+        if authorization == .notDetermined { location.requestWhenInUseAuthorization() }
+        else if locationAuthorized { locating = true; location.requestLocation() }
+    }
+    var manualWindValid: Bool {
+        validNumber(manualWind, max: 200) && validNumber(manualDirection, max: 360) &&
+            (manualDirection.isEmpty || !manualWind.isEmpty)
+    }
+    private func validNumber(_ text: String, max: Double) -> Bool {
+        text.isEmpty || Double(text.replacingOccurrences(of: ",", with: ".")).map { $0.isFinite && (0...max).contains($0) } == true
+    }
 
     private var effectivePlacement: PhonePlacement { draftSetup.placement }
 
@@ -127,6 +158,7 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
     }
 
     func chooseSpot(_ spot: RiderSpot) {
+        automaticConditions = false
         var setup = draftSetup
         setup.selectSpot(spot)
         reuseSetup(setup)
@@ -156,7 +188,7 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
                 guard let sample = Self.motionSample(motion, elapsed: motion.timestamp - origin) else { return }
                 if self.checkedSensors?.motionResponded != true { self.checkedSensors?.motionResponded = true }
                 self.calibrationSamples.append(sample)
-                if sample.elapsedSinceFirstSampleSeconds >= MotionCalibration.durationSeconds {
+                if sample.elapsedSinceFirstSampleSeconds >= 5.0 {
                     self.finishSensorCheck(id)
                 }
             }
@@ -171,7 +203,7 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
             }
         }
         checkTask = Task { [weak self] in
-            do { try await Task.sleep(for: .seconds(5)) } catch { return }
+            do { try await Task.sleep(for: .seconds(8)) } catch { return }
             self?.finishSensorCheck(id)
         }
     }
@@ -182,6 +214,13 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
         if checkedSensors?.pressureResponded == nil { checkedSensors?.pressureResponded = false }
         if checkedSensors?.motionResponded == true {
             do {
+                guard let first = calibrationSamples.first, let last = calibrationSamples.last,
+                      last.elapsedSinceFirstSampleSeconds - first.elapsedSinceFirstSampleSeconds >= 5,
+                      calibrationSamples.allSatisfy({ abs($0.gravityG.z) >= 0.985 }) else {
+                    sensorCheckMessage = "Положите iPhone горизонтально на 5 секунд и повторите проверку."
+                    stopSensorCheck()
+                    return
+                }
                 let calibration = try MotionCalibration.measure(calibrationSamples)
                 checkedCalibration = MotionCalibration(completedAtSeconds: 0, frequencyHz: calibration.frequencyHz,
                                                        verticalOffset: calibration.verticalOffset, verticalNoise: calibration.verticalNoise)
@@ -213,11 +252,16 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
     }
 
     func start() {
-        guard summary == nil, analyzingSessionID == nil, hasRecordingSensors, !sensorCheckRunning else { return }
+        guard summary == nil, analyzingSessionID == nil, hasRecordingSensors, readyToStart, automaticConditions || manualWindValid else { return }
         UIDevice.current.isBatteryMonitoringEnabled = true
-        let reusedCalibration = recalibrateNextSession ? nil : savedCalibration
-        let calibration = checkedCalibration ?? reusedCalibration
+        let calibration = checkedCalibration
         var sessionSetup = draftSetup.forRecording
+        let fix = automaticConditions ? usableFix : nil
+        if automaticConditions {
+            sessionSetup.spotID = nil
+            sessionSetup.spot = ""
+            if let fix, let nearest = nearestSpot(to: fix) { sessionSetup.selectSpot(nearest) }
+        }
         if sessionSetup.spotID == nil, let matching = spots.first(where: { $0.matches(sessionSetup) }) {
             sessionSetup.selectSpot(matching)
         }
@@ -225,7 +269,7 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
         sensors.motionResponded = checkedSensors?.motionResponded
         sensors.pressureResponded = checkedSensors?.pressureResponded
         let sensorStart = ProcessInfo.processInfo.systemUptime
-        let session = SessionSummary(
+        var session = SessionSummary(
             startedAt: Date(),
             gpsEnabledAtStart: locationAuthorized,
             batteryAtStartPercent: batteryPercent,
@@ -237,10 +281,15 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
             motionCalibration: calibration,
             liveJumpEstimates: [:],
             handSimulationTest: false,
-            reusedMotionCalibration: checkedCalibration == nil && reusedCalibration != nil,
+            reusedMotionCalibration: false,
             recordingMode: .battle,
             sensors: sensors
         )
+        session.automaticConditions = automaticConditions
+        if !automaticConditions, let knots = Double(manualWind.replacingOccurrences(of: ",", with: ".")) {
+            session.wind = SessionWind(knots: knots, direction: Double(manualDirection.replacingOccurrences(of: ",", with: ".")),
+                                       date: session.startedAt, source: "Вручную")
+        }
         do {
             let newLog = try store.makeLog(for: session)
             do {
@@ -263,7 +312,9 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
         if checkedSensors != nil { UserDefaults.standard.set(true, forKey: sensorCheckKey) }
         checkedSensors = nil
         checkedCalibration = nil
-        recalibrateNextSession = false
+        conditionsResolved = fix != nil
+        weatherTask?.cancel()
+        if let fix { fetchWind(at: fix, for: session.id, started: session.startedAt) }
         startedAt = clock.now
         lastCheckpoint = startedAt
         lastMotionReceivedAt = nil
@@ -436,6 +487,7 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
 
     func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
         authorization = manager.authorizationStatus
+        if locationAuthorized && automaticConditions && summary == nil { locateSpot() }
         if summary?.gpsEnabledAtStart == true && !locationAuthorized {
             manager.stopUpdatingLocation()
             manager.allowsBackgroundLocationUpdates = false
@@ -445,6 +497,10 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
     }
 
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        locating = false
+        if let fix = locations.last(where: { (0...65).contains($0.horizontalAccuracy) && abs($0.timestamp.timeIntervalSinceNow) <= 45 }) {
+            previewFix = fix
+        }
         guard summary?.gpsEnabledAtStart == true, locationAuthorized else { return }
         for point in locations {
             recordLocation(point)
@@ -452,6 +508,7 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
     }
 
     func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+        locating = false
         if (error as? CLError)?.code == .locationUnknown { return }
         recordEvent("locationError", detail: error.localizedDescription)
     }
@@ -583,6 +640,12 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
               point.timestamp > (lastLocationTimestamp ?? .distantPast),
               CLLocationCoordinate2DIsValid(point.coordinate),
               point.horizontalAccuracy.isFinite, point.horizontalAccuracy >= 0 else { return }
+        if session.automaticConditions == true, !conditionsResolved, point.horizontalAccuracy <= 65,
+           abs(point.timestamp.timeIntervalSinceNow) <= 45 {
+            conditionsResolved = true
+            if let nearest = nearestSpot(to: point) { session.setup?.selectSpot(nearest) }
+            fetchWind(at: point, for: session.id, started: session.startedAt)
+        }
         let sample = LocationSample(
             timestamp: point.timestamp,
             latitude: point.coordinate.latitude,
@@ -607,6 +670,27 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
             checkpointIfDue()
         } catch {
             failStorage(error)
+        }
+    }
+
+    private func fetchWind(at fix: CLLocation, for id: UUID, started: Date) {
+        // Forecast grid resolution is coarser than a GPS fix. Send rounded coordinates.
+        guard let point = RiderSpot(name: "GPS", latitude: String((fix.coordinate.latitude * 100).rounded() / 100),
+                                    longitude: String((fix.coordinate.longitude * 100).rounded() / 100)),
+              let url = SpotForecast.requestURL(for: point) else { return }
+        weatherTask = Task { @MainActor [weak self] in
+            do {
+                let (data, response) = try await URLSession.shared.data(for: URLRequest(url: url, timeoutInterval: 12))
+                guard (response as? HTTPURLResponse)?.statusCode == 200,
+                      let hour = try JSONDecoder().decode(SpotForecast.self, from: data).hours(near: started)
+                        .min(by: { abs($0.time.timeIntervalSince(started)) < abs($1.time.timeIntervalSince(started)) }),
+                      abs(hour.time.timeIntervalSince(started)) <= 3600,
+                      let self, var current = self.summary, current.id == id else { return }
+                current.wind = SessionWind(knots: hour.speed, gust: hour.gust, direction: hour.direction,
+                                           date: hour.time, source: "Прогноз Open-Meteo")
+                self.summary = current
+                self.checkpointIfDue(force: true)
+            } catch { /* Offline sessions keep the wind field empty. */ }
         }
     }
 

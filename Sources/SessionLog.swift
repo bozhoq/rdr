@@ -91,6 +91,8 @@ struct SessionSummary: Codable, Identifiable {
     var reusedMotionCalibration: Bool?
     var recordingMode: RecordingMode?
     var sensors: RecordingSensors?
+    var automaticConditions: Bool?
+    var wind: SessionWind?
 
     var canReplayGroundEvents: Bool {
         handSimulationTest != true && (jumpAnalysis?.detectorVersion ?? JumpDetector.version) == JumpDetector.version
@@ -110,6 +112,19 @@ struct SessionSummary: Codable, Identifiable {
         let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
         return query.isEmpty || [review?.title ?? "", review?.notes ?? "", setup?.spot ?? "", setup?.kiteTitle ?? "", setup?.boardTitle ?? "", setup?.activityTitle ?? ""]
             .contains { $0.localizedStandardContains(query) }
+    }
+}
+
+struct SessionWind: Codable {
+    var knots: Double
+    var gust: Double?
+    var direction: Double?
+    var date: Date
+    var source: String
+
+    var title: String {
+        let directionText = direction.map { " · " + SpotForecast.compass($0) } ?? ""
+        return knots.formatted(.number.precision(.fractionLength(0...1))) + " уз" + directionText
     }
 }
 

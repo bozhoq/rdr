@@ -165,7 +165,7 @@ struct JumpDetector {
 /// Detects a push, ascent, descent and braking as separate phases. A kite jump
 /// can stay loaded in the air, so it never needs a free-fall interval.
 struct RidingJumpDetector {
-    static let version = "ride-7"
+    static let version = "ride-8"
 
     struct Point {
         let time: Double
@@ -192,6 +192,7 @@ struct RidingJumpDetector {
         let launchSpeed: Double
         var takeoff: Double?
         var landing: Double?
+        var recoverySince: Double?
         var landingVelocity = 0.0
         var velocity = 0.0
         var height = 0.0
@@ -437,19 +438,32 @@ struct RidingJumpDetector {
             track.landingPeak = max(track.landingPeak, now.load)
             if track.velocity < initialVelocity - 0.10 && now.vertical < -1.0 {
                 track.landing = nil
+                track.recoverySince = nil
                 track.landingPeak = 0
                 arc = track
                 return nil
             }
             let braking = track.velocity - track.landingVelocity
-            if now.time - landing >= 0.22, braking >= max(0.8, -track.landingVelocity * 0.55),
-               abs(now.vertical) <= 2.2, abs(track.velocity) <= max(1.3, -track.landingVelocity * 0.5) {
+            let sinceContact = now.time - landing
+            let fastRecovery = (0.22...0.50).contains(sinceContact) &&
+                braking >= max(0.8, -track.landingVelocity * 0.55) &&
+                abs(now.vertical) <= 2.2 && abs(track.velocity) <= max(1.3, -track.landingVelocity * 0.5)
+            // A gradual landing can brake for longer. Require a sustained
+            // return to supported, vertically settled motion near takeoff level.
+            let settled = abs(track.velocity) <= 0.55 && abs(now.vertical) <= 1.8 &&
+                (0.65...1.45).contains(now.load) && abs(track.height) <= max(0.4, 0.20 * track.peak)
+            if settled {
+                if track.recoverySince == nil { track.recoverySince = now.time }
+            } else { track.recoverySince = nil }
+            let softRecovery = braking >= max(0.65, -track.landingVelocity * 0.70) &&
+                track.recoverySince.map { now.time - $0 >= 0.14 } == true
+            if fastRecovery || softRecovery {
                 let event = JumpCandidate(startSeconds: takeoff, endSeconds: landing, minimumLoadG: track.minimumLoad,
                                           returnPeakG: track.landingPeak, maximumRotationRadiansPerSecond: track.maximumRotation)
                 arc = nil
                 return Flight(event: event, trajectory: track.trajectory, settledHeight: track.height, residualVelocity: track.velocity)
             }
-            if now.time - landing >= 0.50 {
+            if sinceContact >= 1.15 {
                 // Reusing this arc joins later gestures to an old takeoff and
                 // can turn a few movements into a multi-second false flight.
                 lastRejection = "unconfirmedLanding"

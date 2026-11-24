@@ -96,7 +96,8 @@ struct SessionSetup: Codable {
 
     var forRecording: Self {
         var next = self
-        if !next.sport.isRiding { next.sport = .kite }
+        next.sport = .kite
+        next.kiteStyle = .bigAir
         if next.placement == .hand { next.placement = .unspecified }
         return next.cleaned
     }
@@ -143,6 +144,10 @@ struct RiderSpot: Codable, Identifiable, Hashable {
     let longitude: Double
     let notes: String?
     let windyLink: URL?
+    var region: String?
+    var locality: String?
+    var areaOnly: Bool?
+    var source: URL?
     var mapLink: URL?
 
     init?(id: UUID = UUID(), name: String, latitude: String, longitude: String, notes: String = "", windyLink: String = "", mapLink: URL? = nil) {
@@ -215,6 +220,10 @@ enum StarterSpots {
         let longitude: Double
         let notes: String?
         let mapLink: String?
+        let region: String?
+        let locality: String?
+        let areaOnly: Bool?
+        let source: String?
     }
 
     static func load(from bundle: Bundle = .main) -> [RiderSpot] {
@@ -226,13 +235,28 @@ enum StarterSpots {
         guard let data = try? PropertyListSerialization.data(fromPropertyList: list, format: .binary, options: 0),
               let entries = try? PropertyListDecoder().decode([Entry].self, from: data) else { return [] }
         return entries.compactMap { entry in
-            RiderSpot(id: entry.id, name: entry.name, latitude: String(entry.latitude), longitude: String(entry.longitude),
+            var spot = RiderSpot(id: entry.id, name: entry.name, latitude: String(entry.latitude), longitude: String(entry.longitude),
                       notes: entry.notes ?? "", mapLink: entry.mapLink.flatMap { URL(string: $0) })
+            spot?.region = entry.region
+            spot?.locality = entry.locality
+            spot?.areaOnly = entry.areaOnly
+            spot?.source = entry.source.flatMap { URL(string: $0) }
+            return spot
         }
     }
 
     static func merge(saved: [RiderSpot], catalogue: [RiderSpot]) -> [RiderSpot] {
-        var result = saved
+        let byID = Dictionary(catalogue.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        var result = saved.map { old in
+            var spot = old
+            if let entry = byID[old.id] {
+                spot.region = entry.region
+                spot.locality = entry.locality
+                spot.areaOnly = entry.areaOnly
+                spot.source = entry.source
+            }
+            return spot
+        }
         for entry in catalogue where !result.contains(where: { spot in
             spot.id == entry.id || spot.name.caseInsensitiveCompare(entry.name) == .orderedSame ||
                 (abs(spot.latitude - entry.latitude) < 0.0001 && abs(spot.longitude - entry.longitude) < 0.0001)
@@ -396,6 +420,19 @@ enum BoardCatalog {
     private static let trax = ["135 × 39", "136 × 40.5", "137 × 42", "139 × 43", "140 × 45"]
 
     static let brands = [
+        Brand("Desperado", "Десперадо", [
+            Model("BigGun", ["150 × 50"]), Model("Heartbeat Carbon Pro", []), Model("HeXed Carbon", []), Model("Shotgun", ["133 × 39", "136 × 40", "140 × 41.5", "144 × 43"])
+        ]),
+        Brand("Molokov Craft Boards", "Молоков", [Model("Splash", ["135 × 41"])]),
+        Brand("MDAY", "МД Мдэй Мдей M-Day MD", [Model("Play (2025)", ["133", "136", "139", "142"]), Model("Chillian (2025)", [])]),
+        Brand("Ozone", "Озон", [
+            Model("Code V5", ["130 × 38", "133 × 39", "135 × 40", "138 × 41", "141 × 42", "144 × 43"]),
+            Model("Torque V4", ["136 × 40", "138 × 41", "140 × 42", "142 × 43", "144 × 44"])
+        ]),
+        Brand("Naish", "Нэш Найш", ["Alana", "Alana NVision", "Drive", "Monarch", "Monarch NVision", "Motion", "Motion NVision", "RPT", "Traverse EJ Pro"].map { Model($0, []) }),
+        Brand("FLYSURFER", "Флайсерфер", [Model("Radical 8", ["132 × 40", "138 × 42.5", "144 × 44.5"])]),
+        Brand("Lieuwe", "Льюве", [Model("Shotgun", ["125 × 38", "130 × 39", "133 × 40", "136 × 40.5", "138 × 41", "141 × 42"]), Model("Shotgun Air", ["133 × 40", "136 × 40.5", "138 × 41", "141 × 42", "144 × 43"])]),
+        Brand("Brunotti", "Брунотти", [Model("Dimension 79", []), Model("Lvl 79 Uni", [])]),
         Brand("Cabrinha", "Кабрина Кабринья", [
             Model("Ace (2025)", ["120 × 35", "126 × 36.5", "133 × 38.5", "135 × 40", "138 × 41.5", "141 × 43", "145 × 44.5"]),
             Model("Spectrum (2026)", ["136 × 41", "140 × 42", "144 × 43", "148 × 44", "152 × 44"]),
