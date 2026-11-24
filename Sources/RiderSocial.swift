@@ -56,7 +56,7 @@ struct RiderActivity: Decodable {
 
     var description: String {
         switch kind {
-        case "shaka": return "поставил(а) 🤙 твоему посту"
+        case "shaka": return "поставил(а) шаку твоему посту"
         case "comment": return "оставил(а) комментарий"
         case "repost": return "поделился(-ась) твоим постом"
         default: return "подписался(-ась) на тебя"
@@ -283,6 +283,7 @@ struct RiderPostDetail: View {
         .background(RiderTheme.canvas.ignoresSafeArea())
         .navigationTitle("Публикация")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar(.visible, for: .navigationBar)
         .toolbar {
             if editable {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -357,7 +358,7 @@ struct RiderPostDetail: View {
                 if deleting { try await social.delete(current); dismiss() }
                 else { try await social.publish(current) }
             } catch {
-                self.error = deleting ? "Не удалось удалить публикацию." : "Сначала опубликуйте профиль в разделе «Райдеры». Проверьте подключение и повторите."
+                self.error = deleting ? "Не удалось удалить публикацию." : "Сначала опубликуйте профиль в настройках публичного профиля. Проверьте подключение и повторите."
             }
         }
     }
@@ -492,7 +493,7 @@ private struct RiderCommentsView: View {
             defer { sending = false }
             do { comments = try await action() }
             catch RiderCommunity.Rejection.forbidden {
-                error = "Опубликуй профиль в разделе «Райдеры», чтобы комментировать."
+                error = "Опубликуй профиль в настройках публичного профиля, чтобы комментировать."
             } catch {
                 self.error = "Не удалось сохранить изменение. Попробуй ещё раз."
             }
@@ -668,7 +669,7 @@ struct RiderFeedView: View {
                 ProgressView("Загружаем ленту")
             }
         }
-        .navigationTitle("Лента")
+        .toolbar(.hidden, for: .navigationBar)
         .scrollContentBackground(.hidden).background(RiderTheme.canvas)
         .task(id: feed) { await load(feed) }
         .refreshable { await load(feed) }
@@ -688,7 +689,7 @@ struct RiderFeedView: View {
     }
 }
 
-private struct RiderFeedCard: View {
+struct RiderFeedCard: View {
     @EnvironmentObject private var social: RiderSocialStore
     let post: RiderPost
     let author: String
@@ -761,6 +762,12 @@ private struct RiderFeedCard: View {
         .listRowBackground(Color.clear)
         .sheet(isPresented: $sharing) { shareMenu }
         .sheet(isPresented: $showingReactions) { reactionsSheet }
+        .task(id: post.publicURL) {
+            guard editable, post.publicURL != nil, social.reactions[post.contentID] == nil,
+                  let reaction = try? await RiderCommunity.postDetails(post.contentID).reaction,
+                  !Task.isCancelled, !changingReaction, social.reactions[post.contentID] == nil else { return }
+            social.reactions[post.contentID] = reaction
+        }
     }
 
     private var header: some View {
@@ -784,18 +791,18 @@ private struct RiderFeedCard: View {
         HStack(spacing: 2) {
             Button(action: toggleShaka) {
                 HStack(spacing: 4) {
-                    Text("🤙").font(.title2)
-                    Text(reaction.total.formatted()).font(.caption.weight(.bold)).monospacedDigit()
+                    RiderShakaIcon(selected: reaction.mine)
+                    Text(reaction.total.formatted()).font(.caption.weight(.semibold)).monospacedDigit()
                 }
-                .foregroundStyle(reaction.mine ? RiderTheme.accent : .primary)
                 .padding(.horizontal, 7)
                 .frame(minWidth: 48, minHeight: 44)
-                .background(reaction.mine ? RiderTheme.accent.opacity(0.15) : .clear, in: Capsule())
+                .contentShape(Rectangle())
             }
             .buttonStyle(.borderless)
             .disabled(changingReaction)
-            .accessibilityLabel(reaction.mine ? "Убрать шака" : "Поставить шака")
+            .accessibilityLabel(reaction.mine ? "Убрать шаку" : "Поставить шаку")
             .accessibilityValue(reaction.total.formatted())
+            .accessibilityAddTraits(reaction.mine ? .isSelected : [])
             NavigationLink {
                 detail(comments: true)
             } label: {
@@ -837,7 +844,11 @@ private struct RiderFeedCard: View {
     private var reactionsSheet: some View {
         NavigationStack {
             List {
-                Text("Всего 🤙 \(reaction.total)").font(.headline)
+                Label {
+                    Text("Реакций: \(reaction.total)").font(.headline)
+                } icon: {
+                    RiderShakaIcon(selected: false)
+                }
                 ForEach(reaction.people) { rider in
                     RiderPostHeader(author: rider.name, username: rider.username, avatar: rider.avatar)
                 }
@@ -856,7 +867,7 @@ private struct RiderFeedCard: View {
                     NavigationLink {
                         RiderInboxView(shared: post, onSent: { sharing = false })
                     } label: {
-                        Label("Отправить в Директ", systemImage: "paperplane")
+                        Label("Отправить в сообщениях", systemImage: "paperplane")
                     }
                     if (entry != nil && entry?.mine != true) || reposted {
                         Button {
@@ -931,10 +942,59 @@ private struct RiderFeedCard: View {
 
     private func showActionError(_ failure: Error) {
         if case RiderCommunity.Rejection.forbidden = failure {
-            error = "Сначала опубликуй профиль в разделе «Райдеры»."
+            error = "Сначала опубликуй профиль в настройках публичного профиля."
         } else {
             error = "Не удалось сохранить действие. Попробуй ещё раз."
         }
+    }
+}
+
+private struct RiderShakaIcon: View {
+    let selected: Bool
+    @ScaledMetric(relativeTo: .title3) private var size = 23.0
+
+    var body: some View {
+        RiderShakaShape()
+            .fill(selected ? RiderTheme.accent.opacity(0.20) : .clear)
+            .overlay {
+                RiderShakaShape()
+                    .stroke(RiderTheme.accent, style: StrokeStyle(lineWidth: 1.65, lineCap: .round, lineJoin: .round))
+            }
+            .frame(width: size, height: size)
+            .accessibilityHidden(true)
+    }
+}
+
+private struct RiderShakaShape: Shape {
+    func path(in rect: CGRect) -> Path {
+        let scale = min(rect.width, rect.height) / 24
+        func point(_ x: CGFloat, _ y: CGFloat) -> CGPoint {
+            CGPoint(x: rect.midX + (x - 12) * scale, y: rect.midY + (y - 12) * scale)
+        }
+
+        // The thumb and pinky extend away from the three folded fingers.
+        var path = Path()
+        path.move(to: point(9, 21))
+        path.addQuadCurve(to: point(5.8, 17.3), control: point(6.8, 20))
+        path.addLine(to: point(2.4, 13.2))
+        path.addQuadCurve(to: point(4.7, 10.8), control: point(0.6, 10.6))
+        path.addLine(to: point(7.6, 12.8))
+        path.addLine(to: point(7.6, 9.7))
+        path.addQuadCurve(to: point(10.9, 9.1), control: point(8.1, 6.8))
+        path.addQuadCurve(to: point(14.1, 9.2), control: point(12.6, 7.2))
+        path.addQuadCurve(to: point(17, 10), control: point(15.8, 8.4))
+        path.addLine(to: point(19.1, 5))
+        path.addQuadCurve(to: point(22.2, 5.9), control: point(21.1, 2.8))
+        path.addLine(to: point(20.6, 12.6))
+        path.addQuadCurve(to: point(16.6, 20.7), control: point(19.3, 18.8))
+        path.addQuadCurve(to: point(9, 21), control: point(13.4, 22.3))
+        path.closeSubpath()
+
+        path.move(to: point(10.9, 9.1))
+        path.addLine(to: point(10.9, 12))
+        path.move(to: point(14.1, 9.2))
+        path.addLine(to: point(14.1, 12.3))
+        return path
     }
 }
 
@@ -1083,7 +1143,7 @@ struct RiderInboxView: View {
     var body: some View {
         List {
             if RiderCommunity.endpoint == nil {
-                ContentUnavailableView("Директ", systemImage: "paperplane",
+                ContentUnavailableView("Сообщения", systemImage: "paperplane",
                                        description: Text("Личные сообщения появятся после подключения сервера Rider."))
             } else if let people {
                 if people.isEmpty {
@@ -1108,7 +1168,7 @@ struct RiderInboxView: View {
         .scrollContentBackground(.hidden)
         .background(RiderTheme.canvas)
         .searchable(text: $search, prompt: "Имя или @юзернейм")
-        .navigationTitle(shared != nil ? "Кому отправить" : composing ? "Новое сообщение" : "Директ")
+        .navigationTitle(shared != nil ? "Кому отправить" : composing ? "Новое сообщение" : "Сообщения")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             if RiderCommunity.endpoint != nil && shared == nil {
@@ -1246,7 +1306,7 @@ private struct RiderThreadView: View {
                 attached = false
                 if post != nil { onSent?() }
             } catch RiderCommunity.Rejection.forbidden {
-                error = "Сначала опубликуй профиль в разделе «Райдеры»."
+                error = "Сначала опубликуй профиль в настройках публичного профиля."
             } catch {
                 self.error = "Не удалось отправить сообщение. Попробуй ещё раз."
             }

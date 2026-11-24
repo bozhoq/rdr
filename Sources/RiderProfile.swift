@@ -233,24 +233,13 @@ struct RiderProfileView: View {
                 }
                 .buttonStyle(.plain)
                 records(totals)
-                Button { showingAchievements = true } label: {
-                    shortcut("Ачивок: \(badges.filter(\.unlocked).count) из \(badges.count)",
-                             subtitle: "Полученные и закрытые", icon: "medal")
-                }
-                .buttonStyle(.plain)
-                NavigationLink {
-                    RiderCommunityView(totals: totals, records: RiderJumpScore.records(in: recorder.history),
-                                       didLoad: { mine = $0.mine })
-                } label: {
-                    shortcut("Райдеры", subtitle: "Публичные профили и подписки", icon: "person.2")
-                }
-                .buttonStyle(.plain)
-                postsGrid
+                compactStats(timeOnWater: totals.timeOnWater, unlocked: badges.filter(\.unlocked).count, total: badges.count)
+                posts
             }
             .padding(20)
         }
         .background(RiderTheme.canvas.ignoresSafeArea())
-        .navigationTitle("Райдер")
+        .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
@@ -258,7 +247,7 @@ struct RiderProfileView: View {
                     Label("Уведомления", systemImage: "bell").labelStyle(.iconOnly)
                 }
                 NavigationLink { RiderInboxView() } label: {
-                    Label("Директ", systemImage: "paperplane").labelStyle(.iconOnly)
+                    Label("Сообщения", systemImage: "paperplane").labelStyle(.iconOnly)
                 }
             }
         }
@@ -296,6 +285,12 @@ struct RiderProfileView: View {
                     TextField("О себе", text: $bio, axis: .vertical)
                         .lineLimit(3...5)
                         .onChange(of: bio) { _, value in if value.count > 160 { bio = String(value.prefix(160)) } }
+                    if RiderCommunity.endpoint != nil {
+                        NavigationLink("Публичный профиль") {
+                            RiderCommunityView(totals: totals, records: RiderJumpScore.records(in: recorder.history),
+                                               didLoad: { mine = $0.mine })
+                        }
+                    }
                 }
                 .navigationTitle("Профиль")
                 .navigationBarTitleDisplayMode(.inline)
@@ -370,8 +365,17 @@ struct RiderProfileView: View {
         Text("Подписан: \(mine?.followingCount ?? 0)")
     }
 
-    private var postsGrid: some View {
-        VStack(alignment: .leading, spacing: 9) {
+    private struct ProfilePublication: Identifiable {
+        let post: RiderPost
+        var repost: RiderFeedEntry?
+        var id: UUID { post.id }
+    }
+
+    private var posts: some View {
+        let publications = (social.posts.map { ProfilePublication(post: $0) } +
+                            social.reposts.map { ProfilePublication(post: $0.post, repost: $0) })
+            .sorted { $0.post.date > $1.post.date }
+        return LazyVStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text("Посты").font(.title3.bold()).accessibilityAddTraits(.isHeader)
                 Spacer()
@@ -379,30 +383,16 @@ struct RiderProfileView: View {
                     Label("Добавить пост", systemImage: "plus").font(.subheadline.weight(.semibold))
                 }.buttonStyle(.bordered)
             }
-            if social.posts.isEmpty && social.reposts.isEmpty {
+            if publications.isEmpty {
                 Text("Здесь будут твои фото с каталок.").font(.subheadline).foregroundStyle(.secondary)
-            } else {
-                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: 3), spacing: 3) {
-                    ForEach(social.posts) { post in
-                        NavigationLink {
-                            RiderPostDetail(original: post, author: name, username: username,
-                                            avatar: photo, editable: true)
-                        } label: {
-                            RiderPostSquare(post: post)
-                        }.buttonStyle(.plain)
-                    }
-                    ForEach(social.reposts) { entry in
-                        NavigationLink { RiderSharedPostView(id: entry.id) } label: {
-                            RiderPostSquare(post: entry.post).overlay(alignment: .topTrailing) {
-                                Image(systemName: "arrow.2.squarepath")
-                                    .font(.caption.bold()).padding(6).background(.regularMaterial, in: Circle())
-                                    .padding(4)
-                            }
-                        }.buttonStyle(.plain)
-                        .accessibilityLabel("Репост")
-                    }
+            }
+            ForEach(publications) { publication in
+                if let entry = publication.repost {
+                    RiderFeedCard(post: entry.post, author: entry.author, username: entry.username,
+                                  avatar: entry.avatar, entry: entry)
+                } else {
+                    RiderFeedCard(post: publication.post, author: name, username: username, avatar: photo, editable: true)
                 }
-                .clipShape(RoundedRectangle(cornerRadius: 12))
             }
         }
     }
@@ -432,15 +422,41 @@ struct RiderProfileView: View {
                 record("Топ прыжок", value: metric(totals.height, unit: "м"), icon: "arrow.up.right")
                 record("Топ завис", value: metric(totals.airtime, unit: "с"), icon: "timer")
             }
-            HStack(spacing: 12) {
-                Image(systemName: "water.waves").font(.title3).foregroundStyle(RiderTheme.accent).accessibilityHidden(true)
-                Text("Часы на воде").font(.subheadline.weight(.semibold))
-                Spacer(minLength: 6)
-                Text(totals.timeOnWater).font(.headline.monospacedDigit()).multilineTextAlignment(.trailing)
-            }
-            .lagoonCard()
-            .accessibilityElement(children: .combine)
         }.frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func compactStats(timeOnWater: String, unlocked: Int, total: Int) -> some View {
+        VStack(spacing: 0) {
+            summaryRow("Часы на воде", value: timeOnWater, icon: "water.waves")
+                .accessibilityElement(children: .combine)
+            Divider()
+            Button { showingAchievements = true } label: {
+                summaryRow("Ачивки", value: "\(unlocked) из \(total)", icon: "medal", opensDetails: true)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Ачивки")
+            .accessibilityValue("\(unlocked) из \(total)")
+        }
+        .padding(.horizontal, 12)
+        .background(RiderTheme.surface, in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    private func summaryRow(_ title: String, value: String, icon: String, opensDetails: Bool = false) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: icon).foregroundStyle(RiderTheme.accent)
+                .frame(width: 21).accessibilityHidden(true)
+            Text(title).fontWeight(.semibold)
+            Spacer(minLength: 6)
+            Text(value).monospacedDigit().multilineTextAlignment(.trailing)
+            if opensDetails {
+                Image(systemName: "chevron.right").font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary).accessibilityHidden(true)
+            }
+        }
+        .font(.subheadline)
+        .padding(.vertical, 7)
+        .frame(minHeight: 44)
+        .contentShape(Rectangle())
     }
 
     private func record(_ title: String, value: String, icon: String) -> some View {
@@ -573,7 +589,7 @@ private struct RiderCommunityView: View {
             if let message { Text(message).foregroundStyle(.secondary) }
         }
         .disabled(busy)
-        .navigationTitle("Райдеры")
+        .navigationTitle("Публичный профиль")
         .navigationBarTitleDisplayMode(.inline)
         .scrollContentBackground(.hidden).background(RiderTheme.canvas)
         .onAppear { if community == nil && RiderCommunity.endpoint != nil { perform("riders") } }
