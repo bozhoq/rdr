@@ -160,6 +160,17 @@ enum DetectorTests {
                 return sample(Double(index) / 100, load)
             }
         }
+        var lateralDetector = RidingJumpDetector()
+        let lateralFlight = shortRide(unloadingCount: 48, landingLoad: 2.4, startsWithPush: true)
+            .enumerated().compactMap { i, sample -> RidingJumpDetector.Flight? in
+                let rotated = MotionSample(elapsedSinceFirstSampleSeconds: sample.elapsedSinceFirstSampleSeconds,
+                    accelerationG: Vector3(x: (100..<118).contains(i) ? 1 : 0, y: 0, z: sample.accelerationG.z),
+                    gravityG: sample.gravityG, rotationRadiansPerSecond: sample.rotationRadiansPerSecond,
+                    attitude: sample.attitude, verticalAccelerationMetersPerSecondSquared: sample.verticalAccelerationMetersPerSecondSquared)
+                return lateralDetector.process(rotated, calibration: nil, moving: false)
+            }
+        check(lateralFlight.count == 1 && abs(lateralFlight[0].event.startSeconds - 1.0) < 0.001 &&
+              abs(lateralFlight[0].event.endSeconds - 1.48) < 0.001, "Recover the unloaded onset despite lateral pouch motion")
         var shortRideDetector = RidingJumpDetector()
         let briefJump = shortRide(unloadingCount: 30, landingLoad: 2.4, startsWithPush: true)
         check(briefJump.prefix(140).compactMap { shortRideDetector.process($0, calibration: nil, moving: false) }.isEmpty,
@@ -284,6 +295,7 @@ enum DetectorTests {
         let bodyPeak = VerticalTrajectory.flightPeak(bodyEvent, samples: bodySamples)
         check(abs((bodyPeak?.height ?? 0) - 0.4) < 0.04 && abs((bodyPeak?.time ?? 0) - 2) < 0.04,
               "Integrate from the takeoff level to the in-flight apex")
+        check(abs((bodyPeak?.pushRise ?? 0) - 0.4) < 0.04, "Separate pre-takeoff extension from airborne height")
         check(VerticalTrajectory.flightPeak(bodyEvent, samples: bodySamples.filter { !(1.8...1.9).contains($0.time) }) == nil,
               "A sensor gap invalidates an anchored trajectory")
         let bodyEstimate = LiveJumpEstimate.riding(.init(event: bodyEvent, trajectory: [], settledHeight: 0,

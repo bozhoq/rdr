@@ -131,6 +131,9 @@ import FoundationXML
         check(spot.name == "Тестовый спот" && spot.latitude == 55.75 && spot.longitude == 37.62, "Parse decimal commas in spot coordinates")
         check(RiderSpot(name: "Bad", latitude: "91", longitude: "37") == nil &&
               RiderSpot(name: "Bad", latitude: "nan", longitude: "37") == nil, "Invalid coordinates cannot create a spot")
+        let legacyWind = SessionWind(knots: 10, direction: 315, date: Date(), source: "test")
+        check(legacyWind.title.contains("м/с") && legacyWind.title.contains("СЗ") &&
+              abs(legacyWind.knots * SessionWind.metersPerSecondPerKnot - 5.14444) < 0.001, "Display historic wind in m/s, from NW")
         let grouped = StarterSpots.decode([["id": spot.id.uuidString, "name": "Каталог", "latitude": 55.75,
                                             "longitude": 37.62, "region": "Регион", "locality": "Берег", "areaOnly": true] as [String: Any]])
         check(StarterSpots.merge(saved: [spot], catalogue: grouped).first?.region == "Регион" &&
