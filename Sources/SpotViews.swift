@@ -10,32 +10,54 @@ struct SpotsView: View {
     @ObservedObject var recorder: SessionRecorder
     let goToRecording: () -> Void
     @State private var adding = false
+    @State private var pendingDelete: RiderSpot?
 
     var body: some View {
         List {
-            Section {
-                Button { adding = true } label: { Label("Добавить спот", systemImage: "plus") }
-            }.listRowBackground(RiderTheme.surface)
-            SpotGroups(spots: recorder.spots) { spot in
-                NavigationLink {
-                    SpotDetailView(recorder: recorder, original: spot, goToRecording: goToRecording)
-                } label: { Text(spot.name) }
+            NavigationLink {
+                BestSpotsToday(recorder: recorder, goToRecording: goToRecording)
+            } label: { Label("Лучший спот на сегодня", systemImage: "wind") }
+            Section("Избранные споты") {
+                let favorites = recorder.spots.filter { recorder.favoriteSpots.contains($0.id) }
+                if favorites.isEmpty { Text("Нажмите звезду в карточке спота").foregroundStyle(.secondary) }
+                ForEach(favorites) { spot in spotRow(spot) }
             }
+            SpotGroups(spots: recorder.spots, add: { adding = true }) { spot in spotRow(spot) }
         }
         .scrollContentBackground(.hidden)
         .background(RiderTheme.canvas.ignoresSafeArea())
         .navigationTitle("Спот")
         .sheet(isPresented: $adding) { SpotEditor(original: nil, save: recorder.saveSpot) }
+        .alert("Удалить личный спот?", isPresented: Binding(get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } }), presenting: pendingDelete) { spot in
+            Button("Удалить", role: .destructive) { recorder.deletePersonalSpot(spot) }
+            Button("Отмена", role: .cancel) {}
+        } message: { spot in Text(spot.name + ". Записанные сессии сохранятся.") }
+    }
+
+    private func spotRow(_ spot: RiderSpot) -> some View {
+        NavigationLink {
+            SpotDetailView(recorder: recorder, original: spot, goToRecording: goToRecording)
+        } label: { Text(spot.name) }
+        .swipeActions(allowsFullSwipe: false) {
+            if spot.region == nil {
+                Button("Удалить", role: .destructive) { pendingDelete = spot }
+            }
+            Button { recorder.toggleFavorite(spot) } label: {
+                Label(recorder.favoriteSpots.contains(spot.id) ? "Открепить" : "В избранное", systemImage: "star")
+            }.tint(RiderTheme.action)
+        }
     }
 }
 
 private struct SpotGroups<Row: View>: View {
     let spots: [RiderSpot]
+    var add: (() -> Void)? = nil
     @ViewBuilder let row: (RiderSpot) -> Row
 
     var body: some View {
         let mine = spots.filter { $0.region == nil }
         Section("Мои споты") {
+            if let add { Button(action: add) { Label("Добавить спот", systemImage: "plus") } }
             if mine.isEmpty { Text("Пока нет личных спотов").foregroundStyle(.secondary) }
             ForEach(mine) { row($0) }
         }
@@ -205,7 +227,14 @@ private struct SpotDetailView: View {
         .background(RiderTheme.canvas.ignoresSafeArea())
         .navigationTitle("Спот")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Изменить") { editing = true } } }
+        .toolbar {
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                Button { recorder.toggleFavorite(spot) } label: {
+                    Image(systemName: recorder.favoriteSpots.contains(spot.id) ? "star.fill" : "star")
+                }.accessibilityLabel(recorder.favoriteSpots.contains(spot.id) ? "Убрать из избранного" : "В избранное")
+                Button("Изменить") { editing = true }
+            }
+        }
         .sheet(isPresented: $editing) { SpotEditor(original: spot, save: recorder.saveSpot) }
         .alert("Маршрут не открылся", isPresented: $routeUnavailable) {
             Button("ОК", role: .cancel) {}
@@ -338,6 +367,139 @@ private struct SpotMonthChart: View {
     }
 }
 
+private struct BestSpotsToday: View {
+    @ObservedObject var recorder: SessionRecorder
+    let goToRecording: () -> Void
+    @State private var region = ""
+    @State private var revision = 0
+    @State private var loading = false
+    @State private var checked = 0
+    @State private var total = 0
+    @State private var results: [Ranked] = []
+    private var regions: [String] { Set(recorder.spots.compactMap(\.region)).sorted() }
+
+    private struct Ranked: Identifiable {
+        let spot: RiderSpot
+        let window: SpotForecast.Window
+        let zone: String
+        var id: UUID { spot.id }
+        var timeLabel: String {
+            let clock = DateFormatter()
+            clock.timeZone = TimeZone(identifier: zone)
+            clock.dateFormat = "HH:mm"
+            return clock.string(from: window.first.time) + "–" + clock.string(from: window.second.time.addingTimeInterval(3600))
+        }
+    }
+
+    var body: some View {
+        List {
+            Picker("Регион", selection: $region) {
+                Text("Выберите регион").tag("")
+                ForEach(regions, id: \.self) { Text($0).tag($0) }
+            }
+            if region.isEmpty {
+                if recorder.locating { ProgressView("Определяем регион") }
+                else { Button("Определить регион по GPS") { recorder.locateSpot() } }
+            } else if loading {
+                ProgressView("Сравниваем прогнозы")
+            } else {
+                ForEach(results) { item in
+                    NavigationLink {
+                        SpotDetailView(recorder: recorder, original: item.spot, goToRecording: goToRecording)
+                    } label: {
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text(item.spot.name).font(.headline)
+                            Text(item.timeLabel + (item.spot.areaOnly == true ? " · ориентир района" : "")).font(.subheadline)
+                            let hour = item.window.first
+                            Text(metric(hour.speed * SessionWind.metersPerSecondPerKnot, unit: "м/с") + " " + SpotForecast.compass(hour.direction) + " " + SpotForecast.windArrow(hour.direction))
+                            Text("Порывы до " + metric(max(hour.gust ?? 0, item.window.second.gust ?? 0) * SessionWind.metersPerSecondPerKnot, unit: "м/с") + " · " + metric(hour.temperature, unit: "°C", digits: 0)).font(.caption)
+                            Label(hour.condition.name, systemImage: hour.condition.icon).font(.caption)
+                        }
+                    }
+                }
+                if results.isEmpty {
+                    Text(checked == 0 ? "Прогнозы не загрузились." : "На сегодня подходящих двухчасовых окон не найдено.")
+                }
+                Text("Прогноз получен для \(checked) из \(total) спотов").font(.footnote)
+                Button("Обновить прогноз") { revision += 1 }
+            }
+            DisclosureGroup("Как выбираем") {
+                Text("Сравниваем оставшиеся светлые часы по местному времени. Выше места с ровным ветром около 9 м/с, меньшими порывами, более тёплым воздухом и без дождя. Для сравнения нужны два часа подряд. Гроза и сильные порывы исключают окно. Направление относительно берега и местные ограничения проверьте на месте.")
+            }
+            Link("Прогноз Open-Meteo", destination: URL(string: "https://open-meteo.com/")!)
+        }
+        .navigationTitle("Лучший спот на сегодня")
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear { if region.isEmpty && recorder.usableFix == nil { recorder.locateSpot() } }
+        .task(id: recorder.previewFix?.timestamp) {
+            guard region.isEmpty, let fix = recorder.usableFix else { return }
+            let mark = try? await CLGeocoder().reverseGeocodeLocation(fix, preferredLocale: Locale(identifier: "ru_RU")).first
+            guard !Task.isCancelled, region.isEmpty else { return }
+            let names = [mark?.administrativeArea, mark?.locality].compactMap { $0?.lowercased() }
+            if let match = regions.first(where: { r in names.contains { $0.contains(r.lowercased()) } }) {
+                region = match
+            } else if let nearby = nearbyRegion(fix, within: 80000) { region = nearby }
+        }
+        .task(id: "\(region)/\(revision)") { await compare() }
+    }
+
+    private func nearbyRegion(_ fix: CLLocation, within radius: Double) -> String? {
+        recorder.spots.compactMap { spot -> (String, Double)? in
+            guard let name = spot.region else { return nil }
+            let meters = fix.distance(from: CLLocation(latitude: spot.latitude, longitude: spot.longitude))
+            return meters <= radius ? (name, meters) : nil
+        }.min(by: { $0.1 < $1.1 })?.0
+    }
+
+    @MainActor private func compare() async {
+        results = []
+        checked = 0
+        total = 0
+        guard !region.isEmpty else { loading = false; return }
+        loading = true
+        let candidates = recorder.spots.filter { spot in
+            if let name = spot.region { return name == region }
+            return nearbyRegion(CLLocation(latitude: spot.latitude, longitude: spot.longitude), within: 30000) == region
+        }
+        let now = Date()
+        var fetched = 0
+        var ranks: [Ranked] = []
+        for offset in stride(from: 0, to: candidates.count, by: 4) {
+            guard !Task.isCancelled else { return }
+            await withTaskGroup(of: (RiderSpot, SpotForecast?).self) { group in
+                for spot in candidates[offset..<min(offset + 4, candidates.count)] {
+                    group.addTask { (spot, try? await SpotForecast.fetch(for: spot)) }
+                }
+                for await (spot, data) in group {
+                    guard let data else { continue }
+                    fetched += 1
+                    if let window = data.bestWindow(today: now) {
+                        ranks.append(Ranked(spot: spot, window: window, zone: data.timezone))
+                    }
+                }
+            }
+        }
+        guard !Task.isCancelled else { return }
+        let sorted = ranks.sorted {
+            if $0.window.score == $1.window.score { return $0.spot.name < $1.spot.name }
+            return $0.window.score > $1.window.score
+        }
+        results = Array(sorted.prefix(3))
+        checked = fetched
+        total = candidates.count
+        loading = false
+    }
+}
+
+private extension SpotForecast {
+    static func fetch(for spot: RiderSpot) async throws -> SpotForecast {
+        guard let url = requestURL(for: spot) else { throw URLError(.badURL) }
+        let (data, response) = try await URLSession.shared.data(for: URLRequest(url: url, timeoutInterval: 12))
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw URLError(.badServerResponse) }
+        return try JSONDecoder().decode(Self.self, from: data)
+    }
+}
+
 private struct SpotWeather: View {
     let spot: RiderSpot
     @State private var forecast: SpotForecast?
@@ -360,7 +522,8 @@ private struct SpotWeather: View {
                                     Text(clock.string(from: hour.time)).font(.caption.weight(.medium))
                                     Text(metric(hour.speed * SessionWind.metersPerSecondPerKnot, unit: "м/с")).font(.headline).foregroundStyle(RiderTheme.accent)
                                     Text("Порывы \(metric(hour.gust.map { $0 * SessionWind.metersPerSecondPerKnot }, unit: "м/с"))").font(.caption2)
-                                    Text(SpotForecast.compass(hour.direction) + " · " + metric(hour.temperature, unit: "°C", digits: 0))
+                                    Label(hour.condition.name, systemImage: hour.condition.icon).font(.caption2)
+                                    Text(SpotForecast.compass(hour.direction) + " " + SpotForecast.windArrow(hour.direction) + " · " + metric(hour.temperature, unit: "°C", digits: 0))
                                         .font(.caption2).foregroundStyle(.secondary)
                                 }.padding(9)
                                     .frame(minWidth: 86)
@@ -395,12 +558,8 @@ private struct SpotWeather: View {
     @MainActor private func load() async {
         forecast = nil
         failed = false
-        guard let url = SpotForecast.requestURL(for: spot) else { failed = true; return }
         do {
-            let request = URLRequest(url: url, timeoutInterval: 12)
-            let (data, response) = try await URLSession.shared.data(for: request)
-            guard let response = response as? HTTPURLResponse, response.statusCode == 200 else { throw URLError(.badServerResponse) }
-            let decoded = try JSONDecoder().decode(SpotForecast.self, from: data)
+            let decoded = try await SpotForecast.fetch(for: spot)
             try Task.checkCancellation()
             forecast = decoded
         } catch {

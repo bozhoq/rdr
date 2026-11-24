@@ -277,7 +277,36 @@ struct SpotForecast: Decodable {
         let gust: Double?
         let direction: Double?
         let temperature: Double?
+        var weatherCode: Int?
+        var daylight: Bool?
         var id: Date { time }
+
+        var condition: (name: String, icon: String) {
+            switch weatherCode {
+            case 0: return daylight == false ? ("Ясно", "moon.stars") : ("Солнечно", "sun.max")
+            case 1, 2: return ("Переменная облачность", daylight == false ? "cloud.moon" : "cloud.sun")
+            case 3: return ("Пасмурно", "cloud")
+            case 45, 48: return ("Туман", "cloud.fog")
+            case 51, 53, 55: return ("Морось", "cloud.drizzle")
+            case 56, 57, 66, 67: return ("Ледяные осадки", "cloud.sleet")
+            case 61, 63, 65: return ("Дождь", "cloud.rain")
+            case 80, 81, 82: return ("Ливень", "cloud.heavyrain")
+            case 71, 73, 75, 77, 85, 86: return ("Снег", "cloud.snow")
+            case 95, 96, 99: return ("Гроза", "cloud.bolt.rain")
+            default: return ("Нет данных", "questionmark.circle")
+            }
+        }
+
+        var rankingScore: Double? {
+            guard daylight == true, let code = weatherCode, [0,1,2,3,51,53,55,61,63,80].contains(code),
+                  let gust, let temperature, let direction, (0...360).contains(direction) else { return nil }
+            let wind = speed * SessionWind.metersPerSecondPerKnot
+            let peak = gust * SessionWind.metersPerSecondPerKnot
+            guard (5...15).contains(wind), peak <= 19, peak <= wind * 1.65 else { return nil }
+            return 100 - 4 * abs(wind - 9) - 4 * max(0, peak - wind)
+                - min(20, max(0, 17 - temperature)) - (code >= 51 ? 12 : 0)
+        }
+
     }
 
     private struct Hourly: Decodable {
@@ -286,6 +315,8 @@ struct SpotForecast: Decodable {
         let gust: [Double?]
         let direction: [Double?]
         let temperature: [Double?]?
+        let weatherCode: [Int?]?
+        let isDay: [Int?]?
 
         enum CodingKeys: String, CodingKey {
             case time
@@ -293,6 +324,8 @@ struct SpotForecast: Decodable {
             case gust = "wind_gusts_10m"
             case direction = "wind_direction_10m"
             case temperature = "temperature_2m"
+            case weatherCode = "weather_code"
+            case isDay = "is_day"
         }
     }
 
@@ -304,7 +337,7 @@ struct SpotForecast: Decodable {
         url.queryItems = [
             URLQueryItem(name: "latitude", value: String(spot.latitude)),
             URLQueryItem(name: "longitude", value: String(spot.longitude)),
-            URLQueryItem(name: "hourly", value: "wind_speed_10m,wind_gusts_10m,wind_direction_10m,temperature_2m"),
+            URLQueryItem(name: "hourly", value: "wind_speed_10m,wind_gusts_10m,wind_direction_10m,temperature_2m,weather_code,is_day"),
             URLQueryItem(name: "wind_speed_unit", value: "kn"),
             URLQueryItem(name: "forecast_hours", value: "25"),
             URLQueryItem(name: "timezone", value: "auto"),
@@ -325,8 +358,35 @@ struct SpotForecast: Decodable {
             let temperatures = hourly.temperature ?? []
             let temperature = temperatures.indices.contains(index) ? temperatures[index] : nil
             return Hour(time: time, speed: speed, gust: value(hourly.gust, at: index),
-                        direction: value(hourly.direction, at: index), temperature: temperature)
+                        direction: value(hourly.direction, at: index), temperature: temperature,
+                        weatherCode: hourly.weatherCode.flatMap { $0.indices.contains(index) ? $0[index] : nil },
+                        daylight: hourly.isDay.flatMap { $0.indices.contains(index) ? $0[index] : nil }.map { $0 == 1 })
         }.sorted { $0.time < $1.time }
+    }
+
+    static func windArrow(_ direction: Double?) -> String {
+        guard let direction, direction.isFinite, (0...360).contains(direction) else { return "—" }
+        return ["↓","↙","←","↖","↑","↗","→","↘"][Int((direction / 45).rounded()) % 8]
+    }
+
+    struct Window {
+        let first: Hour
+        let second: Hour
+        let score: Double
+    }
+
+    func bestWindow(today now: Date) -> Window? {
+        guard let zone = TimeZone(identifier: timezone) else { return nil }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = zone
+        let hours = hours(near: now).filter { calendar.isDate($0.time, inSameDayAs: now) }
+        var best: Window?
+        for (a, b) in zip(hours, hours.dropFirst()) {
+            guard b.time.timeIntervalSince(a.time) == 3600, let aScore = a.rankingScore, let bScore = b.rankingScore else { continue }
+            let score = (aScore + bScore) / 2
+            if score > (best?.score ?? -.infinity) { best = Window(first: a, second: b, score: score) }
+        }
+        return best
     }
 
     static func compass(_ direction: Double?) -> String {
@@ -495,6 +555,8 @@ struct LiveJumpEstimate: Codable {
     var assumesLevelLanding: Bool?
     var apexSeconds: Double?
     var pushRiseMeters: Double?
+    var floorPeakMeters: Double?
+    var floorReferenceMeters: Double?
 
     static func phoneToss(_ event: JumpCandidate) -> Self? {
         guard event.minimumLoadG.isFinite, (0...0.2).contains(event.minimumLoadG),
@@ -691,7 +753,40 @@ struct VerticalTrajectory {
         return nil
     }
 
-    static func flightPeak(_ event: JumpCandidate, samples: [Sample]) -> Peak? {
+    struct FloorReference {
+        let time: Double
+        let meters: Double
+    }
+
+    static func floorPeak(_ event: JumpCandidate, from reference: FloorReference, samples: [Sample]) -> Double? {
+        let start = event.startSeconds, end = event.endSeconds
+        guard (0...3).contains(reference.meters), reference.time <= start, start < end,
+              end - reference.time <= 8,
+              let right = anchor(samples.filter { $0.time > end && $0.time <= end + 2 }, nearTakeoff: false) else { return nil }
+        let track = samples.filter { $0.time >= reference.time && $0.time <= right }
+        guard track.first?.time == reference.time, track.last?.time == right else { return nil }
+        var path = Self()
+        var air: [(Double, Double)] = []
+        for (a,b) in zip(track, track.dropFirst()) {
+            let dt = b.time - a.time
+            guard dt > 0, dt <= 0.05, a.acceleration.isFinite, b.acceleration.isFinite else { return nil }
+            path.advance(acceleration: (a.acceleration + b.acceleration) / 2, interval: dt)
+            if (start...end).contains(b.time) { air.append((b.time, path.height)) }
+        }
+        let duration = right - reference.time
+        guard abs(path.velocity) <= 0.45, abs(path.velocity * duration / 2) <= 0.40,
+              air.first?.0 == start, air.last?.0 == end else { return nil }
+        let levels = air.map { (t,h) in
+            reference.meters + h - path.velocity * pow(t - reference.time, 2) / (2 * duration)
+        }
+        guard let i = levels.indices.max(by: { levels[$0] < levels[$1] }),
+              (0.08...0.92).contains((air[i].0 - start) / (end - start)),
+              levels[i] > (levels.first ?? 0) + 0.04, levels[i] > (levels.last ?? 0) + 0.04,
+              (0.06...35).contains(levels[i]) else { return nil }
+        return levels[i]
+    }
+
+    static func flightPeak(_ event: JumpCandidate, samples: [Sample], levelLandingCheck: Double? = nil) -> Peak? {
         let start = event.startSeconds, end = event.endSeconds
         guard start < end, end - start <= 15.5 else { return nil }
         let nearby = samples.filter { $0.time >= start - 2.5 && $0.time <= end + 2 }
@@ -710,7 +805,7 @@ struct VerticalTrajectory {
             if (start...end).contains(b.time) { positions.append((b.time, path)) }
         }
         // Both anchors approximate zero vertical speed. Their heights can differ.
-        guard abs(path.velocity) <= 0.45, let takeoff = positions.first, let landing = positions.last,
+        guard abs(path.velocity) <= 0.60, let takeoff = positions.first, let landing = positions.last,
               abs(takeoff.time - start) < 0.001, abs(landing.time - end) < 0.001 else { return nil }
         func level(_ point: (time: Double, path: Self)) -> Double {
             point.path.correctedHeight(elapsed: point.time - left, duration: duration,
@@ -721,6 +816,13 @@ struct VerticalTrajectory {
         let fraction = (apex.time - start) / (end - start)
         guard (0.06...35).contains(height), (0.08...0.92).contains(fraction),
               level(apex) - level(landing) >= 0.04 else { return nil }
+        if abs(path.velocity) > 0.45 {
+            // Compare the more uncertain anchored solution with an independently constrained
+            // short-flight trajectory. Bound the apex error from the endpoint speed mismatch.
+            guard let check = levelLandingCheck, check.isFinite,
+                  abs(path.velocity) * (apex.time - start) <= 0.16,
+                  abs(check - height) <= 0.12 else { return nil }
+        }
         let baseline = preparation.filter { start - $0.time <= 1.2 }.map(level).min()
         return Peak(height: height, time: apex.time, pushRise: baseline.map { max(0, level(takeoff) - $0) })
     }

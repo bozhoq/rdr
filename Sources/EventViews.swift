@@ -218,6 +218,10 @@ struct EventDetailView: View {
 
     private func diagnostics(_ candidate: JumpCandidate) -> some View {
         VStack(alignment: .leading, spacing: 12) {
+            if let estimate = session.liveEstimate(for: candidate), let reference = estimate.floorReferenceMeters {
+                LabeledContent("Начальная отметка", value: metric(reference, unit: "м", digits: 2))
+                LabeledContent("Пик телефона над полом", value: metric(estimate.floorPeakMeters, unit: "м", digits: 2))
+            }
             if let estimate = session.liveEstimate(for: candidate), let push = estimate.pushRiseMeters, let flight = estimate.heightMeters {
                 LabeledContent("Подъём телефона до отрыва", value: metric(push, unit: "м", digits: 2))
                 LabeledContent("От отрыва до вершины", value: metric(flight, unit: "м", digits: 2))

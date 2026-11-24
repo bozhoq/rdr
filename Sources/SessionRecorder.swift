@@ -8,6 +8,7 @@ import UIKit
 final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelegate {
     @Published private(set) var live: SessionSummary?
     @Published private(set) var history: [SessionSummary] = []
+    @Published private(set) var favoriteSpots = Set((UserDefaults.standard.stringArray(forKey: "rider.favoriteSpots") ?? []).compactMap(UUID.init(uuidString:)))
     @Published private(set) var spots: [RiderSpot] = []
     @Published private(set) var authorization: CLAuthorizationStatus = .notDetermined
     @Published private(set) var motionIsRecent = false
@@ -49,6 +50,28 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
     private var lastLocationTimestamp: Date?
     private var routeFilter = RouteFilter()
     private var ridingDetector = RidingJumpDetector()
+    private var floorReference: VerticalTrajectory.FloorReference?
+    @Published private(set) var floorMessage: String?
+
+    func markFloor(height: Double?) -> Bool {
+        guard let height, (0...3).contains(height), let last = verticalSamples.last, let origin = motionTimeOrigin,
+              abs(ProcessInfo.processInfo.systemUptime - origin - last.time) <= 0.12 else {
+            floorMessage = "Нужна отметка от 0 до 3 м и работающий датчик движения."
+            return false
+        }
+        let quiet = verticalSamples.suffix(50)
+        guard let first = quiet.first, last.time - first.time >= 0.35, last.time - first.time <= 0.8,
+              quiet.allSatisfy({ abs($0.acceleration) < 0.8 }),
+              zip(quiet, quiet.dropFirst()).allSatisfy({ pair in pair.1.time - pair.0.time <= 0.05 && pair.1.time > pair.0.time }) else {
+            floorMessage = "Удерживайте телефон неподвижно на выбранной высоте и повторите."
+            return false
+        }
+        floorReference = .init(time: last.time, meters: height)
+        floorMessage = "Отметка принята. Выполните один прыжок в течение 8 с."
+        recordEvent("floorReference", detail: String(height))
+        return true
+    }
+
     private var verticalSamples: [VerticalTrajectory.Sample] = []
     private var lastMarkerAt: ContinuousClock.Instant?
     private var calibrationStartedAt: ContinuousClock.Instant?
@@ -157,6 +180,25 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
             reuseSetup(setup)
         }
         return true
+    }
+
+    func toggleFavorite(_ spot: RiderSpot) {
+        if !favoriteSpots.insert(spot.id).inserted { favoriteSpots.remove(spot.id) }
+        UserDefaults.standard.set(favoriteSpots.map(\.uuidString), forKey: "rider.favoriteSpots")
+    }
+
+    func deletePersonalSpot(_ spot: RiderSpot) {
+        guard spots.contains(where: { $0.id == spot.id && $0.region == nil }) else { return }
+        let kept = spots.filter { $0.id != spot.id }
+        guard let data = try? JSONEncoder().encode(kept) else { return }
+        UserDefaults.standard.set(data, forKey: "rider.spots")
+        spots = kept
+        if favoriteSpots.contains(spot.id) { toggleFavorite(spot) }
+        if automaticSpotOverride == spot.name { automaticSpotOverride = nil }
+        if draftSetup.spotID == spot.id {
+            draftSetup.setSpotName("")
+            if let data = try? JSONEncoder().encode(draftSetup) { UserDefaults.standard.set(data, forKey: "rider.sessionSetup") }
+        }
     }
 
     func chooseSpot(_ spot: RiderSpot) {
@@ -327,6 +369,8 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
         routeFilter = RouteFilter()
         if let data = try? JSONEncoder().encode(draftSetup.cleaned) { UserDefaults.standard.set(data, forKey: "rider.sessionSetup") }
         ridingDetector = RidingJumpDetector()
+        floorReference = nil
+        floorMessage = nil
         verticalSamples.removeAll(keepingCapacity: true)
         lastMarkerAt = nil
         motionIsRecent = false
@@ -491,7 +535,7 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
 
     func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
         authorization = manager.authorizationStatus
-        if locationAuthorized && automaticConditions && summary == nil { locateSpot() }
+        if locationAuthorized && (automaticConditions || attemptedLocation) && summary == nil { locateSpot() }
         if summary?.gpsEnabledAtStart == true && !locationAuthorized {
             manager.stopUpdatingLocation()
             manager.allowsBackgroundLocationUpdates = false
@@ -711,9 +755,16 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
         while let flight = pendingRides.first,
               finishing || elapsed >= flight.event.endSeconds + (pressureAvailable ? 3.0 : 2.0) {
             pendingRides.removeFirst()
-            let peak = VerticalTrajectory.flightPeak(flight.event, samples: verticalSamples)
-            let estimate = LiveJumpEstimate.riding(flight, altitude: recentAltitude, gps: recentFixes,
+            let peak = VerticalTrajectory.flightPeak(flight.event, samples: verticalSamples,
+                                                   levelLandingCheck: flight.levelLandingHeight)
+            var estimate = LiveJumpEstimate.riding(flight, altitude: recentAltitude, gps: recentFixes,
                                                    motionClock: motionClock, motionPeak: peak)
+            if let ref = floorReference, flight.event.startSeconds >= ref.time {
+                estimate.floorReferenceMeters = ref.meters
+                estimate.floorPeakMeters = VerticalTrajectory.floorPeak(flight.event, from: ref, samples: verticalSamples)
+                floorMessage = estimate.floorPeakMeters == nil ? "Над полом — нет надёжной оценки. Для следующей попытки задайте отметку." : "Замер сохранён. Для следующей попытки задайте отметку."
+                floorReference = nil
+            }
             if estimate.heightMeters == nil {
                 try log.append("event", SessionEvent(name: "jumpHeightUnavailable", batteryPercent: batteryPercent,
                                                      detail: "pressureOrTrajectoryInsufficient"))
@@ -727,9 +778,11 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
         let key = SessionReview.key(for: event, version: session.jumpAnalysis?.detectorVersion ?? JumpDetector.version)
         try log.append("liveJumpEstimate", JumpEstimateEntry(startSeconds: event.startSeconds, endSeconds: event.endSeconds, estimate: estimate))
         session.liveJumpEstimates?[key] = estimate
-        let phrase = estimate.heightMeters.flatMap(LiveJumpEstimate.spokenHeight)
+        let jumpPhrase = estimate.heightMeters.flatMap(LiveJumpEstimate.spokenHeight)
             .map { estimate.assumesLevelLanding == true || estimate.inertialLift == true ? "Примерно \($0)" : $0 }
             ?? (session.recordingMode == .battle ? "Прыжок" : nil)
+        let phrase = estimate.floorReferenceMeters == nil ? jumpPhrase : (estimate.floorPeakMeters.flatMap(LiveJumpEstimate.spokenHeight)
+            .map { "Над полом примерно " + $0 } ?? "Высота над полом неизвестна")
         if speak, voiceEnabled, let phrase {
             let utterance = AVSpeechUtterance(string: phrase)
             utterance.voice = AVSpeechSynthesisVoice(language: "ru-RU")
