@@ -11,7 +11,9 @@ private struct RiderPublication: Codable {
     let bio: String?
     let totals: RiderTotals
     let avatar: Data?
-    let records: [RiderJumpScore]?
+    var publicProfile: Bool? = nil
+    var statsPublic: Bool? = nil
+    var secrets: [RiderMission]? = nil
 }
 
 fileprivate struct RemoteRider: Decodable, Identifiable {
@@ -20,6 +22,14 @@ fileprivate struct RemoteRider: Decodable, Identifiable {
     let followers: Int
     let following: Bool
     let followingCount: Int?
+}
+
+private struct RiderPublicPage: Decodable {
+    let rider: RemoteRider
+    let posts: [RiderFeedEntry]
+    let points: Int?
+    let distance: Double?
+    let mine: Bool
 }
 
 fileprivate struct CommunityState: Decodable {
@@ -32,12 +42,14 @@ struct RiderStatisticsUpdate: Encodable, Equatable {
     let rides: [RiderSeasonProgress.Ride]
     let totals: RiderTotals
     let records: [RiderJumpScore]
+    let secrets: [String]
 
     init(_ history: [SessionSummary], at now: Date) {
         let progress = RiderSeasonProgress(history, at: now)
         year = progress.year
         rides = progress.rides
         totals = RiderTotals(history)
+        secrets = RiderMission.earned(in: history).map(\.rawValue).sorted()
         records = RiderJumpScore.records(in: history).sorted { $0.id.uuidString < $1.id.uuidString }
     }
 }
@@ -126,6 +138,7 @@ enum RiderCommunity {
     struct SeasonCredit: Decodable, Equatable {
         let year: Int
         let followers: Int
+        let statsPublic: Bool?
     }
 
     private struct StatisticsRequest: Encodable {
@@ -326,6 +339,9 @@ struct RiderProfileView: View {
     @State private var showingAchievements = false
     @State private var composing = false
     @State private var mine: RemoteRider?
+    @State private var loadingProfile = true
+    @State private var savingProfile = false
+    @State private var profileError: String?
     @State private var showingRanks = false
     @State private var lanServerStatus: String?
     @State private var checkingLANServer = false
@@ -346,6 +362,7 @@ struct RiderProfileView: View {
         return ScrollView {
             VStack(spacing: 18) {
                 profile
+                if RiderCommunity.endpoint != nil { privacyControls }
                 if RiderCommunity.usesLANTrust { lanServerCheck }
                 TimelineView(.everyMinute) { context in
                     Button { showingRanks = true } label: {
@@ -430,11 +447,10 @@ struct RiderProfileView: View {
                     }
             }
         }
-        .task {
-            guard RiderCommunity.endpoint != nil else { return }
-            if let state = try? await RiderCommunity.request("riders"), !Task.isCancelled { mine = state.mine }
-        }
-        .sheet(isPresented: $editing) { profileEditor(totals) }
+        .task { await loadProfile() }
+        .refreshable { await loadProfile() }
+        .onChange(of: social.follows) { _, _ in Task { await loadProfile() } }
+        .sheet(isPresented: $editing) { profileEditor }
         .task(id: picked) {
             guard let picked else { return }
             guard let data = try? await picked.loadTransferable(type: Data.self),
@@ -445,6 +461,10 @@ struct RiderProfileView: View {
                   ] as CFDictionary), let jpg = UIImage(cgImage: thumb).jpegData(compressionQuality: 0.65),
                   jpg.count <= 96_000, !Task.isCancelled else { return }
             photo = jpg
+            if let mine, !savingProfile {
+                await saveProfile(publicProfile: mine.profile.publicProfile ?? true,
+                                  statsPublic: mine.profile.statsPublic ?? true)
+            }
         }
     }
 
@@ -465,7 +485,7 @@ struct RiderProfileView: View {
         .lagoonCard()
     }
 
-    private func profileEditor(_ totals: RiderTotals) -> some View {
+    private var profileEditor: some View {
         NavigationStack {
             Form {
                 TextField("Имя", text: $name)
@@ -480,15 +500,8 @@ struct RiderProfileView: View {
                 TextField("О себе", text: $bio, axis: .vertical)
                     .lineLimit(3...5)
                     .onChange(of: bio) { _, value in if value.count > 160 { bio = String(value.prefix(160)) } }
-                if RiderCommunity.endpoint != nil {
-                    NavigationLink("Публичный профиль") {
-                        RiderCommunityView(totals: totals, records: RiderJumpScore.records(in: recorder.history),
-                                           didLoad: { state in
-                                               mine = state.mine
-                                               if state.mine == nil { social.seasonCredit = nil }
-                                               social.statisticsRefresh += 1
-                                           })
-                    }
+                if let profileError {
+                    Text(profileError).foregroundStyle(.secondary)
                 }
             }
             .navigationTitle("Профиль")
@@ -496,9 +509,18 @@ struct RiderProfileView: View {
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Готово") {
-                        username = cleanedUsername
-                        editing = false
-                    }.disabled(!usernameValid)
+                        if let mine {
+                            Task {
+                                let saved = await saveProfile(publicProfile: mine.profile.publicProfile ?? true,
+                                                              statsPublic: mine.profile.statsPublic ?? true,
+                                                              handle: cleanedUsername)
+                                if saved { editing = false }
+                            }
+                        } else {
+                            username = cleanedUsername
+                            editing = false
+                        }
+                    }.disabled(!usernameValid || savingProfile)
                 }
             }
         }
@@ -513,6 +535,7 @@ struct RiderProfileView: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Выбрать фото райдера")
+                .disabled(savingProfile)
                 VStack(alignment: .leading, spacing: 4) {
                     let title = name.trimmingCharacters(in: .whitespacesAndNewlines)
                     Text(title.isEmpty ? "Райдер" : title).font(.title2.bold())
@@ -523,6 +546,7 @@ struct RiderProfileView: View {
                 Spacer(minLength: 0)
                 Button {
                     draftUsername = username
+                    profileError = nil
                     editing = true
                 } label: {
                     Image(systemName: "pencil").font(.headline).padding(10)
@@ -548,8 +572,100 @@ struct RiderProfileView: View {
     }
 
     @ViewBuilder private var followCounts: some View {
-        Text("Подписчики: \(mine?.followers ?? 0)")
-        Text("Подписан: \(mine?.followingCount ?? 0)")
+        if RiderCommunity.endpoint != nil {
+            RiderFollowCount(id: "me", kind: .followers, count: mine?.followers ?? 0)
+            RiderFollowCount(id: "me", kind: .following, count: mine?.followingCount ?? 0)
+        } else {
+            Text("Подписчики · 0")
+            Text("Подписан · 0")
+        }
+    }
+
+    private var privacyControls: some View {
+        let visible = mine.map { $0.profile.publicProfile ?? true } ?? false
+        let statsVisible = mine.map { $0.profile.statsPublic ?? true } ?? false
+        return VStack(alignment: .leading, spacing: 12) {
+            Toggle("Публичный профиль", isOn: Binding(get: { visible }, set: { updateVisibility(profile: $0) }))
+            Divider()
+            Toggle("Публичная статистика", isOn: Binding(get: { statsVisible }, set: { updateVisibility(stats: $0) }))
+            if statsVisible && !visible {
+                Text("Статистика появится, когда откроешь профиль.").font(.footnote).foregroundStyle(.secondary)
+            }
+            if loadingProfile || savingProfile { ProgressView().controlSize(.small) }
+            if let profileError {
+                Text(profileError).font(.footnote).foregroundStyle(.secondary)
+                if loadingProfile { Button("Повторить") { Task { await loadProfile() } } }
+            }
+        }
+        .tint(Color.green)
+        .disabled(savingProfile)
+        .lagoonCard()
+    }
+
+    @MainActor private func loadProfile() async {
+        guard RiderCommunity.endpoint != nil, !savingProfile else { return }
+        do {
+            let account = try await RiderCommunity.request("me").mine
+            guard !Task.isCancelled, !savingProfile else { return }
+            mine = account
+            if let handle = account?.profile.username { username = handle }
+            profileError = nil
+            loadingProfile = false
+        } catch {
+            if !Task.isCancelled { profileError = "Не удалось загрузить профиль. Проверь подключение к Rider." }
+        }
+    }
+
+    private func updateVisibility(profile: Bool? = nil, stats: Bool? = nil) {
+        guard !savingProfile else { return }
+        Task {
+            if loadingProfile {
+                await loadProfile()
+                guard !loadingProfile else { return }
+            }
+            guard mine != nil else {
+                await saveProfile(publicProfile: profile ?? false, statsPublic: stats ?? false)
+                return
+            }
+            savingProfile = true
+            profileError = nil
+            defer { savingProfile = false }
+            let flags = ["publicProfile": profile, "statsPublic": stats].compactMapValues { $0 }
+            do {
+                let result: CommunityState = try await RiderCommunity.decode(
+                    "me", method: "PATCH", body: JSONEncoder().encode(flags))
+                mine = result.mine
+                social.statisticsRefresh += 1
+                await social.refreshReposts()
+            } catch {
+                profileError = "Не удалось изменить видимость. Проверь подключение к Rider."
+            }
+        }
+    }
+
+    @discardableResult
+    @MainActor private func saveProfile(publicProfile: Bool, statsPublic: Bool, handle: String? = nil) async -> Bool {
+        guard !savingProfile else { return false }
+        savingProfile = true
+        profileError = nil
+        defer { savingProfile = false }
+        let title = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let tag = handle ?? username
+        let payload = RiderPublication(name: title.isEmpty ? "Райдер" : title, username: tag.isEmpty ? nil : tag,
+                                       bio: bio, totals: RiderTotals([]), avatar: photo.isEmpty ? nil : photo,
+                                       publicProfile: publicProfile, statsPublic: statsPublic)
+        do {
+            let result = try await RiderCommunity.request("me", method: "PUT", payload: payload)
+            mine = result.mine
+            username = result.mine?.profile.username ?? tag
+            social.statisticsRefresh += 1
+            return true
+        } catch RiderCommunity.Rejection.conflict {
+            profileError = "Этот юзернейм уже занят. Выбери другой."
+        } catch {
+            profileError = "Не удалось сохранить профиль. Проверь подключение к Rider."
+        }
+        return false
     }
 
     private struct ProfilePublication: Identifiable {
@@ -823,103 +939,206 @@ struct RiderAvatar: View {
     }
 }
 
-private struct RiderCommunityView: View {
-    @EnvironmentObject private var social: RiderSocialStore
-    let totals: RiderTotals
-    let records: [RiderJumpScore]
-    let didLoad: (CommunityState) -> Void
-    @AppStorage("rider.profileName") private var name = "Райдер"
-    @AppStorage("rider.username") private var username = ""
-    @AppStorage("rider.profileBio") private var bio = ""
-    @AppStorage("rider.profilePhoto") private var photo = Data()
-    @State private var community: CommunityState?
-    @State private var busy = false
-    @State private var message: String?
+private enum RiderFollowKind: String {
+    case followers, following
+
+    var title: String { self == .followers ? "Подписчики" : "Подписки" }
+    var label: String { self == .followers ? "Подписчики" : "Подписан" }
+}
+
+private struct RiderFollowCount: View {
+    let id: String
+    let kind: RiderFollowKind
+    let count: Int
+
+    var body: some View {
+        NavigationLink {
+            RiderFollowList(id: id, kind: kind)
+        } label: {
+            Text("\(kind.label) · \(count)").frame(minHeight: 36)
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct RiderFollowList: View {
+    let id: String
+    let kind: RiderFollowKind
+    @State private var people: [RiderPerson]?
+    @State private var failed = false
+    @State private var search = ""
 
     var body: some View {
         List {
-            if RiderCommunity.endpoint == nil {
-                ContentUnavailableView("Сообщество пока недоступно", systemImage: "person.2",
-                                       description: Text("Публичные профили и подписки появятся после подключения сервера Rider."))
+            if let people {
+                if people.isEmpty {
+                    ContentUnavailableView(kind == .followers ? "Пока нет подписчиков" : "Пока нет подписок",
+                                           systemImage: "person.2")
+                }
+                ForEach(people.filter { search.isEmpty || $0.name.localizedCaseInsensitiveContains(search)
+                    || $0.handle.localizedCaseInsensitiveContains(search) }) { person in
+                    NavigationLink {
+                        RiderPublicProfileView(id: person.id)
+                    } label: {
+                        RiderPostHeader(author: person.name, username: person.username, avatar: person.avatar)
+                            .padding(.vertical, 4)
+                    }
+                }
+            } else if failed {
+                Button("Повторить загрузку") { Task { await load() } }
             } else {
-                Section {
-                    if let community {
-                        if let me = community.mine {
-                            LabeledContent("Подписчики", value: String(me.followers))
-                            LabeledContent("Подписан", value: String(me.followingCount ?? 0))
-                        }
-                        Button(community.mine == nil ? "Опубликовать профиль" : "Обновить профиль") {
-                            let title = name.trimmingCharacters(in: .whitespacesAndNewlines)
-                            let description = bio.trimmingCharacters(in: .whitespacesAndNewlines)
-                            perform("me", method: "PUT", payload: RiderPublication(
-                                name: title.isEmpty ? "Райдер" : String(title.prefix(50)),
-                                username: username.isEmpty ? nil : username,
-                                bio: description.isEmpty ? nil : String(description.prefix(160)),
-                                totals: totals, avatar: photo.isEmpty ? nil : photo, records: records
-                            ))
-                        }
-                        if community.mine != nil {
-                            Button("Сделать профиль закрытым") { perform("me", method: "DELETE") }
-                        }
-                    }
-                } header: {
-                    Text("Мой публичный профиль")
-                } footer: {
-                    Text("Публикуются имя, юзернейм, фото и описание. Сессии обновляют общие рекорды и годовой рейтинг. В рейтинг ранга передаются время начала, длительность и число засчитанных прыжков.")
-                }
-                Section("Другие райдеры") {
-                    if community?.riders.isEmpty == true {
-                        Text("Пока никто не опубликовал профиль").foregroundStyle(.secondary)
-                    }
-                    ForEach(community?.riders ?? []) { rider in
-                        DisclosureGroup {
-                            if let bio = rider.profile.bio, !bio.isEmpty { Text(bio) }
-                            LabeledContent("Топ прыжок", value: metric(rider.profile.totals.height, unit: "м"))
-                            LabeledContent("Топ завис", value: metric(rider.profile.totals.airtime, unit: "с"))
-                            LabeledContent("Часы на воде", value: rider.profile.totals.timeOnWater)
-                            LabeledContent("Подписчики", value: String(rider.followers))
-                            Button(rider.following ? "Отписаться" : "Подписаться") {
-                                perform("follow/" + rider.id, method: rider.following ? "DELETE" : "PUT")
-                            }
-                        } label: {
-                            HStack(spacing: 9) {
-                                RiderAvatar(photo: rider.profile.avatar ?? Data(), size: 34)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(rider.profile.name).font(.headline)
-                                    if let tag = rider.profile.username { Text("@" + tag).font(.caption).foregroundStyle(.secondary) }
-                                }
-                            }
-                        }
-                    }
-                }
-                Button("Обновить список райдеров") { perform("riders") }
+                ProgressView()
             }
-            if busy { ProgressView("Загружаем") }
-            if let message { Text(message).foregroundStyle(.secondary) }
         }
-        .disabled(busy)
-        .navigationTitle("Публичный профиль")
+        .navigationTitle(kind.title)
         .navigationBarTitleDisplayMode(.inline)
-        .scrollContentBackground(.hidden).background(RiderTheme.canvas)
-        .onAppear { if community == nil && RiderCommunity.endpoint != nil { perform("riders") } }
+        .searchable(text: $search, prompt: "Имя или @юзернейм")
+        .scrollContentBackground(.hidden)
+        .background(RiderTheme.canvas)
+        .task { await load() }
+        .refreshable { await load() }
     }
 
-    private func perform(_ path: String, method: String = "GET", payload: RiderPublication? = nil) {
-        guard !busy else { return }
-        busy = true
-        Task {
-            defer { busy = false }
-            do {
-                let result = try await RiderCommunity.request(path, method: method, payload: payload)
-                community = result
-                didLoad(result)
-                if path == "me", method == "DELETE" { social.makePostsPrivate() }
-                message = nil
-            } catch RiderCommunity.Rejection.conflict {
-                message = "Этот юзернейм уже занят. Выбери другой в профиле."
-            } catch {
-                message = "Нет подтверждения от сервера. Проверьте связь и обновите данные."
+    @MainActor private func load() async {
+        do {
+            let result: [RiderPerson] = try await RiderCommunity.decode("riders/\(id)/\(kind.rawValue)")
+            if !Task.isCancelled { people = result; failed = false }
+        } catch {
+            if !Task.isCancelled { people = nil; failed = true }
+        }
+    }
+}
+
+struct RiderPublicProfileView: View {
+    @EnvironmentObject private var social: RiderSocialStore
+    let id: String
+    @State private var page: RiderPublicPage?
+    @State private var unavailable = false
+    @State private var busy = false
+    @State private var actionError = false
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                if let page {
+                    profile(page.rider, isMine: page.mine)
+                    if let points = page.points { statistics(page, points: points) }
+                    publications(page.posts)
+                } else if unavailable {
+                    ContentUnavailableView("Профиль недоступен", systemImage: "person.crop.circle",
+                                           description: Text("Профиль закрыт или связь с сервером потеряна."))
+                    Button("Повторить загрузку") { Task { await load() } }
+                        .frame(maxWidth: .infinity)
+                } else {
+                    ProgressView().frame(maxWidth: .infinity)
+                }
+            }.padding(16)
+        }
+        .background(RiderTheme.canvas.ignoresSafeArea())
+        .toolbar(.visible, for: .navigationBar)
+        .navigationTitle(page?.rider.profile.username.map { "@" + $0 } ?? "Райдер")
+        .navigationBarTitleDisplayMode(.inline)
+        .task(id: id) { await load() }
+        .refreshable { await load() }
+    }
+
+    private func profile(_ rider: RemoteRider, isMine: Bool) -> some View {
+        let user = rider.profile
+        let following = social.follows[rider.id] ?? rider.following
+        return VStack(alignment: .leading, spacing: 12) {
+            RiderPostHeader(author: user.name, username: user.username, avatar: user.avatar)
+            if let bio = user.bio { Text(bio).font(.subheadline) }
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 14) { followCounts(rider) }
+                VStack(alignment: .leading, spacing: 0) { followCounts(rider) }
+            }.font(.subheadline.weight(.medium))
+            if !isMine {
+                HStack {
+                    Button(following ? "Отписаться" : "Подписаться") {
+                        busy = true
+                        actionError = false
+                        Task {
+                            defer { busy = false }
+                            do {
+                                try await RiderCommunity.follow(rider.id, enabled: !following)
+                                social.follows[rider.id] = !following
+                                await load()
+                            } catch { actionError = true }
+                        }
+                    }
+                    .buttonStyle(.borderedProminent).disabled(busy)
+                    NavigationLink {
+                        RiderThreadView(peer: RiderPerson(id: rider.id, name: user.name, username: user.username,
+                                                         avatar: user.avatar))
+                    } label: {
+                        Label("Написать", systemImage: "paperplane")
+                    }.buttonStyle(.bordered)
+                }
+                if actionError { Text("Не удалось изменить подписку.").font(.footnote).foregroundStyle(.secondary) }
             }
+        }.lagoonCard()
+    }
+
+    @ViewBuilder private func followCounts(_ rider: RemoteRider) -> some View {
+        RiderFollowCount(id: rider.id, kind: .followers, count: rider.followers)
+        RiderFollowCount(id: rider.id, kind: .following, count: rider.followingCount ?? 0)
+    }
+
+    private func statistics(_ page: RiderPublicPage, points: Int) -> some View {
+        let totals = page.rider.profile.totals
+        let awards = RiderAchievement.milestones(totals, followers: page.rider.followers).filter(\.unlocked)
+        let secrets = page.rider.profile.secrets ?? []
+        return VStack(alignment: .leading, spacing: 11) {
+            HStack {
+                RiderRankBadge(rank: .forPoints(points), size: 31)
+                Text("\(points.formatted()) ПТС").font(.headline)
+                Spacer()
+                Text("Ранг сезона").font(.caption).foregroundStyle(.secondary)
+            }
+            Divider()
+            LabeledContent("Топ прыжок", value: metric(totals.height, unit: "м"))
+            LabeledContent("Топ завис", value: metric(totals.airtime, unit: "с"))
+            LabeledContent("Топ дистанция", value: metric(page.distance, unit: "м"))
+            LabeledContent("Часы на воде", value: totals.timeOnWater)
+            DisclosureGroup("Ачивки · \(awards.count + secrets.count)") {
+                VStack(alignment: .leading, spacing: 8) {
+                    if awards.isEmpty && secrets.isEmpty {
+                        Text("Пока нет открытых ачивок").foregroundStyle(.secondary)
+                    }
+                    ForEach(awards) { Label($0.title, systemImage: "checkmark.seal") }
+                    ForEach(secrets) { Label($0.rule.title, systemImage: "sparkles") }
+                }.frame(maxWidth: .infinity, alignment: .leading).padding(.top, 6)
+            }
+        }.font(.subheadline).lagoonCard()
+    }
+
+    private func publications(_ posts: [RiderFeedEntry]) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Посты").font(.title3.bold())
+            if posts.isEmpty {
+                Text("Пока нет публикаций").font(.subheadline).foregroundStyle(.secondary)
+            }
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: 3), spacing: 3) {
+                ForEach(posts) { entry in
+                    NavigationLink {
+                        RiderPostDetail(original: entry.post, author: entry.author, username: entry.username,
+                                        avatar: entry.avatar, entry: entry)
+                    } label: {
+                        RiderPostSquare(post: entry.post)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(entry.post.caption.isEmpty ? "Открыть пост" : entry.post.caption)
+                }
+            }.clipShape(RoundedRectangle(cornerRadius: 10))
+        }.frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @MainActor private func load() async {
+        do {
+            let result: RiderPublicPage = try await RiderCommunity.decode("riders/" + id)
+            if !Task.isCancelled { page = result; unavailable = false }
+        } catch {
+            if !Task.isCancelled { page = nil; unavailable = true }
         }
     }
 }

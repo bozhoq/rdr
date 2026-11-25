@@ -107,12 +107,14 @@ private struct Tabs: View {
                     do {
                         let current = try await RiderCommunity.statisticsCredit()
                         guard !Task.isCancelled else { return }
-                        let changed = lastSyncedStatistics != trigger.update
+                        let changed = current.statsPublic != false && lastSyncedStatistics != trigger.update
                         let credit = changed ? try await RiderCommunity.syncStatistics(trigger.update) : current
                         guard !Task.isCancelled else { return }
                         let changedCredit = social.seasonCredit != credit
                         if changedCredit { social.seasonCredit = credit }
-                        if changed {
+                        if credit.statsPublic == false {
+                            lastSyncedStatistics = nil
+                        } else if changed {
                             lastSyncedStatistics = trigger.update
                         }
                         if changed || changedCredit { social.statisticsSynced += 1 }

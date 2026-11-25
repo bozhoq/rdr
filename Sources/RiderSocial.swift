@@ -28,7 +28,7 @@ struct RiderPostEquipment: Codable, Hashable {
     }
 }
 
-struct RiderPerson: Decodable, Identifiable {
+struct RiderPerson: Decodable, Identifiable, Hashable {
     let id: String
     let name: String
     let username: String?
@@ -70,7 +70,7 @@ struct RiderMessage: Decodable, Identifiable {
     let text: String
     let createdAt: TimeInterval
     let postID: UUID?
-    let postCaption: String?
+    let sharedPost: RiderFeedEntry?
 }
 
 struct RiderPost: Codable, Identifiable {
@@ -116,6 +116,8 @@ struct RiderComment: Decodable, Identifiable {
     let text: String
     let author: String
     let username: String?
+    let avatar: Data?
+    let authorID: String?
     let mine: Bool
 
     var date: Date { Date(timeIntervalSince1970: createdAt) }
@@ -280,6 +282,7 @@ struct RiderPostDetail: View {
     var openComments = false
     var entry: RiderFeedEntry?
     @State private var busy = false
+    @State private var conversation: RiderPerson?
     @State private var confirmDelete = false
     @State private var error: String?
 
@@ -288,14 +291,16 @@ struct RiderPostDetail: View {
     var body: some View {
         ScrollViewReader { scroll in
             ScrollView {
-                VStack(spacing: 12) {
-                    RiderFeedCard(post: post, author: author, username: username, avatar: avatar,
-                                  editable: editable, entry: entry, onComments: {
-                        withAnimation(.easeInOut(duration: 0.25)) { scroll.scrollTo("post-comments", anchor: .top) }
-                    })
+                VStack(spacing: 10) {
+                    VStack(alignment: .leading, spacing: 14) {
+                        RiderFeedCard(post: post, author: author, username: username, avatar: avatar,
+                                      editable: editable, entry: entry, onComments: {
+                            withAnimation(.easeInOut(duration: 0.25)) { scroll.scrollTo("post-comments", anchor: .top) }
+                        }, onConversation: { conversation = $0 }, embedded: true)
+                        Divider()
+                        commentsSection.id("post-comments")
+                    }.lagoonCard()
                     if editable { publishingControls }
-                    commentsSection
-                        .id("post-comments")
                 }
                 .padding(16)
             }
@@ -308,6 +313,7 @@ struct RiderPostDetail: View {
         .background(RiderTheme.canvas.ignoresSafeArea())
         .navigationTitle("Публикация")
         .navigationBarTitleDisplayMode(.inline)
+        .navigationDestination(item: $conversation) { RiderThreadView(peer: $0) }
         .toolbar(.visible, for: .navigationBar)
         .toolbar {
             if editable {
@@ -351,7 +357,6 @@ struct RiderPostDetail: View {
                 Text("Комментарии откроются после публикации поста в общей ленте.")
                     .font(.footnote).foregroundStyle(.secondary)
             }
-            .lagoonCard()
         }
     }
 
@@ -366,13 +371,13 @@ struct RiderPostDetail: View {
                 if deleting { try await social.delete(current); dismiss() }
                 else { try await social.publish(current) }
             } catch {
-                self.error = deleting ? "Не удалось удалить публикацию." : "Сначала опубликуйте профиль в настройках публичного профиля. Проверьте подключение и повторите."
+                self.error = deleting ? "Не удалось удалить публикацию." : "Сначала опубликуйте профиль во вкладке «Райдер». Проверьте подключение и повторите."
             }
         }
     }
 }
 
-private struct RiderPostHeader: View {
+struct RiderPostHeader: View {
     let author: String
     let username: String?
     let avatar: Data?
@@ -404,7 +409,7 @@ private struct RiderCommentsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Комментарии").font(.headline).accessibilityAddTraits(.isHeader)
+            Text("Комментарии").font(.subheadline.weight(.semibold)).accessibilityAddTraits(.isHeader)
             if let comments {
                 if comments.isEmpty {
                     Text("Пока нет комментариев").font(.subheadline).foregroundStyle(.secondary)
@@ -434,36 +439,55 @@ private struct RiderCommentsView: View {
                 .accessibilityLabel("Отправить комментарий")
             }
         }
-        .lagoonCard()
+        .padding(.leading, 12)
         .task(id: postID) { await load() }
     }
 
     private func commentRow(_ comment: RiderComment) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(comment.author).font(.subheadline.weight(.semibold))
-                    if let username = comment.username, !username.isEmpty {
-                        Text("@" + username).font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-                Spacer(minLength: 5)
-                if comment.mine {
-                    Menu {
-                        Button("Удалить комментарий", role: .destructive) {
-                            change { try await RiderCommunity.deleteComment(comment.id, for: postID) }
-                        }
-                    } label: {
-                        Image(systemName: "ellipsis").padding(4)
-                    }
-                    .accessibilityLabel("Действия с комментарием")
-                    .disabled(sending)
-                }
+        HStack(alignment: .top, spacing: 8) {
+            if let id = comment.authorID {
+                NavigationLink { RiderPublicProfileView(id: id) } label: { commentAvatar(comment) }
+                    .buttonStyle(.plain).accessibilityLabel(comment.author)
+            } else {
+                commentAvatar(comment)
             }
-            Text(comment.text).font(.subheadline).textSelection(.enabled)
-            Text(comment.date, format: .dateTime.day().month().hour().minute())
-                .font(.caption2).foregroundStyle(.secondary)
-            Divider()
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(alignment: .top) {
+                    if let id = comment.authorID {
+                        NavigationLink { RiderPublicProfileView(id: id) } label: { commentName(comment) }
+                            .buttonStyle(.plain)
+                    } else {
+                        commentName(comment)
+                    }
+                    Spacer(minLength: 5)
+                    if comment.mine {
+                        Menu {
+                            Button("Удалить комментарий", role: .destructive) {
+                                change { try await RiderCommunity.deleteComment(comment.id, for: postID) }
+                            }
+                        } label: {
+                            Image(systemName: "ellipsis").padding(4)
+                        }
+                        .accessibilityLabel("Действия с комментарием")
+                        .disabled(sending)
+                    }
+                }
+                Text(comment.text).font(.subheadline).textSelection(.enabled)
+                RiderPostDate(date: comment.date)
+            }
+        }
+    }
+
+    private func commentAvatar(_ comment: RiderComment) -> some View {
+        RiderAvatar(photo: comment.avatar ?? Data(), size: 33)
+    }
+
+    private func commentName(_ comment: RiderComment) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(comment.author).font(.subheadline.weight(.semibold))
+            if let username = comment.username, !username.isEmpty {
+                Text("@" + username).font(.caption).foregroundStyle(.secondary)
+            }
         }
     }
 
@@ -501,7 +525,7 @@ private struct RiderCommentsView: View {
             defer { sending = false }
             do { comments = try await action() }
             catch RiderCommunity.Rejection.forbidden {
-                error = "Опубликуй профиль в настройках публичного профиля, чтобы комментировать."
+                error = "Опубликуй профиль во вкладке «Райдер», чтобы комментировать."
             } catch {
                 self.error = "Не удалось сохранить изменение. Попробуй ещё раз."
             }
@@ -645,6 +669,7 @@ struct RiderFeedView: View {
     @AppStorage("rider.username") private var username = ""
     @AppStorage("rider.profilePhoto") private var avatar = Data()
     @State private var selection = Feed.following
+    @State private var conversation: RiderPerson?
     @State private var entries: [RiderFeedEntry]?
     @State private var failed = false
 
@@ -676,7 +701,8 @@ struct RiderFeedView: View {
                         .foregroundStyle(.secondary)
                 }
                 ForEach(entries) { entry in
-                    RiderFeedCard(post: entry.post, author: entry.author, username: entry.username, avatar: entry.avatar, entry: entry)
+                    RiderFeedCard(post: entry.post, author: entry.author, username: entry.username, avatar: entry.avatar,
+                                  entry: entry, onConversation: { conversation = $0 })
                 }
             } else if failed {
                 Button("Повторить загрузку") { Task { await load(feed) } }
@@ -686,6 +712,7 @@ struct RiderFeedView: View {
         }
         .toolbar(.hidden, for: .navigationBar)
         .scrollContentBackground(.hidden).background(RiderTheme.canvas)
+        .navigationDestination(item: $conversation) { RiderThreadView(peer: $0) }
         .task(id: feed) { await load(feed) }
         .refreshable { await load(feed) }
     }
@@ -713,6 +740,9 @@ struct RiderFeedCard: View {
     var editable = false
     var entry: RiderFeedEntry?
     var onComments: (() -> Void)?
+    var onConversation: ((RiderPerson) -> Void)?
+    var embedded = false
+    @State private var pendingConversation: RiderPerson?
     @State private var changingReaction = false
     @State private var changingFollow = false
     @State private var changingRepost = false
@@ -738,6 +768,18 @@ struct RiderFeedCard: View {
     }
 
     var body: some View {
+        Group {
+            if embedded { content } else { content.lagoonCard() }
+        }
+        .listRowInsets(EdgeInsets(top: 5, leading: 10, bottom: 7, trailing: 10))
+        .listRowSeparator(.hidden)
+        .listRowBackground(Color.clear)
+        .sheet(isPresented: $sharing, onDismiss: openSentConversation) { shareMenu }
+        .sheet(isPresented: $showingReactions) { reactionsSheet }
+        .task(id: post.publicURL) { await loadInitialReaction() }
+    }
+
+    private var content: some View {
         VStack(alignment: .leading, spacing: 11) {
             header
             if let source = post.sourceAuthor {
@@ -772,13 +814,12 @@ struct RiderFeedCard: View {
             RiderPostDate(date: post.date)
             if let error { Text(error).font(.footnote).foregroundStyle(.secondary) }
         }
-        .lagoonCard()
-        .listRowInsets(EdgeInsets(top: 5, leading: 10, bottom: 7, trailing: 10))
-        .listRowSeparator(.hidden)
-        .listRowBackground(Color.clear)
-        .sheet(isPresented: $sharing) { shareMenu }
-        .sheet(isPresented: $showingReactions) { reactionsSheet }
-        .task(id: post.publicURL) { await loadInitialReaction() }
+    }
+
+    private func openSentConversation() {
+        guard let peer = pendingConversation else { return }
+        pendingConversation = nil
+        onConversation?(peer)
     }
 
     private var postPhoto: some View {
@@ -795,7 +836,13 @@ struct RiderFeedCard: View {
 
     private var header: some View {
         HStack {
-            RiderPostHeader(author: author, username: username, avatar: avatar)
+            if let id = entry?.authorID {
+                NavigationLink { RiderPublicProfileView(id: id) } label: {
+                    RiderPostHeader(author: author, username: username, avatar: avatar)
+                }.buttonStyle(.plain)
+            } else {
+                RiderPostHeader(author: author, username: username, avatar: avatar)
+            }
             if let target = entry?.authorID, entry?.mine != true {
                 Button(following ? "Подписан" : "Подписаться") { toggleFollow(target) }
                     .font(.caption.weight(.bold))
@@ -879,7 +926,13 @@ struct RiderFeedCard: View {
                     RiderShakaIcon(selected: false)
                 }
                 ForEach(reaction.people) { rider in
-                    RiderPostHeader(author: rider.name, username: rider.username, avatar: rider.avatar)
+                    if rider.id == "local" {
+                        RiderPostHeader(author: rider.name, username: rider.username, avatar: rider.avatar)
+                    } else {
+                        NavigationLink { RiderPublicProfileView(id: rider.id) } label: {
+                            RiderPostHeader(author: rider.name, username: rider.username, avatar: rider.avatar)
+                        }
+                    }
                 }
             }
             .navigationTitle("Шака")
@@ -893,10 +946,15 @@ struct RiderFeedCard: View {
         NavigationStack {
             List {
                 if let url = post.publicURL {
-                    NavigationLink {
-                        RiderInboxView(shared: post, onSent: { sharing = false })
-                    } label: {
-                        Label("Отправить в сообщениях", systemImage: "paperplane")
+                    if onConversation != nil {
+                        NavigationLink {
+                            RiderInboxView(shared: post, onSent: { peer in
+                                pendingConversation = peer
+                                sharing = false
+                            })
+                        } label: {
+                            Label("Отправить в сообщениях", systemImage: "paperplane")
+                        }
                     }
                     if (entry != nil && entry?.mine != true) || reposted {
                         Button {
@@ -973,7 +1031,7 @@ struct RiderFeedCard: View {
 
     private func showActionError(_ failure: Error) {
         if case RiderCommunity.Rejection.forbidden = failure {
-            error = "Сначала опубликуй профиль в настройках публичного профиля."
+            error = "Сначала опубликуй профиль во вкладке «Райдер»."
         } else {
             error = "Не удалось сохранить действие. Попробуй ещё раз."
         }
@@ -1127,7 +1185,7 @@ struct RiderNotificationsView: View {
                     if let post = item.postID {
                         NavigationLink { RiderSharedPostView(id: post) } label: { activityRow(item) }
                     } else {
-                        activityRow(item)
+                        NavigationLink { RiderPublicProfileView(id: item.person.id) } label: { activityRow(item) }
                     }
                 }
             } else if failed {
@@ -1166,7 +1224,10 @@ struct RiderNotificationsView: View {
 
 struct RiderInboxView: View {
     var shared: RiderPost?
-    var onSent: (() -> Void)?
+    var onSent: ((RiderPerson) -> Void)?
+    @State private var sending = false
+    @State private var sendError: String?
+    @State private var deliveryIDs: [String: UUID] = [:]
     @State private var people: [RiderPerson]?
     @State private var composing = false
     @State private var failed = false
@@ -1184,13 +1245,15 @@ struct RiderInboxView: View {
                     Text(choosingRecipient ? "Пока нет доступных райдеров." : "Пока нет переписок.")
                         .foregroundStyle(.secondary)
                 }
+                if let sendError { Text(sendError).font(.footnote).foregroundStyle(.secondary) }
+                if sending { ProgressView("Отправляем пост") }
                 ForEach(people.filter { search.isEmpty || $0.name.localizedCaseInsensitiveContains(search)
                     || $0.handle.localizedCaseInsensitiveContains(search) }) { rider in
-                    NavigationLink {
-                        RiderThreadView(peer: rider, shared: shared, onSent: onSent)
-                    } label: {
-                        RiderPostHeader(author: rider.name, username: rider.username, avatar: rider.avatar)
-                            .padding(.vertical, 4)
+                    if let shared {
+                        Button { send(shared, to: rider) } label: { personRow(rider) }
+                            .buttonStyle(.plain).disabled(sending)
+                    } else {
+                        NavigationLink { RiderThreadView(peer: rider) } label: { personRow(rider) }
                     }
                 }
             } else if failed {
@@ -1217,6 +1280,30 @@ struct RiderInboxView: View {
         .refreshable { await load() }
     }
 
+    private func personRow(_ rider: RiderPerson) -> some View {
+        RiderPostHeader(author: rider.name, username: rider.username, avatar: rider.avatar)
+            .padding(.vertical, 4).contentShape(Rectangle())
+    }
+
+    private func send(_ post: RiderPost, to rider: RiderPerson) {
+        guard !sending else { return }
+        sending = true
+        sendError = nil
+        let id = deliveryIDs[rider.id, default: UUID()]
+        deliveryIDs[rider.id] = id
+        Task {
+            defer { sending = false }
+            do {
+                _ = try await RiderCommunity.sendMessage(to: rider.id, id: id, text: "", post: post.contentID)
+                onSent?(rider)
+            } catch RiderCommunity.Rejection.forbidden {
+                sendError = "Включи публичный профиль во вкладке «Райдер», чтобы отправить пост."
+            } catch {
+                sendError = "Не удалось отправить пост. Попробуй ещё раз."
+            }
+        }
+    }
+
     @MainActor private func load() async {
         guard RiderCommunity.endpoint != nil else { return }
         let choosing = choosingRecipient
@@ -1229,19 +1316,16 @@ struct RiderInboxView: View {
     }
 }
 
-private struct RiderThreadView: View {
+struct RiderThreadView: View {
     let peer: RiderPerson
-    let shared: RiderPost?
-    var onSent: (() -> Void)?
+    @State private var conversation: RiderPerson?
     @State private var messages: [RiderMessage] = []
     @State private var messageRevision = 0
     @State private var draft = ""
     @State private var draftID = UUID()
     @State private var sending = false
-    @State private var attached = true
     @State private var error: String?
 
-    private var attachment: RiderPost? { attached ? shared : nil }
     private var text: String { draft.trimmingCharacters(in: .whitespacesAndNewlines) }
 
     var body: some View {
@@ -1262,22 +1346,30 @@ private struct RiderThreadView: View {
         }
         .safeAreaInset(edge: .bottom) { composer }
         .background(RiderTheme.canvas)
-        .navigationTitle(peer.handle)
+        .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
-        .task(id: peer.id) { await load() }
+        .toolbar(.visible, for: .navigationBar)
+        .toolbar {
+            ToolbarItem(placement: .principal) {
+                NavigationLink { RiderPublicProfileView(id: peer.id) } label: {
+                    HStack(spacing: 7) {
+                        RiderAvatar(photo: peer.avatar ?? Data(), size: 30).accessibilityHidden(true)
+                        Text(peer.handle).font(.subheadline.bold()).lineLimit(1)
+                    }
+                }.buttonStyle(.plain)
+            }
+        }
+        .navigationDestination(item: $conversation) { RiderThreadView(peer: $0) }
+        .task(id: peer.id) {
+            while !Task.isCancelled {
+                await load()
+                do { try await Task.sleep(for: .seconds(8)) } catch { break }
+            }
+        }
     }
 
     private var composer: some View {
         VStack(alignment: .leading, spacing: 7) {
-            if let attachment {
-                HStack {
-                    Label(attachment.caption.isEmpty ? "Публикация Rider" : attachment.caption, systemImage: "photo")
-                        .font(.caption).lineLimit(1)
-                    Spacer()
-                    Button { attached = false; draftID = UUID() } label: { Image(systemName: "xmark.circle") }
-                        .accessibilityLabel("Убрать публикацию").disabled(sending)
-                }
-            }
             if let error { Text(error).font(.footnote).foregroundStyle(.secondary) }
             HStack(alignment: .bottom) {
                 TextField("Сообщение", text: $draft, axis: .vertical)
@@ -1290,7 +1382,7 @@ private struct RiderThreadView: View {
                 Button(action: send) { Image(systemName: "arrow.up").font(.body.bold()).frame(minHeight: 27) }
                     .buttonStyle(.borderedProminent)
                     .accessibilityLabel("Отправить")
-                    .disabled(sending || (text.isEmpty && attachment == nil))
+                    .disabled(sending || text.isEmpty)
             }
         }
         .padding(12)
@@ -1299,11 +1391,13 @@ private struct RiderThreadView: View {
 
     private func bubble(_ message: RiderMessage) -> some View {
         VStack(alignment: .leading, spacing: 5) {
-            if let post = message.postID {
-                NavigationLink { RiderSharedPostView(id: post) } label: {
-                    Label(message.postCaption ?? "Публикация Rider", systemImage: "photo")
-                        .font(.subheadline.weight(.semibold)).lineLimit(2)
-                }
+            if let entry = message.sharedPost {
+                RiderFeedCard(post: entry.post, author: entry.author, username: entry.username, avatar: entry.avatar,
+                              entry: entry, onConversation: { conversation = $0 })
+                    .frame(maxWidth: 330)
+            } else if let post = message.postID {
+                Label("Публикация недоступна", systemImage: "photo").font(.subheadline)
+                    .accessibilityIdentifier(post.uuidString)
             }
             if !message.text.isEmpty { Text(message.text).textSelection(.enabled) }
             RiderPostDate(date: Date(timeIntervalSince1970: message.createdAt))
@@ -1326,21 +1420,18 @@ private struct RiderThreadView: View {
 
     private func send() {
         let body = text
-        let post = attachment?.contentID
-        guard !sending, !body.isEmpty || post != nil else { return }
+        guard !sending, !body.isEmpty else { return }
         sending = true
         error = nil
         Task {
             defer { sending = false }
             do {
-                messages = try await RiderCommunity.sendMessage(to: peer.id, id: draftID, text: body, post: post)
+                messages = try await RiderCommunity.sendMessage(to: peer.id, id: draftID, text: body, post: nil)
                 messageRevision += 1
                 draftID = UUID()
                 draft = ""
-                attached = false
-                if post != nil { onSent?() }
             } catch RiderCommunity.Rejection.forbidden {
-                error = "Сначала опубликуй профиль в настройках публичного профиля."
+                error = "Сначала опубликуй профиль во вкладке «Райдер»."
             } catch {
                 self.error = "Не удалось отправить сообщение. Попробуй ещё раз."
             }
@@ -1523,7 +1614,16 @@ struct RiderTopsView: View {
         }
     }
 
-    private func riderName(_ entry: RiderTopEntry) -> some View {
+    @ViewBuilder private func riderName(_ entry: RiderTopEntry) -> some View {
+        if entry.id == "local" {
+            rankedRiderLabel(entry)
+        } else {
+            NavigationLink { RiderPublicProfileView(id: entry.id) } label: { rankedRiderLabel(entry) }
+                .buttonStyle(.plain)
+        }
+    }
+
+    private func rankedRiderLabel(_ entry: RiderTopEntry) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(entry.name).font(.headline)
             if let tag = entry.username, !tag.isEmpty {
