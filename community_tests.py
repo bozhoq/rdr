@@ -12,6 +12,8 @@ from uuid import UUID
 
 import rider_community as service
 import rider_sos
+import rider_discovery
+import hashlib
 
 
 class CommunityTests(unittest.TestCase):
@@ -171,6 +173,78 @@ class CommunityTests(unittest.TestCase):
         rider_sos.worker_batch(db, push)
         rider_sos.worker_batch(db, push)
         self.assertEqual(delivered, [(sender_token, uid, "Nearby Rider", True)])
+
+    def test_name_handle_and_nearby_search_respect_visibility(self):
+        profile = dict(name="Алёна Ветер", username="wind_test", totals=self.totals, records=[])
+        self.call("PUT", "/me", self.me, profile)
+        self.publish(self.audience, "viewer")
+        def search(**criteria):
+            return self.call("POST", "/people/search", self.audience, criteria)
+        for query in ("алена", "@wind_", "ВЕТЕР"):
+            found = search(query=query)["people"]
+            self.assertEqual([(p["username"], p["name"]) for p in found], [("wind_test", "Алёна Ветер")])
+        post = str(UUID(int=810))
+        self.call("PUT", "/posts/" + post, self.me, dict(id=post, caption="Демо", photo="/9j/2Q==",
+                  location=dict(name="Тест", latitude=1.1, longitude=2.2)))
+        self.assertTrue(search(lat=1, lon=2)["nearby"])
+        self.assertFalse(search(lat=50, lon=40)["nearby"])
+        self.call("PUT", "/me", self.me, dict(profile, publicProfile=False))
+        self.assertFalse(search(lat=1, lon=2)["nearby"])
+        self.assertFalse(search(query="ветер")["people"])
+
+    def test_verified_opt_in_contacts(self):
+        self.publish(self.me, "person")
+        self.publish(self.audience, "viewer")
+        self.enterContext(patch.dict(os.environ, {"RIDER_SMS_RU_API_ID":"test"}))
+        sms = self.enterContext(patch.object(rider_discovery, "deliver"))
+        for token, phone in [(self.me,"+12025550101"), (self.audience,"+12025550102")]:
+            self.call("POST", "/people/phone/start", token, {"phone":phone})
+            code = sms.call_args.args[1]
+            self.call("POST", "/people/phone/verify", token, {"code":str((int(code)+1)%1000000).zfill(6)}, expect=403)
+            self.assertTrue(self.call("POST", "/people/phone/verify", token, {"code":code})["verified"])
+        request = {"hashes":[hashlib.sha256(b"+12025550101").hexdigest()]}
+        self.assertEqual(self.call("POST", "/people/contacts", self.audience, request), [])
+        self.call("PATCH", "/people/phone", self.me, {"discoverable":True})
+        self.assertEqual(self.call("POST", "/people/contacts", self.audience, request)[0]["username"], "person")
+        self.call("DELETE", "/people/phone", self.me)
+        self.assertEqual(self.call("POST", "/people/contacts", self.audience, request), [])
+        self.call("POST", "/people/phone/start", self.me, {"phone":"+12025550103"})
+        self.now += 301
+        self.call("POST", "/people/phone/verify", self.me, {"code":sms.call_args.args[1]}, expect=403)
+
+    def test_demo_alert_delivery_and_preferences(self):
+        self.publish(self.me, "recipient")
+        self.publish(self.audience, "alpha")
+        self.publish("c"*72, "beta")
+        self.enterContext(patch.dict(os.environ, {"RIDER_DEMO_RECIPIENT":"recipient", "RIDER_DEMO_SENDERS":"alpha,beta"}))
+        def tick(who): return self.call("POST", "/people/demo", who, {})
+        self.assertFalse(tick(self.audience)["enabled"])
+        self.assertTrue(tick(self.me)["enabled"])
+        self.call("PUT", "/sos/device", self.me, {"token":"a"*64})
+        prefs = dict.fromkeys(rider_discovery.ALERT_KINDS, True)
+        self.call("PUT", "/people/preferences", self.me, dict(prefs, message=False, sos=False))
+        fix = dict(latitude=1, longitude=2, accuracy=5, capturedAt=self.now)
+        self.assertFalse(self.call("PUT", "/sos/receiver", self.me, dict(token="a"*64, location=fix))["enabled"])
+        self.now += 22
+        self.assertFalse(tick(self.me)["drill"])
+        with closing(sqlite3.connect(os.environ["RIDER_DB"])) as db:
+            deliveries = []
+            def send(*args):
+                deliveries.append(args)
+                return "accepted"
+            rider_discovery.push_batch(db, send)
+            self.assertFalse(deliveries)
+            self.call("PUT", "/people/preferences", self.me, prefs)
+            self.now += 25
+            self.assertFalse(tick(self.me)["drill"])
+            rider_discovery.push_batch(db, send)
+            self.assertEqual([item[2] for item in deliveries], ["message"])
+            self.now += 25
+            self.assertTrue(tick(self.me)["drill"])
+            self.assertFalse(tick(self.me)["drill"])
+            self.assertEqual(db.execute("SELECT count(*) FROM sos_incidents").fetchone()[0], 0)
+        events = self.call("GET", "/people/alerts", self.me)
+        self.assertEqual([e["kind"] for e in events], ["message","message"])
 
     def test_post_interaction_endpoints(self):
         rider = self.publish(self.me, "rider")["mine"]
