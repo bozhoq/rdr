@@ -19,6 +19,22 @@ struct SessionApp: App {
 }
 
 private struct Tabs: View {
+    @Environment(\.scenePhase) private var phase
+    @AppStorage("rider.announcedRankYear") private var announcedYear = 0
+    @AppStorage("rider.announcedRankThreshold") private var announcedThreshold = 0
+    @State private var promotion: (previous: RiderRank, current: RiderRank)?
+
+    private struct RankProgress: Equatable {
+        let year: Int
+        let threshold: Int
+    }
+
+    private struct StatisticsTrigger: Equatable {
+        let update: RiderStatisticsUpdate
+        let refresh: Int
+        let active: Bool
+        let refreshWindow: Int
+    }
     @ObservedObject var recorder: SessionRecorder
     @State private var selectedTab = Tab.record
     @AppStorage("rider.profilePhoto") private var profilePhoto = Data()
@@ -58,6 +74,56 @@ private struct Tabs: View {
     private enum Tab: Hashable {
         case feed, spot, record, tops, rider
     }
+
+    private var statisticsMonitor: some View {
+        TimelineView(.everyMinute) { context in
+            let now = max(context.date, Date())
+            let progress = social.progress(recorder.history, at: now)
+            let active = phase == .active
+            let trigger = StatisticsTrigger(update: RiderStatisticsUpdate(recorder.history, at: now),
+                                            refresh: social.statisticsRefresh, active: active,
+                                            refreshWindow: Int(now.timeIntervalSince1970 / 300))
+            Color.clear
+                .onChange(of: RankProgress(year: progress.year, threshold: progress.rank.threshold), initial: true) { _, status in
+                    observeRank(status)
+                }
+                .task(id: trigger) {
+                    guard active, RiderCommunity.endpoint != nil else { return }
+                    do {
+                        let current = try await RiderCommunity.statisticsCredit()
+                        guard !Task.isCancelled else { return }
+                        let changed = lastSyncedStatistics != trigger.update
+                        let credit = changed ? try await RiderCommunity.syncStatistics(trigger.update) : current
+                        guard !Task.isCancelled else { return }
+                        let changedCredit = social.seasonCredit != credit
+                        if changedCredit { social.seasonCredit = credit }
+                        if changed {
+                            lastSyncedStatistics = trigger.update
+                        }
+                        if changed || changedCredit { social.statisticsSynced += 1 }
+                    } catch RiderCommunity.Rejection.forbidden {
+                        if !Task.isCancelled {
+                            social.seasonCredit = nil
+                            lastSyncedStatistics = nil
+                        }
+                    } catch { /* Retry at the next refresh or when the ride history changes. */ }
+                }
+        }
+        .accessibilityHidden(true)
+    }
+
+    private func observeRank(_ status: RankProgress) {
+        if announcedYear != status.year {
+            announcedYear = status.year
+            announcedThreshold = status.threshold
+            promotion = nil
+        } else if status.threshold > announcedThreshold {
+            promotion = (.forPoints(announcedThreshold), .forPoints(status.threshold))
+            announcedThreshold = status.threshold
+        }
+    }
+
+    @State private var lastSyncedStatistics: RiderStatisticsUpdate?
 
     var body: some View {
         TabView(selection: $selectedTab) {
@@ -112,6 +178,12 @@ private struct Tabs: View {
         }
         .onChange(of: profilePhoto, initial: true) { _, data in
             tabAvatar = Self.avatarIcon(data)
+        }
+        .background { statisticsMonitor }
+        .overlay {
+            if let promotion {
+                RiderRankPromotion(previous: promotion.previous, current: promotion.current) { self.promotion = nil }
+            }
         }
         .environmentObject(social)
         .tint(RiderTheme.accent)

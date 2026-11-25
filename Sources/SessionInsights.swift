@@ -1,6 +1,6 @@
 import Foundation
 
-struct RiderTotals: Codable {
+struct RiderTotals: Codable, Equatable {
     let sessions: Int
     let jumps: Int
     let height: Double?
@@ -17,7 +17,7 @@ struct RiderTotals: Codable {
         seconds = rides.reduce(0) { $0 + $1.durationSeconds }
     }
 
-    private static func isRide(_ session: SessionSummary) -> Bool {
+    fileprivate static func isRide(_ session: SessionSummary) -> Bool {
         session.status != .recording && session.setup?.sport.isRiding == true &&
             session.durationSeconds.isFinite && session.durationSeconds > 0 &&
             session.handSimulationTest != true && session.phoneTossTest != true && session.recordingMode != .test
@@ -37,6 +37,80 @@ struct RiderTotals: Codable {
         let minutes = Int(min(seconds / 60, Double(Int32.max)))
         let hours = minutes / 60
         return hours > 0 ? "\(hours) ч \(minutes % 60) мин" : "\(minutes) мин"
+    }
+}
+
+enum RiderRank: String, CaseIterable, Identifiable {
+    case e = "E", d = "D", c = "C", b = "B", a = "A", s = "S"
+
+    var id: Self { self }
+    var threshold: Int {
+        switch self {
+        case .e: return 0
+        case .d: return 100
+        case .c: return 350
+        case .b: return 800
+        case .a: return 1600
+        case .s: return 3000
+        }
+    }
+
+    static func forPoints(_ points: Int) -> Self {
+        allCases.last { points >= $0.threshold } ?? .e
+    }
+
+    var next: Self? { Self.allCases.first { $0.threshold > threshold } }
+}
+
+struct RiderSeasonProgress {
+    struct Ride: Encodable, Equatable, Identifiable {
+        let id: UUID
+        let startedAt: TimeInterval
+        let seconds: Int
+        let jumps: Int
+        let height: Double?
+        let airtime: Double?
+    }
+
+    let year: Int
+    let rides: [Ride]
+
+    let followers: Int
+
+    private var seconds: Int { rides.reduce(0) { $0 + $1.seconds } }
+    private var jumps: Int { rides.reduce(0) { $0 + $1.jumps } }
+    var achievements: [RiderAchievement] {
+        RiderAchievement.milestones(sessions: rides.count, seconds: Double(seconds), jumps: jumps,
+                                    height: rides.compactMap(\.height).max(), airtime: rides.compactMap(\.airtime).max(),
+                                    followers: followers)
+    }
+    var achievementPoints: Int { achievements.filter(\.unlocked).reduce(0) { $0 + $1.seasonBonus } }
+    var points: Int { seconds / 60 + jumps * 5 + achievementPoints }
+    var rank: RiderRank { .forPoints(points) }
+    var fraction: Double {
+        guard let next = rank.next else { return 1 }
+        return Double(points - rank.threshold) / Double(next.threshold - rank.threshold)
+    }
+
+    init(_ history: [SessionSummary], at now: Date, followers: Int = 0) {
+        self.followers = followers
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 3 * 3600)!
+        let season = calendar.dateInterval(of: .year, for: now)
+        year = calendar.component(.year, from: now)
+        var seen = Set<UUID>()
+        rides = history.compactMap { session in
+            guard let season, session.startedAt >= season.start, session.startedAt < season.end,
+                  session.startedAt <= now, session.status == .finished, RiderTotals.isRide(session),
+                  seen.insert(session.id).inserted else { return nil }
+            let measured = RiderTotals.measuredJumps(in: session).filter {
+                (ApproachJumpDetector.minimumHeight...100).contains($0.heightMeters ?? 0)
+            }
+            return Ride(id: session.id, startedAt: session.startedAt.timeIntervalSince1970,
+                        seconds: Int(min(session.durationSeconds, 28_800)),
+                        jumps: min(measured.count, 100), height: measured.compactMap(\.heightMeters).max(),
+                        airtime: measured.compactMap(\.reportedAirtime).filter { (0.01...120).contains($0) }.max())
+        }.sorted { $0.id.uuidString < $1.id.uuidString }
     }
 }
 
@@ -72,7 +146,7 @@ enum RiderTopPeriod: String, CaseIterable, Identifiable {
 }
 
 enum RiderTopMetric: String, CaseIterable, Identifiable {
-    case height, airtime, distance
+    case height, airtime, distance, rank
 
     var id: Self { self }
     var title: String {
@@ -80,20 +154,28 @@ enum RiderTopMetric: String, CaseIterable, Identifiable {
         case .height: return "Высота (м)"
         case .airtime: return "Время полёта (с)"
         case .distance: return "Дистанция в полёте (м)"
+        case .rank: return "Ранг · ПТС"
         }
     }
-    var unit: String { self == .airtime ? "с" : "м" }
+    var unit: String {
+        switch self {
+        case .rank: return "ПТС"
+        case .airtime: return "с"
+        case .height, .distance: return "м"
+        }
+    }
 
     func value(height: Double?, airtime: Double?, distance: Double?) -> Double? {
         switch self {
         case .height: return height
         case .airtime: return airtime
         case .distance: return distance
+        case .rank: return nil
         }
     }
 }
 
-struct RiderJumpScore: Codable {
+struct RiderJumpScore: Codable, Equatable {
     let id: UUID
     let spotID: UUID?
     let spot: String?
@@ -149,18 +231,34 @@ struct RiderAchievement: Identifiable {
     var unlocked: Bool { value >= target }
     var progress: Double { min(1, max(0, value / target)) }
 
+    var seasonBonus: Int {
+        switch id {
+        case "first-session", "first-follower": return 25
+        case "three-seconds", "ten-followers": return 50
+        case "five-meters": return 75
+        case "ten-hours", "fifty-jumps": return 100
+        case "ten-meters", "fifty-followers": return 150
+        case "fifty-hours": return 250
+        default: return 0
+        }
+    }
+
     static func milestones(_ totals: RiderTotals, followers: Int = 0) -> [Self] {
-        let sessions = Double(totals.sessions)
-        let hours = totals.seconds / 3600
-        let height = totals.height ?? 0
+        milestones(sessions: totals.sessions, seconds: totals.seconds, jumps: totals.jumps,
+                   height: totals.height, airtime: totals.airtime, followers: followers)
+    }
+
+    fileprivate static func milestones(sessions: Int, seconds: Double, jumps: Int, height: Double?,
+                                       airtime: Double?, followers: Int) -> [Self] {
+        let hours = seconds / 3600
         return [
-            Self(id: "first-session", title: "Первый галс", icon: "wind", goal: "1 каталка", value: sessions, target: 1),
+            Self(id: "first-session", title: "Первый галс", icon: "wind", goal: "1 каталка", value: Double(sessions), target: 1),
             Self(id: "ten-hours", title: "Гидрик прижился", icon: "water.waves", goal: "10 часов на воде", value: hours, target: 10),
             Self(id: "fifty-hours", title: "Прописка на споте", icon: "clock.fill", goal: "50 часов на воде", value: hours, target: 50),
-            Self(id: "five-meters", title: "Заглянул в окна второго этажа", icon: "arrow.up.right", goal: "Прыжок от 5 м", value: height, target: 5),
-            Self(id: "ten-meters", title: "Там, где крыши", icon: "arrow.up.to.line", goal: "Прыжок от 10 м", value: height, target: 10),
-            Self(id: "three-seconds", title: "Забыл приземлиться", icon: "timer", goal: "Зависание от 3 с", value: totals.airtime ?? 0, target: 3),
-            Self(id: "fifty-jumps", title: "Земля, приём", icon: "bolt.fill", goal: "50 прыжков с высотой", value: Double(totals.jumps), target: 50),
+            Self(id: "five-meters", title: "Заглянул в окна второго этажа", icon: "arrow.up.right", goal: "Прыжок от 5 м", value: height ?? 0, target: 5),
+            Self(id: "ten-meters", title: "Там, где крыши", icon: "arrow.up.to.line", goal: "Прыжок от 10 м", value: height ?? 0, target: 10),
+            Self(id: "three-seconds", title: "Забыл приземлиться", icon: "timer", goal: "Зависание от 3 с", value: airtime ?? 0, target: 3),
+            Self(id: "fifty-jumps", title: "Земля, приём", icon: "bolt.fill", goal: "50 прыжков с высотой", value: Double(jumps), target: 50),
             Self(id: "first-follower", title: "Первый зритель", icon: "person.badge.plus", goal: "1 подписчик", value: Double(followers), target: 1),
             Self(id: "ten-followers", title: "Фан-клуб на берегу", icon: "person.2.fill", goal: "10 подписчиков", value: Double(followers), target: 10),
             Self(id: "fifty-followers", title: "Весь спот смотрит", icon: "person.3.fill", goal: "50 подписчиков", value: Double(followers), target: 50)

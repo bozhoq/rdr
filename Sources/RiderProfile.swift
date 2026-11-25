@@ -27,7 +27,41 @@ fileprivate struct CommunityState: Decodable {
     let riders: [RemoteRider]
 }
 
+struct RiderStatisticsUpdate: Encodable, Equatable {
+    let year: Int
+    let rides: [RiderSeasonProgress.Ride]
+    let totals: RiderTotals
+    let records: [RiderJumpScore]
+
+    init(_ history: [SessionSummary], at now: Date) {
+        let progress = RiderSeasonProgress(history, at: now)
+        year = progress.year
+        rides = progress.rides
+        totals = RiderTotals(history)
+        records = RiderJumpScore.records(in: history).sorted { $0.id.uuidString < $1.id.uuidString }
+    }
+}
+
 enum RiderCommunity {
+    struct SeasonCredit: Decodable, Equatable {
+        let year: Int
+        let followers: Int
+    }
+
+    private struct StatisticsRequest: Encodable {
+        let update: RiderStatisticsUpdate
+        let generatedAt = Date().timeIntervalSince1970
+    }
+
+    static func statisticsCredit() async throws -> SeasonCredit {
+        try await decode("statistics")
+    }
+
+    static func syncStatistics(_ update: RiderStatisticsUpdate) async throws -> SeasonCredit {
+        let request = StatisticsRequest(update: update)
+        return try await decode("statistics", method: "PUT", body: JSONEncoder().encode(request))
+    }
+
     static var endpoint: URL? {
         guard let value = Bundle.main.object(forInfoDictionaryKey: "RiderProfileServer") as? String,
               let url = URL(string: value), url.scheme == "https", url.host != nil else { return nil }
@@ -212,6 +246,7 @@ struct RiderProfileView: View {
     @State private var showingAchievements = false
     @State private var composing = false
     @State private var mine: RemoteRider?
+    @State private var showingRanks = false
 
     private var cleanedUsername: String {
         draftUsername.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -228,6 +263,13 @@ struct RiderProfileView: View {
         return ScrollView {
             VStack(spacing: 18) {
                 profile
+                TimelineView(.everyMinute) { context in
+                    Button { showingRanks = true } label: {
+                        RiderRankCard(progress: social.progress(recorder.history, at: max(context.date, Date())))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityHint("Открыть шкалу рангов")
+                }
                 NavigationLink(value: RiderDestination.statistics) {
                     shortcut("Личная статистика", subtitle: "Сессии, маршруты и комплекты", icon: "chart.bar.xaxis")
                 }
@@ -254,6 +296,38 @@ struct RiderProfileView: View {
         .task { await social.refreshReposts() }
         .sheet(isPresented: $composing) {
             RiderPostComposer(spots: recorder.spots, presets: recorder.gearPresets)
+        }
+        .sheet(isPresented: $showingRanks) {
+            NavigationStack {
+                List {
+                    let progress = social.progress(recorder.history, at: Date())
+                    Section {
+                        ForEach(RiderRank.allCases) { rank in
+                            Label {
+                                Text("Ранг \(rank.rawValue)")
+                            } icon: {
+                                RiderRankBadge(rank: rank, size: 30)
+                            }
+                            .badge(rank.threshold.formatted() + " ПТС")
+                        }
+                    } footer: {
+                        Text("1 ПТС за минуту завершённой каталки и 5 ПТС за засчитанный прыжок от 0,5 м. За одну сессию учитываются до 8 часов и 100 прыжков. Новый сезон начинается 1 января по Москве.")
+                    }
+                    Section("Ачивки сезона · \(progress.achievementPoints.formatted()) ПТС") {
+                        ForEach(progress.achievements) { award in
+                            Label(award.title, systemImage: award.unlocked ? "checkmark.seal.fill" : "lock")
+                                .badge("+\(award.seasonBonus) ПТС")
+                                .accessibilityValue(award.unlocked ? "Получена" : award.goal)
+                        }
+                    }
+                }
+                .navigationTitle("Ранги Rider")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) { Button("Готово") { showingRanks = false } }
+                }
+            }
+            .presentationDetents([.medium, .large])
         }
         .sheet(isPresented: $showingAchievements) {
             NavigationStack {
@@ -302,7 +376,11 @@ struct RiderProfileView: View {
                 if RiderCommunity.endpoint != nil {
                     NavigationLink("Публичный профиль") {
                         RiderCommunityView(totals: totals, records: RiderJumpScore.records(in: recorder.history),
-                                           didLoad: { mine = $0.mine })
+                                           didLoad: { state in
+                                               mine = state.mine
+                                               if state.mine == nil { social.seasonCredit = nil }
+                                               social.statisticsRefresh += 1
+                                           })
                     }
                 }
             }
@@ -388,14 +466,21 @@ struct RiderProfileView: View {
             if publications.isEmpty {
                 Text("Здесь будут твои фото с каталок.").font(.subheadline).foregroundStyle(.secondary)
             }
-            ForEach(publications) { publication in
-                if let entry = publication.repost {
-                    RiderFeedCard(post: entry.post, author: entry.author, username: entry.username,
-                                  avatar: entry.avatar, entry: entry)
-                } else {
-                    RiderFeedCard(post: publication.post, author: name, username: username, avatar: photo, editable: true)
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: 3), spacing: 3) {
+                ForEach(publications) { publication in
+                    NavigationLink {
+                        let entry = publication.repost
+                        RiderPostDetail(original: publication.post, author: entry?.author ?? name,
+                                        username: entry == nil ? username : entry?.username,
+                                        avatar: entry == nil ? photo : entry?.avatar,
+                                        editable: entry == nil, entry: entry)
+                    } label: {
+                        RiderPostSquare(post: publication.post)
+                    }
+                    .buttonStyle(.plain)
                 }
             }
+            .clipShape(RoundedRectangle(cornerRadius: 10))
         }
     }
 
@@ -497,6 +582,116 @@ struct RiderProfileView: View {
     }
 }
 
+private extension RiderRank {
+    var tint: Color {
+        switch self {
+        case .e: return RiderTheme.accent
+        case .d: return Color(red: 0.25, green: 0.82, blue: 0.69)
+        case .c: return Color(red: 0.42, green: 0.70, blue: 1)
+        case .b: return Color(red: 0.72, green: 0.62, blue: 1)
+        case .a: return Color(red: 1, green: 0.69, blue: 0.40)
+        case .s: return Color(red: 1, green: 0.88, blue: 0.48)
+        }
+    }
+}
+
+struct RiderRankBadge: View {
+    let rank: RiderRank
+    let size: CGFloat
+
+    var body: some View {
+        Text(rank.rawValue)
+            .font(.system(size: size * 0.53, weight: .black, design: .monospaced))
+            .foregroundStyle(rank.tint)
+            .frame(width: size, height: size)
+            .background(Color(red: 0.05, green: 0.13, blue: 0.19), in: RoundedRectangle(cornerRadius: size * 0.26))
+            .overlay { RoundedRectangle(cornerRadius: size * 0.26).strokeBorder(rank.tint.opacity(0.65)) }
+            .accessibilityLabel("Ранг \(rank.rawValue)")
+    }
+}
+
+struct RiderRankCard: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let progress: RiderSeasonProgress
+
+    var body: some View {
+        let color = progress.rank.tint
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 12) {
+                RiderRankBadge(rank: progress.rank, size: 48)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("\(progress.points.formatted()) ПТС")
+                        .font(.title3.bold().monospacedDigit()).foregroundStyle(.white)
+                        .contentTransition(.numericText())
+                    Text("Сезон \(String(progress.year))").font(.caption.weight(.semibold))
+                        .foregroundStyle(.white.opacity(0.72))
+                }
+                Spacer(minLength: 4)
+                if let next = progress.rank.next {
+                    Text("До \(next.rawValue) · \((next.threshold - progress.points).formatted())")
+                        .font(.caption.bold().monospacedDigit()).foregroundStyle(color)
+                } else {
+                    Text("Высший ранг").font(.caption.bold()).foregroundStyle(color)
+                }
+            }
+            ProgressView(value: progress.fraction)
+                .tint(color)
+                .accessibilityLabel("Прогресс ранга")
+        }
+        .padding(14)
+        .background {
+            RoundedRectangle(cornerRadius: 18)
+                .fill(LinearGradient(colors: [Color(red: 0.05, green: 0.13, blue: 0.19),
+                                              Color(red: 0.10, green: 0.25, blue: 0.30)],
+                                     startPoint: .leading, endPoint: .trailing))
+        }
+        .overlay { RoundedRectangle(cornerRadius: 18).strokeBorder(color.opacity(0.45)).allowsHitTesting(false) }
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.45), value: progress.points)
+        .accessibilityElement(children: .combine)
+    }
+}
+
+struct RiderRankPromotion: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let previous: RiderRank
+    let current: RiderRank
+    let dismiss: () -> Void
+    @State private var revealed = false
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.72).ignoresSafeArea()
+            VStack(spacing: 18) {
+                ZStack {
+                    ForEach(0..<3) { index in
+                        Circle().strokeBorder(current.tint.opacity(0.35 - Double(index) * 0.09))
+                            .frame(width: CGFloat(126 + index * 33), height: CGFloat(126 + index * 33))
+                    }
+                    .scaleEffect(reduceMotion || revealed ? 1 : 0.38)
+                    RiderRankBadge(rank: current, size: 94)
+                        .scaleEffect(reduceMotion || revealed ? 1 : 0.6)
+                        .rotationEffect(.degrees(reduceMotion || revealed ? 0 : -12))
+                }
+                .frame(height: 194)
+                Text("Ранг повышен").font(.title.bold())
+                Text("\(previous.rawValue) → \(current.rawValue)")
+                    .font(.title2.monospaced().bold()).foregroundStyle(current.tint)
+                Button("Продолжить", action: dismiss)
+                    .buttonStyle(.borderedProminent).tint(current.tint)
+                    .foregroundStyle(Color(red: 0.05, green: 0.13, blue: 0.19))
+            }
+            .foregroundStyle(.white)
+            .padding(28)
+            .background(Color(red: 0.05, green: 0.13, blue: 0.19), in: RoundedRectangle(cornerRadius: 28))
+        }
+        .accessibilityAddTraits(.isModal)
+        .task {
+            withAnimation(reduceMotion ? nil : .spring(response: 0.63, dampingFraction: 0.64)) { revealed = true }
+        }
+        .sensoryFeedback(.success, trigger: revealed)
+    }
+}
+
 struct RiderAvatar: View {
     let photo: Data
     let size: CGFloat
@@ -558,7 +753,7 @@ private struct RiderCommunityView: View {
                 } header: {
                     Text("Мой публичный профиль")
                 } footer: {
-                    Text("Публикуются имя, юзернейм, фото, описание и рекорды по спотам со снаряжением для таблицы лидеров.")
+                    Text("Публикуются имя, юзернейм, фото и описание. Сессии обновляют общие рекорды и годовой рейтинг. В рейтинг ранга передаются время начала, длительность и число засчитанных прыжков.")
                 }
                 Section("Другие райдеры") {
                     if community?.riders.isEmpty == true {
