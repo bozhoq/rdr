@@ -90,10 +90,10 @@ import FoundationXML
               profileBadges.first(where: { $0.id == "ten-hours" })?.progress == 1 &&
               profileBadges.first(where: { $0.id == "fifty-hours" })?.unlocked == false,
               "Unlock achievements at the exact thresholds and clamp progress")
-        let progress = RiderSeasonProgress([rideForProfile, rideForProfile, interruptedRideForProfile, landTestForProfile],
+        let annualProgress = RiderSeasonProgress([rideForProfile, rideForProfile, interruptedRideForProfile, landTestForProfile],
                                            at: origin.addingTimeInterval(100), followers: 1)
-        check(progress.rides.count == 1 && progress.points == 600 && progress.achievementPoints == 175 &&
-              progress.rank == .c && progress.fraction > 0, "Seasonal rank includes each completed ride once and awards achievement bonuses")
+        check(annualProgress.rides.count == 1 && annualProgress.points == 600 && annualProgress.achievementPoints == 175 &&
+              annualProgress.rank == .c && annualProgress.fraction > 0, "Seasonal rank includes each completed ride once and awards achievement bonuses")
         let january = ISO8601DateFormatter().date(from: "2024-01-01T00:00:00+03:00")!
         check(RiderSeasonProgress([rideForProfile], at: january).points == 0 &&
               RiderRank.forPoints(2999) == .a && RiderRank.forPoints(3000) == .s,
