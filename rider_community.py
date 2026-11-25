@@ -15,6 +15,7 @@ from urllib.parse import urlencode
 from urllib.request import urlopen
 
 import rider_sos
+import rider_discovery
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS profiles(id TEXT PRIMARY KEY, document TEXT NOT NULL);
@@ -321,6 +322,16 @@ def publication(raw):
         if len(blob) > 96000 or not blob.startswith(bytes.fromhex("ffd8ff")):
             raise ValueError("Invalid avatar")
         result["avatar"] = raw["avatar"]
+    if "birthday" in raw:
+        value = raw["birthday"]
+        if value != "":
+            if not isinstance(value, str) or not re.fullmatch(r"[0-9]{2}-[0-9]{2}",value):
+                raise ValueError("invalid birthday")
+            datetime.strptime("2000-"+value,"%Y-%m-%d")
+        result["birthday"] = value
+        if type(raw.get("showBirthday",False)) is not bool:
+            raise ValueError("invalid birthday visibility")
+        result["showBirthday"] = raw.get("showBirthday",False)
     return result
 
 
@@ -334,6 +345,9 @@ RIDER_QUERY = """SELECT p.id,p.document,
 def rider_entry(row, owner):
     key, document, followers, following, following_count = row
     profile = json.loads(document)
+    if key != owner and not (profile.get("showBirthday") and profile.get("publicProfile",True)):
+        profile.pop("birthday",None)
+        profile.pop("showBirthday",None)
     profile["premium"] = is_premium(profile)
     profile.pop("premiumUntil", None)
     return dict(id=key, profile=profile, followers=followers, following=bool(following),
@@ -819,8 +833,15 @@ def application(env, start_response):
 
     with closing(sqlite3.connect(os.environ.get("RIDER_DB", "rider-profiles.sqlite3"), timeout=5)) as db:
         db.execute("PRAGMA foreign_keys=ON")
-        db.executescript(SCHEMA + rider_sos.SCHEMA)
+        db.executescript(SCHEMA + rider_sos.SCHEMA + rider_discovery.SCHEMA)
         with db:
+            if path.startswith("/people/"):
+                try:
+                    raw = read_json(env, 22000) if method in ("POST", "PATCH", "PUT") else {}
+                    status, result = rider_discovery.handle(db, owner, path, method, raw, env.get("REMOTE_ADDR", ""), rider_card)
+                    return send(status, result)
+                except (ValueError, TypeError, KeyError, RecursionError):
+                    return send("400 Bad Request", {"error":"invalid discovery request"})
             if path == "/sos" or path.startswith("/sos/"):
                 try:
                     status, result = rider_sos.handle(db, owner, path, method, lambda: read_json(env, 4096))
@@ -879,6 +900,8 @@ def application(env, start_response):
                     doc[key] = value
                 if scores is None and previous:
                     doc["totals"] = old["totals"]
+                if "birthday" not in doc and "birthday" in old:
+                    doc.update(birthday=old["birthday"], showBirthday=old.get("showBirthday",False))
                 if "premiumUntil" in old:
                     doc["premiumUntil"] = old["premiumUntil"]
                 if "secrets" in old:

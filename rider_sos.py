@@ -125,6 +125,9 @@ def handle(db, owner, path, method, body):
         token = push_token(raw.get("token"))
         latitude, longitude, _, captured = fix(raw.get("location"), now)
         db.execute("BEGIN IMMEDIATE")
+        prefs = db.execute("SELECT prefs FROM rider_alert_settings WHERE owner=?", (owner,)).fetchone()
+        if prefs and not json.loads(prefs[0]).get("sos", True):
+            return "200 OK", {"enabled": False}
         db.execute("DELETE FROM sos_receivers WHERE token=? AND owner<>?", (token, owner))
         db.execute("""INSERT INTO sos_receivers VALUES (?,?,?,?,?)
                       ON CONFLICT(owner) DO UPDATE SET token=excluded.token,latitude=excluded.latitude,
@@ -243,6 +246,8 @@ def worker_batch(db, push):
 def worker():
     # Imported only by the outbox process, so the main WSGI API can run without APNs extras.
     import httpx
+    import rider_community
+    import rider_discovery
 
     context = ssl.create_default_context()
     context.load_cert_chain(os.environ["RIDER_APNS_CERT"], os.environ.get("RIDER_APNS_KEY"))
@@ -251,7 +256,7 @@ def worker():
     with httpx.Client(base_url="https://" + host, http2=True, verify=context, timeout=4) as client, \
             closing(sqlite3.connect(os.environ.get("RIDER_DB", "rider-profiles.sqlite3"), timeout=5)) as db:
         db.execute("PRAGMA foreign_keys=ON")
-        db.executescript(SCHEMA)
+        db.executescript(rider_community.SCHEMA + SCHEMA + rider_discovery.SCHEMA)
 
         def push(token, identifier, expiration, name, equipment, reply):
             headers = {"apns-topic": topic, "apns-push-type": "alert", "apns-priority": "10",
@@ -269,6 +274,9 @@ def worker():
             if not reply:
                 aps["category"] = "RIDER_SOS"
             payload = {"aps": aps, ("riderSOSReply" if reply else "riderSOS"): identifier}
+            return deliver(token, headers, payload)
+
+        def deliver(token, headers, payload):
             try:
                 response = client.post("/3/device/" + token, headers=headers, json=payload)
             except httpx.HTTPError:
@@ -277,8 +285,24 @@ def worker():
                 return "accepted"
             return "pending" if response.status_code == 429 or response.status_code >= 500 else "failed"
 
+        labels = {"message": "Новое сообщение", "follow": "Новый подписчик",
+                  "reaction": "Шака", "comment": "Комментарий под постом",
+                  "reply": "Ответ на комментарий", "repost": "Репост"}
+        def social_push(token, sequence, kind, name, prefs):
+            alert = {"title": labels[kind]}
+            if prefs.get("preview", True):
+                alert["body"] = name
+            aps = {"alert": alert}
+            if prefs.get("sound", True):
+                aps["sound"] = "default"
+            headers = {"apns-topic": topic, "apns-push-type": "alert", "apns-priority": "10",
+                       "apns-expiration": str(int(time.time()) + 3600),
+                       "apns-collapse-id": f"social-{sequence}"}
+            return deliver(token, headers, {"aps": aps, "riderSocial": kind})
+
         while True:
             worker_batch(db, push)
+            rider_discovery.push_batch(db, social_push)
             time.sleep(2)
 
 
