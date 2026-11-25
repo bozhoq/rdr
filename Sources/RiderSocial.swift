@@ -1597,7 +1597,7 @@ private struct RiderChatAttachmentView: View {
                     .accessibilityLabel("Фото во вложении")
             }
             if let shareFile {
-                ShareLink(item: shareFile) { label("square.and.arrow.up") }
+                ShareLink(item: shareFile, preview: SharePreview(attachment.filename)) { label("square.and.arrow.up") }
             } else {
                 Button { Task { await prepare() } } label: { label("arrow.down.circle") }
                     .disabled(loading).buttonStyle(.plain)
