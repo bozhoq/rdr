@@ -47,15 +47,15 @@ class CommunityTests(unittest.TestCase):
         rider = self.publish(self.me, "rider")["mine"]
         self.publish(self.audience, "viewer")
         self.assertEqual(self.stats([self.ride]), {"year": 2026, "followers": 0})
-        self.assertEqual(self.ranking(2026)[0]["points"], 175)
+        self.assertEqual(self.ranking(2026)[0]["points"], 145)
         self.call("PUT", "/follow/" + rider["id"], self.audience)
         self.call("PUT", "/follow/" + rider["id"], self.audience)
         self.assertEqual(self.call("GET", "/statistics", self.me)["followers"], 1)
-        self.assertEqual(self.ranking(2026)[0]["points"], 200)
+        self.assertEqual(self.ranking(2026)[0]["points"], 165)
         self.stats([self.ride, self.ride], expect=400)
         self.stats([], revision=2)
         self.stats([self.ride], revision=1)
-        self.assertEqual(self.ranking(2026)[0]["points"], 25)
+        self.assertEqual(self.ranking(2026)[0]["points"], 20)
         self.now = datetime.fromisoformat("2027-01-01T00:00:00+03:00").timestamp()
         self.assertEqual(self.ranking(2027), [])
         self.assertEqual(self.ranking(2026), [])
@@ -69,16 +69,16 @@ class CommunityTests(unittest.TestCase):
         self.stats([dict(self.ride, height=2, scoringJumps=3)], expect=400)
         small = dict(self.ride, height=1.999, scoringJumps=0)
         self.stats([small])
-        self.assertEqual(self.ranking(2026)[0]["points"], 90)
+        self.assertEqual(self.ranking(2026)[0]["points"], 75)
         self.stats([dict(small, height=2, scoringJumps=1)], revision=1)
-        self.assertEqual(self.ranking(2026)[0]["points"], 95)
+        self.assertEqual(self.ranking(2026)[0]["points"], 80)
         legacy = {key: value for key, value in self.ride.items() if key != "scoringJumps"}
         self.stats([legacy], revision=2)
-        self.assertEqual(self.ranking(2026)[0]["points"], 165)
+        self.assertEqual(self.ranking(2026)[0]["points"], 135)
         long_season = [dict(id=str(UUID(int=i + 10)), startedAt=self.now - i * 86400,
                             seconds=28800, jumps=0, scoringJumps=0) for i in range(1, 8)]
         self.stats(long_season, revision=3)
-        self.assertEqual(self.ranking(2026)[0]["points"], 3735)
+        self.assertEqual(self.ranking(2026)[0]["points"], 3660)
 
     def test_post_interaction_endpoints(self):
         rider = self.publish(self.me, "rider")["mine"]

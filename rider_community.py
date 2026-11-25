@@ -124,9 +124,9 @@ def activity_points(items, start, end, now):
         scoring_jumps += qualifying
         best_height = max(best_height, height or 0)
         best_airtime = max(best_airtime, airtime or 0)
-    achievements = ((bool(seen), 25), (seconds >= 36000, 100), (seconds >= 180000, 250),
-                    (best_height >= 5, 75), (best_height >= 10, 150),
-                    (best_airtime >= 3, 50), (jumps >= 50, 100))
+    achievements = ((bool(seen), 20), (seconds >= 36000, 80), (seconds >= 180000, 200),
+                    (best_height >= 5, 60), (best_height >= 10, 120),
+                    (best_airtime >= 3, 40), (jumps >= 50, 80))
     return seconds // 60 + scoring_jumps * 5 + sum(bonus for reached, bonus in achievements if reached)
 
 
@@ -152,9 +152,9 @@ def season_rankings(db, start, end, year):
         GROUP BY target
     ), ranked AS (
         SELECT p.id, p.document, coalesce(s.activity_points, 0)
-             + CASE WHEN f.n>=1 THEN 25 ELSE 0 END
-             + CASE WHEN f.n>=10 THEN 50 ELSE 0 END
-             + CASE WHEN f.n>=50 THEN 150 ELSE 0 END AS points
+             + CASE WHEN f.n>=1 THEN 20 ELSE 0 END
+             + CASE WHEN f.n>=10 THEN 40 ELSE 0 END
+             + CASE WHEN f.n>=50 THEN 120 ELSE 0 END AS points
         FROM profiles p
         LEFT JOIN season_scores s ON s.owner=p.id AND s.year=?
         LEFT JOIN followers f ON f.target=p.id
