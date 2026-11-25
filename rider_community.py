@@ -8,6 +8,7 @@ import re
 import sqlite3
 import time
 from uuid import UUID
+from datetime import datetime, timedelta, timezone
 from html import escape
 from contextlib import closing
 from urllib.parse import urlencode
@@ -72,7 +73,94 @@ CREATE TABLE IF NOT EXISTS record_details(
     PRIMARY KEY(owner, session_id),
     FOREIGN KEY(owner, session_id) REFERENCES records(owner, session_id) ON DELETE CASCADE
 );
+CREATE TABLE IF NOT EXISTS season_scores(
+    owner TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+    year INTEGER NOT NULL, activity_points INTEGER NOT NULL, generated_at REAL NOT NULL,
+    PRIMARY KEY(owner, year)
+);
+CREATE INDEX IF NOT EXISTS scores_by_year ON season_scores(year);
 """
+
+SEASON_ZONE = timezone(timedelta(hours=3))
+
+
+def season_at(now):
+    year = datetime.fromtimestamp(now, SEASON_ZONE).year
+    start = datetime(year, 1, 1, tzinfo=SEASON_ZONE).timestamp()
+    end = datetime(year + 1, 1, 1, tzinfo=SEASON_ZONE).timestamp()
+    return year, start, end
+
+
+def activity_points(items, start, end, now):
+    if not isinstance(items, list) or len(items) > 5000:
+        raise ValueError("invalid rides")
+    seen = set()
+    seconds = jumps = 0
+    best_height = best_airtime = 0
+    for item in items:
+        if not isinstance(item, dict):
+            raise ValueError("invalid ride")
+        key = identifier(item.get("id"))
+        recorded, duration, count = (item.get(k) for k in ("startedAt", "seconds", "jumps"))
+        if key in seen or not number(recorded, start, min(end, now + 300)) or recorded >= end:
+            raise ValueError("invalid ride")
+        if type(duration) is not int or not 0 <= duration <= 28800 or type(count) is not int or not 0 <= count <= 100:
+            raise ValueError("invalid ride totals")
+        height, airtime = item.get("height"), item.get("airtime")
+        if (height is None) != (count == 0) or (height is not None and not number(height, 0.5, 100)):
+            raise ValueError("invalid ride height")
+        if airtime is not None and (count == 0 or not number(airtime, 0.01, 120)):
+            raise ValueError("invalid ride airtime")
+        seen.add(key)
+        seconds += duration
+        jumps += count
+        best_height = max(best_height, height or 0)
+        best_airtime = max(best_airtime, airtime or 0)
+    achievements = ((bool(seen), 25), (seconds >= 36000, 100), (seconds >= 180000, 250),
+                    (best_height >= 5, 75), (best_height >= 10, 150),
+                    (best_airtime >= 3, 50), (jumps >= 50, 100))
+    return seconds // 60 + jumps * 5 + sum(bonus for reached, bonus in achievements if reached)
+
+
+def replace_records(db, owner, scores):
+    db.execute("DELETE FROM records WHERE owner=?", (owner,))
+    db.executemany("INSERT INTO records VALUES (?,?,?,?,?,?,?)",
+                   ((owner, *row[:6]) for row in scores))
+    db.executemany("INSERT INTO record_details VALUES (?,?,?,?,?)",
+                   ((owner, row[0], *row[6:]) for row in scores))
+
+
+def season_credit(db, owner, year, start, end):
+    followers = db.execute("""SELECT count(*) FROM follow_activity
+        WHERE target=? AND created_at>=? AND created_at<?""", (owner, start, end)).fetchone()[0]
+    return {"year": year, "followers": followers}
+
+
+def season_rankings(db, start, end, year):
+    rows = db.execute("""WITH followers AS (
+        SELECT target, count(*) AS n
+        FROM follow_activity
+        WHERE created_at>=? AND created_at<?
+        GROUP BY target
+    ), ranked AS (
+        SELECT p.id, p.document, coalesce(s.activity_points, 0)
+             + CASE WHEN f.n>=1 THEN 25 ELSE 0 END
+             + CASE WHEN f.n>=10 THEN 50 ELSE 0 END
+             + CASE WHEN f.n>=50 THEN 150 ELSE 0 END AS points
+        FROM profiles p
+        LEFT JOIN season_scores s ON s.owner=p.id AND s.year=?
+        LEFT JOIN followers f ON f.target=p.id
+    )
+    SELECT id,document,points FROM ranked WHERE points>0
+    ORDER BY points DESC,id LIMIT 50""", (start, end, year))
+    output = []
+    for index, (rider, document, points) in enumerate(rows):
+        profile = json.loads(document)
+        entry = dict(id=rider, name=profile["name"], username=profile.get("username"), points=points)
+        if index < 3:
+            entry["avatar"] = profile.get("avatar")
+        output.append(entry)
+    return output
 
 
 def publication(raw):
@@ -298,6 +386,11 @@ def comments(db, post_id, owner):
 
 
 def top_rows(db, raw):
+    if isinstance(raw, dict) and raw.get("metric") == "rank":
+        year, start, end = season_at(time.time())
+        if type(raw.get("season")) is not int:
+            raise ValueError("invalid season")
+        return season_rankings(db, start, end, year) if raw["season"] == year else []
     columns = {"height": "r.height", "airtime": "r.airtime", "distance": "d.distance"}
     if not isinstance(raw, dict) or not isinstance(raw.get("metric"), str) or raw["metric"] not in columns:
         raise ValueError("invalid metric")
@@ -395,6 +488,8 @@ def application(env, start_response):
         return [data]
 
     path, method = env.get("PATH_INFO", ""), env.get("REQUEST_METHOD", "")
+    if (path, method) == ("/health", "GET"):
+        return send("200 OK", {"status": "ready"})
     view_path = re.fullmatch(r"/posts/([a-fA-F0-9-]{36})/view", path)
     if method == "GET" and view_path:
         try:
@@ -481,11 +576,42 @@ def application(env, start_response):
                 if handle:
                     db.execute("INSERT INTO handles VALUES (?,?)", (handle, owner))
                 if scores is not None:
-                    db.execute("DELETE FROM records WHERE owner=?", (owner,))
-                    db.executemany("INSERT INTO records VALUES (?,?,?,?,?,?,?)",
-                                   ((owner, *row[:6]) for row in scores))
-                    db.executemany("INSERT INTO record_details VALUES (?,?,?,?,?)",
-                                   ((owner, row[0], *row[6:]) for row in scores))
+                    replace_records(db, owner, scores)
+            elif (path, method) == ("/statistics", "GET"):
+                if not db.execute("SELECT 1 FROM profiles WHERE id=?", (owner,)).fetchone():
+                    return send("403 Forbidden", {"error": "publish a profile first"})
+                return send("200 OK", season_credit(db, owner, *season_at(time.time())))
+            elif (path, method) == ("/statistics", "PUT"):
+                try:
+                    now = time.time()
+                    year, start, end = season_at(now)
+                    raw = read_json(env, 2500000)
+                    update = raw["update"]
+                    generated = raw["generatedAt"]
+                    if not number(generated, 0, now + 300) or type(update.get("year")) is not int:
+                        raise ValueError("invalid statistics")
+                    if update["year"] != year:
+                        return send("409 Conflict", {"error": "season changed"})
+                    points = activity_points(update["rides"], start, end, now)
+                    scores = score_rows(update["records"])
+                    totals = update["totals"]
+                    validated = publication({"name": "Rider", "totals": totals})["totals"]
+                except (ValueError, TypeError, KeyError, AttributeError, OverflowError, RecursionError):
+                    return send("400 Bad Request", {"error": "invalid statistics"})
+                db.execute("BEGIN IMMEDIATE")
+                profile = db.execute("SELECT document FROM profiles WHERE id=?", (owner,)).fetchone()
+                if not profile:
+                    return send("403 Forbidden", {"error": "publish a profile first"})
+                saved = db.execute("""INSERT INTO season_scores VALUES (?,?,?,?)
+                    ON CONFLICT(owner,year) DO UPDATE SET
+                      activity_points=excluded.activity_points, generated_at=excluded.generated_at
+                    WHERE excluded.generated_at>=season_scores.generated_at""", (owner, year, points, generated))
+                if saved.rowcount:
+                    doc = json.loads(profile[0])
+                    doc["totals"] = validated
+                    db.execute("UPDATE profiles SET document=? WHERE id=?", (json.dumps(doc), owner))
+                    replace_records(db, owner, scores)
+                return send("200 OK", season_credit(db, owner, year, start, end))
             elif (path, method) == ("/me", "DELETE"):
                 db.execute("DELETE FROM follows WHERE owner=?", (owner,))
                 db.execute("DELETE FROM profiles WHERE id=?", (owner,))
