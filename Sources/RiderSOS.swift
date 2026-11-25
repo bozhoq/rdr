@@ -397,7 +397,7 @@ struct RiderSOSInbox: View {
             alerts = items.filter { $0.id == selected } + items.filter { $0.id != selected }
             error = nil
         } catch {
-            error = "Не удалось получить сигналы SOS с сервера."
+            self.error = "Не удалось получить сигналы SOS с сервера."
         }
         loaded = true
     }
