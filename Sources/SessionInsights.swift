@@ -241,12 +241,12 @@ struct RiderAchievement: Identifiable {
 
     var seasonBonus: Int {
         switch id {
-        case "first-session", "first-follower": return 25
-        case "three-seconds", "ten-followers": return 50
-        case "five-meters": return 75
-        case "ten-hours", "fifty-jumps": return 100
-        case "ten-meters", "fifty-followers": return 150
-        case "fifty-hours": return 250
+        case "first-session", "first-follower": return 20
+        case "three-seconds", "ten-followers": return 40
+        case "five-meters": return 60
+        case "ten-hours", "fifty-jumps": return 80
+        case "ten-meters", "fifty-followers": return 120
+        case "fifty-hours": return 200
         default: return 0
         }
     }
