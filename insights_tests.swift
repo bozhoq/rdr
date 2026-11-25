@@ -121,6 +121,15 @@ import FoundationXML
         let earnedMission = RiderSeasonProgress([missionRide, missionRide], at: origin)
         check(earnedMission.points == boundary.points + 6 && RiderMission.earned(in: [missionRide, missionRide]) == [.jumps1],
               "A completed selected mission contributes one seasonal bonus and one sticker")
+        var repeatedMission = missionRide
+        repeatedMission.id = UUID()
+        let repeatedProgress = RiderSeasonProgress([missionRide, repeatedMission], at: origin)
+        check(repeatedProgress.rides.map(\.missionPoints).reduce(0, +) == 6,
+              "A secret mission awards points only on first completion")
+        let allMissions = Set(RiderMission.allCases)
+        check(RiderMission.draw(excluding: allMissions) == nil &&
+              RiderMission.draw(excluding: allMissions.subtracting([.height35])) == .height35,
+              "Random offers exclude every earned mission and include the 35 metre target")
         missionRide.durationSeconds = 899
         check(RiderSeasonProgress([missionRide], at: origin).rides.first?.missionPoints == 0 &&
               RiderMission.earned(in: [missionRide]).isEmpty,

@@ -14,6 +14,8 @@ from contextlib import closing
 from urllib.parse import urlencode
 from urllib.request import urlopen
 
+import rider_sos
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS profiles(id TEXT PRIMARY KEY, document TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS follows(
@@ -114,6 +116,55 @@ MISSION_RULES = {
     "air2": ("air", 2, 10),
     "air25": ("air", 2.5, 13),
     "air3": ("air", 3, 16),
+    "height7": ("height", 7, 21),
+    "height8": ("height", 8, 24),
+    "height9": ("height", 9, 27),
+    "height10": ("height", 10, 30),
+    "height11": ("height", 11, 33),
+    "height12": ("height", 12, 36),
+    "height13": ("height", 13, 39),
+    "height14": ("height", 14, 42),
+    "height15": ("height", 15, 45),
+    "height16": ("height", 16, 48),
+    "height17": ("height", 17, 51),
+    "height18": ("height", 18, 54),
+    "height19": ("height", 19, 57),
+    "height20": ("height", 20, 60),
+    "height21": ("height", 21, 63),
+    "height22": ("height", 22, 66),
+    "height23": ("height", 23, 69),
+    "height24": ("height", 24, 72),
+    "height25": ("height", 25, 75),
+    "height26": ("height", 26, 78),
+    "height27": ("height", 27, 81),
+    "height28": ("height", 28, 84),
+    "height29": ("height", 29, 87),
+    "height30": ("height", 30, 90),
+    "height31": ("height", 31, 93),
+    "height32": ("height", 32, 96),
+    "height33": ("height", 33, 99),
+    "height34": ("height", 34, 100),
+    "height35": ("height", 35, 100),
+    "water75": ("water", 75, 18),
+    "water105": ("water", 105, 24),
+    "water120": ("water", 120, 28),
+    "water150": ("water", 150, 34),
+    "water180": ("water", 180, 40),
+    "route15": ("route", 15000, 25),
+    "route20": ("route", 20000, 31),
+    "route25": ("route", 25000, 36),
+    "route30": ("route", 30000, 42),
+    "jumps25": ("jumps", 25, 29),
+    "jumps30": ("jumps", 30, 34),
+    "jumps40": ("jumps", 40, 43),
+    "jumps50": ("jumps", 50, 52),
+    "air35": ("air", 3.5, 19),
+    "air4": ("air", 4, 22),
+    "air5": ("air", 5, 27),
+    "air6": ("air", 6, 33),
+    "air7": ("air", 7, 39),
+    "air8": ("air", 8, 45),
+    "air10": ("air", 10, 55),
 }
 
 
@@ -128,6 +179,7 @@ def activity_points(items, start, end, now):
     if not isinstance(items, list) or len(items) > 5000:
         raise ValueError("invalid rides")
     seen = set()
+    missions_done = set()
     seconds = jumps = scoring_jumps = mission_points = 0
     best_height = best_airtime = 0
     for item in items:
@@ -166,7 +218,8 @@ def activity_points(items, start, end, now):
                 raise ValueError("invalid mission distance")
             values = {"water": duration / 60, "route": distance or 0, "jumps": qualifying,
                       "height": height or 0, "air": airtime or 0}
-            if duration >= MINIMUM_MISSION_SECONDS and values[category] >= target:
+            if mission not in missions_done and duration >= MINIMUM_MISSION_SECONDS and values[category] >= target:
+                missions_done.add(mission)
                 mission_points += reward
     achievements = ((bool(seen), 20), (seconds >= 36000, 80), (seconds >= 180000, 200),
                     (best_height >= 5, 60), (best_height >= 10, 120),
@@ -607,8 +660,14 @@ def application(env, start_response):
 
     with closing(sqlite3.connect(os.environ.get("RIDER_DB", "rider-profiles.sqlite3"), timeout=5)) as db:
         db.execute("PRAGMA foreign_keys=ON")
-        db.executescript(SCHEMA)
+        db.executescript(SCHEMA + rider_sos.SCHEMA)
         with db:
+            if path == "/sos" or path.startswith("/sos/"):
+                try:
+                    status, result = rider_sos.handle(db, owner, path, method, lambda: read_json(env, 4096))
+                    return send(status, result)
+                except (AttributeError, KeyError, TypeError, ValueError, OverflowError, RecursionError):
+                    return send("400 Bad Request", {"error": "invalid SOS request"})
             if (path, method) == ("/me", "PUT"):
                 try:
                     raw = read_json(env, 1500000)

@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import sqlite3
 import tempfile
 import unittest
 from datetime import datetime
@@ -8,6 +9,7 @@ from unittest.mock import patch
 from uuid import UUID
 
 import rider_community as service
+import rider_sos
 
 
 class CommunityTests(unittest.TestCase):
@@ -91,6 +93,44 @@ class CommunityTests(unittest.TestCase):
         self.stats([dict(self.ride, mission="height3", seconds=899)], revision=3)
         self.assertEqual(self.ranking(2026)[0]["points"], 144)
         self.stats([dict(self.ride, mission="unknown")], expect=400)
+
+    def test_nearby_sos_selection_and_delivery(self):
+        uid = str(UUID(int=321))
+        coords = dict(latitude=45, longitude=33, accuracy=10, capturedAt=self.now)
+        payload = dict(id=uid, name="Rider", equipment="Core · Jaime", location=coords)
+        self.call("POST", "/sos", self.me, payload, expect=503)
+
+        self.call("PUT", "/sos/receiver", self.audience, dict(token="a1" * 32,
+                  location=dict(coords, latitude=45.012)))
+        far = "c" * 72
+        self.call("PUT", "/sos/receiver", far, dict(token="a2" * 32, location=dict(coords, latitude=45.014)))
+        stale = "d" * 72
+        self.call("PUT", "/sos/receiver", stale, dict(token="a3" * 32,
+                  location=dict(coords, capturedAt=self.now - 46)), expect=400)
+
+        db = sqlite3.connect(os.environ["RIDER_DB"])
+        self.addCleanup(db.close)
+        db.execute("PRAGMA foreign_keys=ON")
+        rider_sos.worker_batch(db, None)
+        response = self.call("POST", "/sos", self.me, payload)
+        self.assertEqual(response["recipients"], 1)
+        self.assertEqual(response["pending"], 1)
+        self.assertEqual(self.call("POST", "/sos", self.me, payload), response)
+        self.assertEqual(self.call("GET", "/sos/inbox", far), [])
+        self.assertEqual(self.call("GET", "/sos/inbox", self.audience)[0]["equipment"], "Core · Jaime")
+        path = "/sos/" + uid + "/receipt"
+        self.call("GET", path, self.audience, expect=404)
+
+        delivered = []
+        def push(token, identifier, expiration, name, equipment):
+            delivered.append((token, identifier, name, equipment))
+            return "accepted"
+        rider_sos.worker_batch(db, push)
+        self.assertEqual(delivered, [("a1" * 32, uid, "Rider", "Core · Jaime")])
+        self.assertEqual(self.call("GET", path, self.me)["acceptedByAPNs"], 1)
+        self.now += rider_sos.VISIBLE_SECONDS + 1
+        rider_sos.worker_batch(db, None)
+        self.assertEqual(self.call("GET", "/sos/inbox", self.audience), [])
 
     def test_post_interaction_endpoints(self):
         rider = self.publish(self.me, "rider")["mine"]
