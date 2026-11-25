@@ -82,6 +82,25 @@ CREATE TABLE IF NOT EXISTS direct_messages(
     post TEXT REFERENCES posts(id) ON DELETE SET NULL
 );
 CREATE INDEX IF NOT EXISTS direct_sender ON direct_messages(sender, recipient, created_at);
+CREATE TABLE IF NOT EXISTS message_receipts(
+    message TEXT PRIMARY KEY REFERENCES direct_messages(id) ON DELETE CASCADE,
+    read INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS activity_reads(
+    owner TEXT PRIMARY KEY REFERENCES profiles(id) ON DELETE CASCADE,
+    sequence INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS stories(
+    id TEXT PRIMARY KEY, owner TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+    created REAL NOT NULL, caption TEXT NOT NULL, photo BLOB NOT NULL, video BLOB
+);
+CREATE INDEX IF NOT EXISTS stories_created ON stories(created DESC);
+CREATE INDEX IF NOT EXISTS stories_owner ON stories(owner, created DESC);
+CREATE TABLE IF NOT EXISTS story_views(
+    story TEXT NOT NULL REFERENCES stories(id) ON DELETE CASCADE,
+    viewer TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+    PRIMARY KEY(story, viewer)
+);
 CREATE INDEX IF NOT EXISTS direct_recipient ON direct_messages(recipient, sender, created_at);
 CREATE TABLE IF NOT EXISTS message_attachments(
     message TEXT PRIMARY KEY REFERENCES direct_messages(id) ON DELETE CASCADE,
@@ -509,6 +528,8 @@ def message_attachment(item):
     data = base64.b64decode(encoded, validate=True)
     if not 1 <= len(data) <= MAX_ATTACHMENT_BYTES:
         raise ValueError("invalid attachment size")
+    if mime in ("audio/mp4", "video/mp4") and (len(data) <= 12 or data[4:8] != b"ftyp"):
+        raise ValueError("invalid recorded media")
     return name, mime, data
 
 
@@ -640,19 +661,49 @@ def inbox(db, owner):
     return [rider_card(*row) for row in db.execute(query, (owner, owner))]
 
 
+def deliver_inbox(db, owner):
+    db.execute("""INSERT OR IGNORE INTO message_receipts(message)
+        SELECT m.id FROM direct_messages m LEFT JOIN message_receipts x ON x.message=m.id
+        WHERE m.recipient=? AND x.message IS NULL""", (owner,))
+
+
+def unread_summary(db, owner):
+    deliver_inbox(db, owner)
+    messages = dict(db.execute("""SELECT m.sender,count(*) FROM direct_messages m
+        JOIN message_receipts x ON x.message=m.id WHERE m.recipient=? AND x.read=0
+        GROUP BY m.sender""", (owner,)))
+    activity_count = db.execute(f"""SELECT count(*) FROM rider_alert_events e
+        WHERE e.owner=? AND e.kind<>'message' AND {rider_discovery.VISIBLE}
+        AND e.sequence > coalesce((SELECT sequence FROM activity_reads WHERE owner=?),0)""",
+                                (owner, owner)).fetchone()[0]
+    return {"threads": messages, "activity": activity_count}
+
+
+def visible_stories(db, owner):
+    rows = db.execute("""SELECT s.id,s.owner,p.document,s.caption,s.created,s.video IS NOT NULL,
+        EXISTS(SELECT 1 FROM story_views v WHERE v.story=s.id AND v.viewer=?)
+        FROM stories s JOIN public_profiles p ON p.id=s.owner WHERE s.created>?
+        ORDER BY s.created DESC,s.id LIMIT 150""", (owner, time.time()-86400))
+    return [dict(id=key, author=rider_card(author, document), caption=caption, createdAt=created,
+                 video=bool(video), seen=owner==author or bool(seen), mine=owner==author)
+            for key,author,document,caption,created,video,seen in rows]
+
+
 def thread(db, owner, peer):
-    query = """SELECT m.id,m.sender,m.body,m.created_at,m.post,a.filename,a.content_type,length(a.data)
+    query = """SELECT m.id,m.sender,m.body,m.created_at,m.post,a.filename,a.content_type,length(a.data),x.message IS NOT NULL,coalesce(x.read,0)
     FROM direct_messages m LEFT JOIN message_attachments a ON a.message=m.id
+    LEFT JOIN message_receipts x ON x.message=m.id
     WHERE (m.sender=? AND m.recipient=?) OR (m.sender=? AND m.recipient=?)
     ORDER BY m.created_at DESC,m.id DESC LIMIT 100"""
     shared = {}
     output = []
-    for key, sender, body, date, post, filename, mime, size in reversed(list(db.execute(query, (owner, peer, peer, owner)))):
+    for key, sender, body, date, post, filename, mime, size, delivered, read in reversed(list(db.execute(query, (owner, peer, peer, owner)))):
         if post and post not in shared:
             shared[post] = next(iter(feed(db, owner, "single", post)), None)
         entry = shared.get(post)
         output.append({"id": key, "mine": sender == owner, "text": body, "createdAt": date, "postID": post,
                        "postCaption": entry["post"]["caption"] if entry else None, "sharedPost": entry,
+                       "delivered": bool(delivered), "read": bool(read),
                        "attachment": {"filename": filename, "contentType": mime, "size": size} if filename else None})
     return output
 
@@ -911,11 +962,18 @@ def application(env, start_response):
                     while db.execute("SELECT 1 FROM handles WHERE username=?", (tag,)).fetchone():
                         suffix += 1
                         tag = f"rider_{owner[:12]}{suffix}"
-                    doc = dict(name="Райдер", username=tag, publicProfile=False, statsPublic=False,
+                    doc = dict(name="Райдер", username=tag, publicProfile=False, statsPublic=False, onboardingPending=True,
                                totals=dict(seconds=0, sessions=0, jumps=0))
                     db.execute("INSERT INTO profiles VALUES (?,?)", (owner, json.dumps(doc)))
                     db.execute("INSERT INTO handles VALUES (?,?)", (tag, owner))
                 return send("200 OK", {"member": True})
+            if (path, method) == ("/registration", "GET"):
+                existing = db.execute("SELECT document FROM profiles WHERE id=?", (owner,)).fetchone()
+                doc = json.loads(existing[0]) if existing else {}
+                pending = doc.get("onboardingPending", not doc or (
+                    doc.get("name") == "Райдер" and (doc.get("username") or "").startswith("rider_" + owner[:12])
+                    and not doc.get("publicProfile")))
+                return send("200 OK", {"required": pending})
             if (path, method) == ("/me", "GET"):
                 return send("200 OK", state(db, owner, include_directory=False))
             if (path, method) == ("/me", "PATCH"):
@@ -935,18 +993,25 @@ def application(env, start_response):
                 doc = json.loads(previous[0])
                 doc.update(raw)
                 db.execute("UPDATE profiles SET document=? WHERE id=?", (json.dumps(doc), owner))
-            elif (path, method) == ("/me", "PUT"):
+            elif method == "PUT" and path in ("/me", "/registration"):
                 try:
                     raw = read_json(env, 1500000)
                     doc = publication(raw)
+                    if path == "/registration" and not doc.get("username"):
+                        raise ValueError("username is required")
                     scores = score_rows(raw["records"]) if "records" in raw else None
                 except (ValueError, TypeError, OverflowError, RecursionError):
                     return send("400 Bad Request", {"error": "invalid profile"})
                 db.execute("BEGIN IMMEDIATE")
                 previous = db.execute("SELECT document FROM profiles WHERE id=?", (owner,)).fetchone()
                 old = json.loads(previous[0]) if previous else {}
+                if path == "/registration" and old and not old.get("onboardingPending", (
+                    old.get("name") == "Райдер" and (old.get("username") or "").startswith("rider_" + owner[:12])
+                    and not old.get("publicProfile"))):
+                    return send("200 OK", state(db, owner, include_directory=False))
+                doc["onboardingPending"] = False
                 for key in ("publicProfile", "statsPublic"):
-                    value = raw.get(key, old.get(key, True))
+                    value = raw.get(key, True if path == "/registration" else old.get(key, True))
                     if type(value) is not bool:
                         return send("400 Bad Request", {"error": "invalid visibility"})
                     doc[key] = value
@@ -1048,6 +1113,83 @@ def application(env, start_response):
                     db.execute("DELETE FROM follows WHERE owner=? AND target=?", (owner, target))
             elif method == "GET" and path in ("/feed/following", "/feed/recommended", "/feed/my-reposts"):
                 return send("200 OK", feed(db, owner, path.split("/")[-1]))
+            elif (path, method) == ("/unread", "GET"):
+                return send("200 OK", unread_summary(db, owner))
+            elif (path, method) == ("/activity/read", "GET"):
+                sequence = db.execute("SELECT coalesce(max(sequence),0) FROM rider_alert_events WHERE owner=? AND kind<>'message'",
+                                      (owner,)).fetchone()[0]
+                return send("200 OK", {"items": activity(db, owner), "sequence": sequence})
+            elif (path, method) == ("/activity/read", "PUT"):
+                try:
+                    cursor = read_json(env, 256)["sequence"]
+                    if type(cursor) is not int or not 0 <= cursor <= 2**63-1:
+                        raise ValueError()
+                except (ValueError, KeyError, TypeError):
+                    return send("400 Bad Request", {"error": "invalid receipt"})
+                known = db.execute("SELECT coalesce(max(sequence),0) FROM rider_alert_events WHERE owner=? AND kind<>'message'",
+                                   (owner,)).fetchone()[0]
+                if known > 0 and db.execute("SELECT 1 FROM profiles WHERE id=?", (owner,)).fetchone():
+                    db.execute("""INSERT INTO activity_reads VALUES(?,?)
+                        ON CONFLICT(owner) DO UPDATE SET sequence=max(sequence,excluded.sequence)""", (owner,min(known,cursor)))
+                return send("200 OK", unread_summary(db, owner))
+            elif method == "PUT" and (read_path := re.fullmatch(r"/messages/([0-9a-f]{64})/read", path)):
+                try:
+                    ids = read_json(env, 5500)["messages"]
+                    if not isinstance(ids, list) or len(ids)>100:
+                        raise ValueError()
+                    keys = json.dumps([identifier(k) for k in ids])
+                except (ValueError, KeyError, TypeError):
+                    return send("400 Bad Request", {"error": "invalid receipt"})
+                db.execute("""INSERT INTO message_receipts (message,read) SELECT id,1 FROM direct_messages
+                    WHERE sender=? AND recipient=? AND id IN (SELECT value FROM json_each(?))
+                    ON CONFLICT(message) DO UPDATE SET read=1""", (read_path[1],owner,keys))
+                return send("200 OK", unread_summary(db, owner))
+            elif (path, method) == ("/stories", "GET"):
+                return send("200 OK", visible_stories(db, owner))
+            elif (story_path := re.fullmatch(r"/stories/([a-fA-F0-9-]{36})(?:/(media|seen))?", path)):
+                try:
+                    key = identifier(story_path[1])
+                except ValueError:
+                    return send("404 Not Found", {"error": "unknown story"})
+                action = story_path[2]
+                if method == "PUT" and action is None:
+                    try:
+                        caption, _, photo, _, _, video = post_fields(read_json(env, 17_400_000), key)
+                        if not photo:
+                            raise ValueError("no story media")
+                    except (ValueError, TypeError, RecursionError):
+                        return send("400 Bad Request", {"error": "invalid story"})
+                    db.execute("BEGIN IMMEDIATE")
+                    if not db.execute("SELECT 1 FROM public_profiles WHERE id=?", (owner,)).fetchone():
+                        return send("403 Forbidden", {"error": "publish a profile first"})
+                    db.execute("DELETE FROM stories WHERE created<=?", (time.time()-86400,))
+                    previous = db.execute("SELECT owner FROM stories WHERE id=?", (key,)).fetchone()
+                    if previous:
+                        if previous[0] != owner:
+                            return send("409 Conflict", {"error": "story ID is taken"})
+                    else:
+                        if db.execute("SELECT count(*) FROM stories WHERE owner=?", (owner,)).fetchone()[0] >= 20:
+                            return send("429 Too Many Requests", {"error": "daily story limit"})
+                        db.execute("INSERT INTO stories VALUES(?,?,?,?,?,?)", (key,owner,time.time(),caption,photo,video))
+                    return send("200 OK", visible_stories(db, owner))
+                if method == "DELETE" and action is None:
+                    db.execute("DELETE FROM stories WHERE id=? AND owner=?", (key,owner))
+                    return send("200 OK", visible_stories(db, owner))
+                if method == "PUT" and action == "seen":
+                    db.execute("""INSERT OR IGNORE INTO story_views SELECT s.id,p.id FROM stories s
+                        JOIN public_profiles author ON author.id=s.owner JOIN profiles p ON p.id=?
+                        WHERE s.id=? AND s.created>?""", (owner,key,time.time()-86400))
+                    return send("200 OK", {"seen":True})
+                if method == "GET" and action == "media":
+                    asset = db.execute("""SELECT s.photo,s.video FROM stories s JOIN public_profiles p ON p.id=s.owner
+                        WHERE s.id=? AND s.created>?""", (key,time.time()-86400)).fetchone()
+                    if asset:
+                        photo, video = asset
+                        data, mime = (video, "video/mp4") if video else (photo, "image/jpeg")
+                        start_response("200 OK", [("Content-Type",mime),("Content-Length", str(len(data))),
+                                                   ("Cache-Control","no-store"),("X-Content-Type-Options","nosniff")])
+                        return [data]
+                return send("404 Not Found", {"error": "unknown story"})
             elif (path, method) == ("/activity", "GET"):
                 return send("200 OK", activity(db, owner))
             elif (path, method) == ("/messages", "GET"):
@@ -1105,6 +1247,7 @@ def application(env, start_response):
                                               (message_id,)).fetchone()
                         if not same_message or previous != attachment:
                             return send("409 Conflict", {"error": "message ID is taken"})
+                deliver_inbox(db, owner)
                 return send("200 OK", thread(db, owner, peer))
             elif post_action:
                 try:
