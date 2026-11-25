@@ -442,6 +442,9 @@ def public_ride_rows(items):
 
 
 MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024
+MAX_ATTACHMENT_BASE64 = 4 * ((MAX_ATTACHMENT_BYTES + 2) // 3)
+# JSON encoders can escape every slash in base64. The parsed data has its own limit.
+MAX_MESSAGE_JSON = 2 * MAX_ATTACHMENT_BASE64 + 8192
 
 
 def message_attachment(item):
@@ -454,7 +457,7 @@ def message_attachment(item):
         raise ValueError("invalid filename")
     if not isinstance(mime, str) or not re.fullmatch(r"[a-z0-9.+-]{1,64}/[a-z0-9.+-]{1,64}", mime):
         raise ValueError("invalid content type")
-    if not isinstance(encoded, str) or len(encoded) > 4 * ((MAX_ATTACHMENT_BYTES + 2) // 3):
+    if not isinstance(encoded, str) or len(encoded) > MAX_ATTACHMENT_BASE64:
         raise ValueError("invalid attachment size")
     data = base64.b64decode(encoded, validate=True)
     if not 1 <= len(data) <= MAX_ATTACHMENT_BYTES:
@@ -948,7 +951,7 @@ def application(env, start_response):
                 if method == "PUT":
                     try:
                         message_id = identifier(message_id)
-                        raw = read_json(env, 4 * ((MAX_ATTACHMENT_BYTES + 2) // 3) + 8192)
+                        raw = read_json(env, MAX_MESSAGE_JSON)
                         if not isinstance(raw, dict) or not isinstance(raw.get("text"), str):
                             raise ValueError("invalid message")
                         body = raw["text"].strip()

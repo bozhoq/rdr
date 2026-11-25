@@ -1,3 +1,4 @@
+import base64
 import io
 import json
 import os
@@ -24,7 +25,7 @@ class CommunityTests(unittest.TestCase):
         self.ride = dict(id=str(UUID(int=1)), startedAt=self.now - 1000, seconds=900, jumps=2, scoringJumps=2, height=5.2, airtime=3.1)
 
     def call(self, method, path, token, data=None, expect=200, raw=False):
-        payload = json.dumps(data).encode() if data is not None else b""
+        payload = json.dumps(data).replace("/", r"\/").encode() if data is not None else b""
         env = dict(REQUEST_METHOD=method, PATH_INFO=path, CONTENT_LENGTH=str(len(payload)))
         env["wsgi.input"] = io.BytesIO(payload)
         env["HTTP_AUTHORIZATION"] = "Bearer " + token
@@ -274,6 +275,11 @@ class CommunityTests(unittest.TestCase):
         self.call("GET", incoming + "/attachment", "f" * 72, expect=404)
         self.call("GET", incoming + "/attachment", self.me, expect=404)
         self.call("PUT", outgoing, self.me, {"text": "", "attachment": dict(file, filename="../secret.txt")}, expect=400)
+        binary = b"\xff" * service.MAX_ATTACHMENT_BYTES
+        large_file = dict(file, data=base64.b64encode(binary).decode("ascii"))
+        second = "/messages/" + peer + "/" + str(UUID(int=106))
+        received = self.call("PUT", second, self.me, {"text": "", "attachment": large_file})
+        self.assertEqual(received[-1]["attachment"]["size"], len(binary))
 
 
 if __name__ == "__main__":
