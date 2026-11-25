@@ -695,44 +695,82 @@ struct RDRWordmark: View {
     }
 }
 
-private struct StopRecordingSlider: View {
-    let onStop: () -> Void
-    let accessibleStop: () -> Void
-    @GestureState private var dragOffset: CGFloat = 0
-
-    var body: some View {
-        GeometryReader { proxy in
-            let travel = max(1, proxy.size.width - 66)
-            ZStack(alignment: .leading) {
-                Capsule().fill(.black.opacity(0.18))
-                Capsule().strokeBorder(.white.opacity(0.35))
-                Text("Сдвинь для завершения")
-                    .font(.subheadline.weight(.semibold))
-                    .frame(maxWidth: .infinity)
-                    .padding(.leading, 48).padding(.trailing, 12)
-                    .opacity(Double(max(0.12, 1 - dragOffset / travel)))
-                Circle()
-                    .fill(RiderTheme.foam)
-                    .frame(width: 50, height: 50)
-                    .overlay {
-                        Image(systemName: "chevron.right").font(.headline).foregroundStyle(RiderTheme.action)
-                    }
-                    .contentShape(Circle())
-                    .offset(x: min(travel, max(0, dragOffset)))
-                    .gesture(DragGesture(minimumDistance: 8)
-                        .updating($dragOffset) { value, state, _ in state = max(0, value.translation.width) }
-                        .onEnded { value in if value.translation.width >= travel * 0.92 { onStop() } })
-                    .padding(.leading, 8)
-            }
-        }
-        .frame(height: 66)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Завершить запись")
-        .accessibilityAddTraits(.isButton)
-        .accessibilityAction { accessibleStop() }
-    }
-}
-
+private struct StopRecordingSlider: View {
+
+    let onStop: () -> Void
+
+    let accessibleStop: () -> Void
+
+    @GestureState private var dragOffset: CGFloat = 0
+
+
+
+    var body: some View {
+
+        GeometryReader { proxy in
+
+            let travel = max(1, proxy.size.width - 66)
+
+            ZStack(alignment: .leading) {
+
+                Capsule().fill(.black.opacity(0.18))
+
+                Capsule().strokeBorder(.white.opacity(0.35))
+
+                Text("Сдвинь для завершения")
+
+                    .font(.subheadline.weight(.semibold))
+
+                    .frame(maxWidth: .infinity)
+
+                    .padding(.leading, 48).padding(.trailing, 12)
+
+                    .opacity(Double(max(0.12, 1 - dragOffset / travel)))
+
+                Circle()
+
+                    .fill(RiderTheme.foam)
+
+                    .frame(width: 50, height: 50)
+
+                    .overlay {
+
+                        Image(systemName: "chevron.right").font(.headline).foregroundStyle(RiderTheme.action)
+
+                    }
+
+                    .contentShape(Circle())
+
+                    .offset(x: min(travel, max(0, dragOffset)))
+
+                    .gesture(DragGesture(minimumDistance: 8)
+
+                        .updating($dragOffset) { value, state, _ in state = max(0, value.translation.width) }
+
+                        .onEnded { value in if value.translation.width >= travel * 0.92 { onStop() } })
+
+                    .padding(.leading, 8)
+
+            }
+
+        }
+
+        .frame(height: 66)
+
+        .accessibilityElement(children: .ignore)
+
+        .accessibilityLabel("Завершить запись")
+
+        .accessibilityAddTraits(.isButton)
+
+        .accessibilityAction { accessibleStop() }
+
+    }
+
+}
+
+
+
 private struct PersonalStatsView: View {
 
     @ObservedObject var recorder: SessionRecorder
@@ -837,17 +875,7 @@ private struct PersonalStatsView: View {
 
                             } label: {
 
-                                VStack(alignment: .leading, spacing: 10) {
-
-                                    if let title = session.review?.title, !title.isEmpty {
-
-                                        Text(title).font(.headline).lineLimit(2)
-
-                                    }
-
-                                    Text(session.startedAt, format: .dateTime.day().month(.wide).hour().minute())
-
-                                        .font(.headline)
+                                RiderRideCard(date: session.startedAt, title: session.review?.title) {
 
                                     if session.status == .interrupted {
 
@@ -876,14 +904,6 @@ private struct PersonalStatsView: View {
                                     }.font(.subheadline.weight(.semibold)).foregroundStyle(RiderTheme.foam)
 
                                 }
-
-                                .foregroundStyle(.white)
-
-                                .padding(17)
-
-                                .frame(maxWidth: .infinity, alignment: .leading)
-
-                                .background(RiderTheme.lagoon, in: RoundedRectangle(cornerRadius: 18))
 
                             }
 

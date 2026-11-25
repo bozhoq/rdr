@@ -64,6 +64,32 @@ struct RiderActivity: Decodable {
     }
 }
 
+struct RiderChatAttachment: Decodable {
+    let filename: String
+    let contentType: String
+    let size: Int
+
+    var showsPhoto: Bool { ["image/jpeg", "image/png", "image/heic", "image/heif"].contains(contentType) }
+}
+
+struct RiderChatUpload: Encodable {
+    static let maxBytes = 5 * 1024 * 1024
+    let filename: String
+    let contentType: String
+    let data: Data
+
+    init(filename: String, contentType: String, data: Data) throws {
+        guard !data.isEmpty, data.count <= Self.maxBytes else { throw CocoaError(.fileReadTooLarge) }
+        let safeName = String(filename.map { character in
+            character == "/" || character == "\\" || character == ":" || character.isNewline ? "_" : character
+        })
+        let title = String(safeName.trimmingCharacters(in: .whitespacesAndNewlines).prefix(120))
+        self.filename = title.isEmpty || title == "." || title == ".." ? "Вложение" : title
+        self.contentType = contentType
+        self.data = data
+    }
+}
+
 struct RiderMessage: Decodable, Identifiable {
     let id: UUID
     let mine: Bool
@@ -71,6 +97,7 @@ struct RiderMessage: Decodable, Identifiable {
     let createdAt: TimeInterval
     let postID: UUID?
     let sharedPost: RiderFeedEntry?
+    let attachment: RiderChatAttachment?
 }
 
 struct RiderPost: Codable, Identifiable {
@@ -97,6 +124,17 @@ struct RiderPost: Codable, Identifiable {
     }
 }
 
+struct RiderCommentSummary: Decodable {
+    struct Preview: Decodable {
+        let text: String
+        let author: String
+        let username: String?
+    }
+
+    let total: Int
+    let preview: Preview?
+}
+
 struct RiderFeedEntry: Decodable, Identifiable {
     let post: RiderPost
     let author: String
@@ -107,6 +145,7 @@ struct RiderFeedEntry: Decodable, Identifiable {
     let mine: Bool?
     let reposted: Bool?
     let reaction: RiderReaction?
+    let commentSummary: RiderCommentSummary?
     var id: UUID { post.id }
 }
 
@@ -158,6 +197,7 @@ final class RiderSocialStore: ObservableObject {
     @Published private(set) var posts: [RiderPost] = []
     @Published private(set) var reposts: [RiderFeedEntry] = []
     @Published var reactions: [UUID: RiderReaction] = [:]
+    @Published var commentSummaries: [UUID: RiderCommentSummary] = [:]
     @Published var follows: [String: Bool] = [:]
     @Published var reposted: [UUID: Bool] = [:]
     @Published var statisticsRefresh = 0
@@ -397,6 +437,7 @@ struct RiderPostHeader: View {
 }
 
 private struct RiderCommentsView: View {
+    @EnvironmentObject private var social: RiderSocialStore
     let postID: UUID
     @State private var comments: [RiderComment]?
     @State private var loading = false
@@ -523,8 +564,12 @@ private struct RiderCommentsView: View {
         error = nil
         Task {
             defer { sending = false }
-            do { comments = try await action() }
-            catch RiderCommunity.Rejection.forbidden {
+            do {
+                comments = try await action()
+                if let result = try? await RiderCommunity.postDetails(postID) {
+                    social.commentSummaries[postID] = result.commentSummary
+                }
+            } catch RiderCommunity.Rejection.forbidden {
                 error = "Опубликуй профиль во вкладке «Райдер», чтобы комментировать."
             } catch {
                 self.error = "Не удалось сохранить изменение. Попробуй ещё раз."
@@ -606,7 +651,7 @@ struct RiderPostComposer: View {
         loading = false
     }
 
-    private static func postJPEG(_ data: Data) -> Data? {
+    fileprivate static func postJPEG(_ data: Data) -> Data? {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil),
               let thumb = CGImageSourceCreateThumbnailAtIndex(source, 0, [
                 kCGImageSourceCreateThumbnailFromImageAlways: true,
@@ -759,6 +804,10 @@ struct RiderFeedCard: View {
         return RiderReaction(total: mine ? 1 : 0, mine: mine, people: mine ? [user] : [])
     }
 
+    private var commentSummary: RiderCommentSummary? {
+        social.commentSummaries[post.contentID] ?? entry?.commentSummary
+    }
+
     private var following: Bool {
         entry?.authorID.flatMap { social.follows[$0] } ?? entry?.following ?? false
     }
@@ -811,6 +860,10 @@ struct RiderFeedCard: View {
             if let location = post.location {
                 Label(location.name, systemImage: "mappin").font(.caption).foregroundStyle(.secondary)
             }
+            if onComments == nil, let preview = commentSummary?.preview {
+                (Text(riderHandle(preview.username, or: preview.author)).fontWeight(.semibold) + Text(" ") + Text(preview.text))
+                    .font(.caption).lineLimit(2)
+            }
             RiderPostDate(date: post.date)
             if let error { Text(error).font(.footnote).foregroundStyle(.secondary) }
         }
@@ -828,10 +881,11 @@ struct RiderFeedCard: View {
 
     @MainActor private func loadInitialReaction() async {
         let id = post.contentID
-        guard editable, post.publicURL != nil, social.reactions[id] == nil else { return }
-        guard let response = try? await RiderCommunity.postDetails(id),
-              !Task.isCancelled, !changingReaction, social.reactions[id] == nil else { return }
-        social.reactions[id] = response.reaction
+        guard editable, post.publicURL != nil,
+              social.reactions[id] == nil || social.commentSummaries[id] == nil else { return }
+        guard let response = try? await RiderCommunity.postDetails(id), !Task.isCancelled else { return }
+        if !changingReaction && social.reactions[id] == nil { social.reactions[id] = response.reaction }
+        if social.commentSummaries[id] == nil { social.commentSummaries[id] = response.commentSummary }
     }
 
     private var header: some View {
@@ -882,6 +936,7 @@ struct RiderFeedCard: View {
             }
             .buttonStyle(.borderless)
             .accessibilityLabel("Комментарии")
+            .accessibilityValue((commentSummary?.total ?? 0).formatted())
             Button { sharing = true } label: {
                 Image(systemName: "paperplane").font(.title3).frame(width: 44, height: 44)
             }
@@ -892,7 +947,15 @@ struct RiderFeedCard: View {
     }
 
     private var commentIcon: some View {
-        Image(systemName: "bubble").font(.title3).frame(width: 44, height: 44)
+        HStack(spacing: 4) {
+            Image(systemName: "bubble").font(.title3)
+            if let total = commentSummary?.total, total > 0 {
+                Text(total.formatted()).font(.caption.weight(.semibold)).monospacedDigit()
+            }
+        }
+        .padding(.horizontal, 5)
+        .frame(minWidth: 44, minHeight: 44)
+        .contentShape(Rectangle())
     }
 
     private var reactionSummary: some View {
@@ -1324,6 +1387,12 @@ struct RiderThreadView: View {
     @State private var draft = ""
     @State private var draftID = UUID()
     @State private var sending = false
+    @FocusState private var composingText: Bool
+    @State private var pickingPhoto = false
+    @State private var pickingFile = false
+    @State private var photo: PhotosPickerItem?
+    @State private var attachment: RiderChatUpload?
+    @State private var preparingAttachment = false
     @State private var error: String?
 
     private var text: String { draft.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -1338,6 +1407,9 @@ struct RiderThreadView: View {
                 }
                 .padding(14)
             }
+            .contentShape(Rectangle())
+            .simultaneousGesture(TapGesture().onEnded { composingText = false })
+            .scrollDismissesKeyboard(.interactively)
             .defaultScrollAnchor(.bottom)
             .onChange(of: messages.last?.id) { _, id in
                 if let id { scroll.scrollTo(id, anchor: .bottom) }
@@ -1345,6 +1417,9 @@ struct RiderThreadView: View {
             .refreshable { await load() }
         }
         .safeAreaInset(edge: .bottom) { composer }
+        .photosPicker(isPresented: $pickingPhoto, selection: $photo, matching: .images)
+        .task(id: photo) { await attachPhoto() }
+        .fileImporter(isPresented: $pickingFile, allowedContentTypes: [.item], onCompletion: attachFile)
         .background(RiderTheme.canvas)
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
@@ -1371,9 +1446,30 @@ struct RiderThreadView: View {
     private var composer: some View {
         VStack(alignment: .leading, spacing: 7) {
             if let error { Text(error).font(.footnote).foregroundStyle(.secondary) }
+            if let attachment {
+                HStack {
+                    Label(attachment.filename, systemImage: "paperclip").font(.caption).lineLimit(1)
+                    Spacer()
+                    Button {
+                        self.attachment = nil
+                        draftID = UUID()
+                    } label: { Image(systemName: "xmark.circle") }
+                    .accessibilityLabel("Убрать вложение")
+                    .disabled(sending)
+                }
+            }
             HStack(alignment: .bottom) {
+                Menu {
+                    Button { composingText = false; pickingPhoto = true } label: { Label("Фото", systemImage: "photo") }
+                    Button { composingText = false; pickingFile = true } label: { Label("Файл", systemImage: "doc") }
+                } label: {
+                    Image(systemName: "paperclip").font(.title3).frame(width: 35, height: 34)
+                }
+                .accessibilityLabel("Добавить вложение")
+                .disabled(sending || preparingAttachment)
                 TextField("Сообщение", text: $draft, axis: .vertical)
                     .textFieldStyle(.roundedBorder).lineLimit(1...4)
+                    .focused($composingText)
                     .onChange(of: draft) { _, value in
                         if !sending { draftID = UUID() }
                         if value.count > 1000 { draft = String(value.prefix(1000)) }
@@ -1382,7 +1478,7 @@ struct RiderThreadView: View {
                 Button(action: send) { Image(systemName: "arrow.up").font(.body.bold()).frame(minHeight: 27) }
                     .buttonStyle(.borderedProminent)
                     .accessibilityLabel("Отправить")
-                    .disabled(sending || text.isEmpty)
+                    .disabled(sending || preparingAttachment || (text.isEmpty && attachment == nil))
             }
         }
         .padding(12)
@@ -1398,6 +1494,9 @@ struct RiderThreadView: View {
             } else if let post = message.postID {
                 Label("Публикация недоступна", systemImage: "photo").font(.subheadline)
                     .accessibilityIdentifier(post.uuidString)
+            }
+            if let attachment = message.attachment {
+                RiderChatAttachmentView(attachment: attachment, message: message.id, peer: peer.id)
             }
             if !message.text.isEmpty { Text(message.text).textSelection(.enabled) }
             RiderPostDate(date: Date(timeIntervalSince1970: message.createdAt))
@@ -1420,22 +1519,140 @@ struct RiderThreadView: View {
 
     private func send() {
         let body = text
-        guard !sending, !body.isEmpty else { return }
+        let upload = attachment
+        guard !sending, !preparingAttachment, !body.isEmpty || upload != nil else { return }
+        composingText = false
         sending = true
         error = nil
         Task {
             defer { sending = false }
             do {
-                messages = try await RiderCommunity.sendMessage(to: peer.id, id: draftID, text: body, post: nil)
+                messages = try await RiderCommunity.sendMessage(to: peer.id, id: draftID, text: body,
+                                                                  post: nil, attachment: upload)
                 messageRevision += 1
                 draftID = UUID()
                 draft = ""
+                attachment = nil
+                composingText = false
             } catch RiderCommunity.Rejection.forbidden {
                 error = "Сначала опубликуй профиль во вкладке «Райдер»."
             } catch {
                 self.error = "Не удалось отправить сообщение. Попробуй ещё раз."
             }
         }
+    }
+    @MainActor private func attachPhoto() async {
+        guard let photo else { return }
+        preparingAttachment = true
+        defer { preparingAttachment = false; self.photo = nil }
+        do {
+            guard let source = try await photo.loadTransferable(type: Data.self),
+                  let bytes = RiderPostComposer.postJPEG(source) else { throw CocoaError(.fileReadCorruptFile) }
+            guard !Task.isCancelled else { return }
+            attachment = try RiderChatUpload(filename: "Фото Rider.jpg", contentType: "image/jpeg", data: bytes)
+            draftID = UUID()
+            error = nil
+        } catch {
+            if !Task.isCancelled { self.error = "Не удалось подготовить фото." }
+        }
+    }
+
+    private func attachFile(_ result: Result<URL, Error>) {
+        do {
+            let url = try result.get()
+            let accessing = url.startAccessingSecurityScopedResource()
+            defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+            let values = try url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey, .contentTypeKey])
+            guard values.isRegularFile == true else { throw CocoaError(.fileReadUnsupportedScheme) }
+            guard (values.fileSize ?? 0) <= RiderChatUpload.maxBytes else { throw CocoaError(.fileReadTooLarge) }
+            let file = try FileHandle(forReadingFrom: url)
+            defer { try? file.close() }
+            let data = try file.read(upToCount: RiderChatUpload.maxBytes + 1) ?? Data()
+            attachment = try RiderChatUpload(filename: url.lastPathComponent,
+                                             contentType: values.contentType?.preferredMIMEType ?? "application/octet-stream",
+                                             data: data)
+            draftID = UUID()
+            error = nil
+        } catch {
+            self.error = "Не удалось добавить файл. Выбери файл до 5 МБ."
+        }
+    }
+}
+
+private struct RiderChatAttachmentView: View {
+    let attachment: RiderChatAttachment
+    let message: UUID
+    let peer: String
+    @State private var shareFile: RiderChatFile?
+    @State private var preview: UIImage?
+    @State private var loading = false
+    @State private var failed = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            if let preview {
+                Image(uiImage: preview).resizable().scaledToFit()
+                    .frame(maxWidth: 250, maxHeight: 260)
+                    .clipShape(RoundedRectangle(cornerRadius: 9))
+                    .accessibilityLabel("Фото во вложении")
+            }
+            if let shareFile {
+                ShareLink(item: shareFile) { label("square.and.arrow.up") }
+            } else {
+                Button { Task { await prepare() } } label: { label("arrow.down.circle") }
+                    .disabled(loading).buttonStyle(.plain)
+            }
+            if failed { Text("Не удалось загрузить вложение.").font(.caption2).foregroundStyle(.secondary) }
+        }
+        .task(id: message) { if attachment.showsPhoto { await prepare() } }
+    }
+
+    private func label(_ icon: String) -> some View {
+        Label {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(attachment.filename).font(.subheadline.weight(.semibold)).lineLimit(2)
+                Text(ByteCountFormatter.string(fromByteCount: Int64(attachment.size), countStyle: .file))
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+        } icon: {
+            if loading { ProgressView().controlSize(.small) }
+            else { Image(systemName: icon).foregroundStyle(RiderTheme.accent) }
+        }
+    }
+
+    @MainActor private func prepare() async {
+        guard !loading, shareFile == nil else { return }
+        loading = true
+        defer { loading = false }
+        do {
+            let data = try await RiderCommunity.attachment(for: message, with: peer)
+            guard !Task.isCancelled else { return }
+            guard data.count == attachment.size, data.count <= RiderChatUpload.maxBytes else {
+                throw CocoaError(.fileReadCorruptFile)
+            }
+            let name = attachment.filename
+            guard !name.isEmpty, name != ".", name != "..", !name.contains("/"), !name.contains("\\"),
+                  !name.contains(":") else { throw CocoaError(.fileReadInvalidFileName) }
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent("rider-chat", isDirectory: true)
+                .appendingPathComponent(message.uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let url = directory.appendingPathComponent(name)
+            try data.write(to: url, options: [.atomic, .completeFileProtection])
+            if attachment.showsPhoto,
+               let thumbnail = RiderPostComposer.postJPEG(data) { preview = UIImage(data: thumbnail) }
+            shareFile = RiderChatFile(url: url)
+            failed = false
+        } catch {
+            if !Task.isCancelled { failed = true }
+        }
+    }
+}
+
+private struct RiderChatFile: Transferable {
+    let url: URL
+
+    static var transferRepresentation: some TransferRepresentation {
+        FileRepresentation(exportedContentType: .data) { SentTransferredFile($0.url) }
     }
 }
 
@@ -1597,6 +1814,7 @@ struct RiderTopsView: View {
         HStack(spacing: 12) {
             Text(String(place)).monospacedDigit().foregroundStyle(RiderTheme.accent)
                 .accessibilityLabel("Место \(place)")
+            RiderAvatar(photo: entry.avatar ?? Data(), size: 32).accessibilityHidden(true)
             riderName(entry)
             Spacer(minLength: 4)
             scoreValue(entry).font(.headline)

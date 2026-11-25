@@ -40,6 +40,33 @@ struct RiderTotals: Codable, Equatable {
     }
 }
 
+struct RiderPublicRide: Codable, Equatable, Identifiable {
+    let id: UUID
+    let startedAt: TimeInterval
+    let seconds: Double
+    let jumps: Int
+    let height: Double?
+    let airtime: Double?
+    let distance: Double?
+
+    var date: Date { Date(timeIntervalSince1970: startedAt) }
+
+    static func summaries(in history: [SessionSummary]) -> [Self] {
+        var seen = Set<UUID>()
+        return history.sorted { $0.startedAt > $1.startedAt }
+            .filter {
+                $0.status == .finished && RiderTotals.isRide($0) && seen.insert($0.id).inserted
+            }.prefix(300).map { session in
+                let jumps = RiderTotals.measuredJumps(in: session)
+                return Self(id: session.id, startedAt: session.startedAt.timeIntervalSince1970,
+                            seconds: min(86400, max(1, session.durationSeconds)), jumps: min(10000, jumps.count),
+                            height: jumps.compactMap(\.heightMeters).filter { (0...100).contains($0) }.max(),
+                            airtime: jumps.compactMap(\.reportedAirtime).filter { (0...120).contains($0) }.max(),
+                            distance: jumps.compactMap(\.distanceMeters).filter { (0...100000).contains($0) }.max())
+            }
+    }
+}
+
 enum RiderRank: String, CaseIterable, Identifiable {
     case e = "E", d = "D", c = "C", b = "B", a = "A", s = "S"
 
