@@ -311,7 +311,7 @@ struct RiderProfileView: View {
                             .badge(rank.threshold.formatted() + " ПТС")
                         }
                     } footer: {
-                        Text("1 ПТС за минуту завершённой каталки и 5 ПТС за засчитанный прыжок от 0,5 м. За одну сессию учитываются до 8 часов и 100 прыжков. Новый сезон начинается 1 января по Москве.")
+                        Text("1 ПТС за минуту завершённой каталки и 5 ПТС за засчитанный прыжок от 2 м. За одну сессию учитываются до 8 часов и 100 прыжков. После S очки продолжают накапливаться. Новый сезон начинается 1 января по Москве.")
                     }
                     Section("Ачивки сезона · \(progress.achievementPoints.formatted()) ПТС") {
                         ForEach(progress.achievements) { award in
@@ -634,9 +634,14 @@ struct RiderRankCard: View {
                     Text("Высший ранг").font(.caption.bold()).foregroundStyle(color)
                 }
             }
-            ProgressView(value: progress.fraction)
-                .tint(color)
-                .accessibilityLabel("Прогресс ранга")
+            if progress.rank == .s {
+                Label("ПТС копятся до конца сезона", systemImage: "infinity")
+                    .font(.caption.weight(.semibold)).foregroundStyle(color)
+            } else {
+                ProgressView(value: progress.fraction)
+                    .tint(color)
+                    .accessibilityLabel("Прогресс ранга")
+            }
         }
         .padding(14)
         .background {

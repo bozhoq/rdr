@@ -1372,7 +1372,7 @@ struct RiderTopsView: View {
                     if isLocal {
                         Text(RiderCommunity.endpoint == nil
                              ? "Общий рейтинг появится после подключения сервера Rider."
-                             : "Общий рейтинг недоступен. Показаны личные рекорды.")
+                             : "Общий рейтинг недоступен. Показан личный результат.")
                             .font(.footnote).foregroundStyle(.secondary)
                     }
                     if entries.isEmpty {
@@ -1412,7 +1412,9 @@ struct RiderTopsView: View {
             }
             Menu {
                 Picker("Показатель", selection: $score) {
-                    ForEach(RiderTopMetric.allCases) { Text($0.title).tag($0) }
+                    ForEach([RiderTopMetric.rank, .height, .airtime, .distance]) { metric in
+                        Text(metric.title).tag(metric)
+                    }
                 }
             } label: { filterLabel(score.title) }
                 .accessibilityLabel("Показатель, \(score.title)")

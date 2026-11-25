@@ -63,11 +63,14 @@ enum RiderRank: String, CaseIterable, Identifiable {
 }
 
 struct RiderSeasonProgress {
+    static let minimumScoringHeight = 2.0
+
     struct Ride: Encodable, Equatable, Identifiable {
         let id: UUID
         let startedAt: TimeInterval
         let seconds: Int
         let jumps: Int
+        let scoringJumps: Int
         let height: Double?
         let airtime: Double?
     }
@@ -85,7 +88,10 @@ struct RiderSeasonProgress {
                                     followers: followers)
     }
     var achievementPoints: Int { achievements.filter(\.unlocked).reduce(0) { $0 + $1.seasonBonus } }
-    var points: Int { seconds / 60 + jumps * 5 + achievementPoints }
+    var points: Int {
+        let qualifying = rides.reduce(0) { $0 + $1.scoringJumps }
+        return seconds / 60 + qualifying * 5 + achievementPoints
+    }
     var rank: RiderRank { .forPoints(points) }
     var fraction: Double {
         guard let next = rank.next else { return 1 }
@@ -108,7 +114,9 @@ struct RiderSeasonProgress {
             }
             return Ride(id: session.id, startedAt: session.startedAt.timeIntervalSince1970,
                         seconds: Int(min(session.durationSeconds, 28_800)),
-                        jumps: min(measured.count, 100), height: measured.compactMap(\.heightMeters).max(),
+                        jumps: min(measured.count, 100),
+                        scoringJumps: min(measured.filter { ($0.heightMeters ?? 0) >= Self.minimumScoringHeight }.count, 100),
+                        height: measured.compactMap(\.heightMeters).max(),
                         airtime: measured.compactMap(\.reportedAirtime).filter { (0.01...120).contains($0) }.max())
         }.sorted { $0.id.uuidString < $1.id.uuidString }
     }
@@ -154,7 +162,7 @@ enum RiderTopMetric: String, CaseIterable, Identifiable {
         case .height: return "Высота (м)"
         case .airtime: return "Время полёта (с)"
         case .distance: return "Дистанция в полёте (м)"
-        case .rank: return "Ранг · ПТС"
+        case .rank: return "Ранг"
         }
     }
     var unit: String {
