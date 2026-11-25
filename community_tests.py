@@ -189,9 +189,65 @@ class CommunityTests(unittest.TestCase):
         sent = self.call("PUT", "/messages/" + rider["id"] + "/" + message, self.audience,
                          {"text": "Look", "postID": post})
         self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0]["sharedPost"]["post"]["caption"], "Каталка")
+        self.assertEqual(sent[0]["sharedPost"]["authorID"], rider["id"])
         self.assertEqual(len(self.call("GET", "/messages", self.me)), 1)
         self.call("DELETE", path, self.me)
         self.assertEqual(self.call("GET", "/feed/my-reposts", self.audience), [])
+
+
+    def test_profile_visibility_hides_data_without_deleting_relationships(self):
+        viewer = self.call("PUT", "/me", self.audience, dict(
+            name="Wave", username="viewer", totals=self.totals, avatar="/9j/2Q=="))["mine"]
+        record = dict(id=str(UUID(int=100)), startedAt=self.now - 60, height=5.2, airtime=3.1, distance=19)
+        rider = self.call("PUT", "/me", self.me, dict(
+            name="Rider", username="rider", totals=self.totals, records=[record]))["mine"]
+        self.call("PUT", "/follow/" + rider["id"], self.audience)
+        self.call("PUT", "/statistics", self.me, dict(generatedAt=self.now, update=dict(year=2026,
+                  rides=[self.ride], totals=self.totals, records=[record], secrets=["height3"])))
+        post = str(UUID(int=101))
+        path = "/posts/" + post
+        self.call("PUT", path, self.me, dict(id=post, caption="Ветер", photo="/9j/2Q=="))
+        comment = "/comments/" + str(UUID(int=102))
+        row = self.call("PUT", path + comment, self.audience, {"text": "Здорово!"})[0]
+        self.assertEqual((row["authorID"], row["username"], row["avatar"]), (viewer["id"], "viewer", "/9j/2Q=="))
+        page = self.call("GET", "/riders/rider", self.audience)
+        self.assertEqual(page["points"], 165)
+        self.assertEqual(page["distance"], 19)
+        self.assertEqual(page["rider"]["profile"]["secrets"], ["height3"])
+        self.assertEqual(page["posts"][0]["post"]["id"], post)
+        self.assertEqual(self.call("GET", "/riders/rider/followers", self.audience)[0]["id"], viewer["id"])
+        self.assertEqual(self.call("GET", "/riders/me/following", self.audience)[0]["id"], rider["id"])
+        thread = "/messages/" + rider["id"]
+        self.call("PUT", thread + "/" + str(UUID(int=103)), self.audience, {"text": "", "postID": post})
+
+        self.call("PATCH", "/me", self.me, {"statsPublic": False})
+        self.assertEqual(self.call("GET", "/statistics", self.me)["statsPublic"], False)
+        self.stats([], revision=1)
+        page = self.call("GET", "/riders/rider", self.audience)
+        self.assertNotIn("points", page)
+        self.assertNotIn("distance", page)
+        self.assertNotIn("secrets", page["rider"]["profile"])
+        self.assertEqual(page["rider"]["profile"]["totals"], {"seconds": 0, "sessions": 0, "jumps": 0})
+        self.assertEqual(len(page["posts"]), 1)
+        self.assertEqual(self.call("POST", "/tops", self.audience, {"metric": "height"}), [])
+        self.assertEqual(self.ranking(2026), [])
+
+        self.call("PATCH", "/me", self.me, {"publicProfile": False})
+        self.call("PUT", "/me", self.me, dict(name="Renamed", username="rider", totals=self.totals))
+        self.assertFalse(self.call("GET", "/me", self.me)["mine"]["profile"]["publicProfile"])
+        self.call("GET", "/riders/rider", self.audience, expect=404)
+        for suffix in ("details", "comments", "view", "photo"):
+            self.call("GET", path + "/" + suffix, self.audience, expect=404)
+        self.assertEqual(self.call("GET", "/feed/following", self.audience), [])
+        self.assertIsNone(self.call("GET", thread, self.audience)[0]["sharedPost"])
+        self.assertEqual(self.call("GET", "/riders/me/following", self.audience), [])
+        self.call("PATCH", "/me", self.me, {"publicProfile": True, "statsPublic": True})
+        page = self.call("GET", "/riders/rider", self.audience)
+        self.assertEqual(page["rider"]["profile"]["name"], "Renamed")
+        self.assertTrue(page["rider"]["following"])
+        self.assertEqual(page["points"], 165)
+        self.assertEqual(self.call("GET", thread, self.audience)[0]["sharedPost"]["post"]["caption"], "Ветер")
 
 
 if __name__ == "__main__":
