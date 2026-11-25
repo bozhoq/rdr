@@ -6,9 +6,6 @@ enum RiderAppearance: String, CaseIterable {
     var title: String {
         switch self { case .lagoon: return "Лагуна"; case .system: return "Как на iPhone"; case .light: return "Светлая"; case .dark: return "Тёмная" }
     }
-    var scheme: ColorScheme? {
-        switch self { case .dark: return .dark; case .light: return .light; default: return nil }
-    }
 }
 struct RiderAppearanceSettings: View {
     @AppStorage("rider.appearance") private var theme = RiderAppearance.lagoon
@@ -39,8 +36,12 @@ struct RiderAppearanceSettings: View {
                     Label("Каталка в Межводном", systemImage: "water.waves").font(.headline)
                     Text("Ветер 8 м/с · 2 часа на воде").font(.body)
                 }.padding(.vertical, 6)
+                .listRowBackground(theme == .lagoon ? RiderTheme.surface : Color(uiColor: .secondarySystemGroupedBackground))
             }
-        }.navigationTitle("Оформление").navigationBarTitleDisplayMode(.inline)
+        }
+        .scrollContentBackground(.hidden)
+        .background(theme == .lagoon ? RiderTheme.canvas : Color(uiColor: .systemGroupedBackground))
+        .navigationTitle("Оформление").navigationBarTitleDisplayMode(.inline)
     }
     private func swatch(_ theme: RiderAppearance) -> Color {
         switch theme { case .lagoon: return .teal; case .system: return .gray; case .light: return .white; case .dark: return .black }

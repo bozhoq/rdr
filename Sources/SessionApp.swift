@@ -22,7 +22,7 @@ struct SessionApp: App {
         WindowGroup {
             Tabs(recorder: recorder)
                 .environment(\.locale, Locale(identifier: "ru_RU"))
-                .preferredColorScheme(theme.scheme)
+                .background(RiderWindowAppearance(theme: theme).frame(width: 0, height: 0))
                 .environment(\.dynamicTypeSize, chosenSize)
                 .onChange(of: scenePhase) { _, phase in recorder.sceneChanged(phase) }
                 .task(id: scenePhase) {
@@ -38,6 +38,35 @@ struct SessionApp: App {
                     if let id = inbox.selected, inbox.outgoing { RiderSOSOutgoing(id: id) }
                     else { RiderSOSInbox(selected: inbox.selected) }
                 }
+        }
+    }
+}
+
+private struct RiderWindowAppearance: UIViewRepresentable {
+    let theme: RiderAppearance
+
+    final class Host: UIView {
+        var style: UIUserInterfaceStyle = .unspecified {
+            didSet { apply() }
+        }
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            apply()
+        }
+
+        private func apply() {
+            guard let window, window.overrideUserInterfaceStyle != style else { return }
+            window.overrideUserInterfaceStyle = style
+        }
+    }
+
+    func makeUIView(context: Context) -> Host { Host() }
+    func updateUIView(_ view: Host, context: Context) {
+        switch theme {
+        case .dark: view.style = .dark
+        case .light: view.style = .light
+        case .system, .lagoon: view.style = .unspecified
         }
     }
 }
@@ -266,7 +295,7 @@ private struct GearPresetsView: View {
     }
 }
 
-private struct GearPresetEditor: View {
+struct GearPresetEditor: View {
     @ObservedObject var recorder: SessionRecorder
     let didSave: () -> Void
     @State private var name = ""
@@ -280,10 +309,18 @@ private struct GearPresetEditor: View {
             TextField("Название комплекта", text: $name)
                 .onChange(of: name) { _, _ in saveFailed = false }
             Button { showingKites = true } label: {
-                LabeledContent("Кайт", value: equipment.kiteTitle.isEmpty ? "Выбрать" : equipment.kiteTitle)
+                LabeledContent {
+                    Text(equipment.kiteTitle.isEmpty ? "Выбрать" : equipment.kiteTitle)
+                } label: {
+                    Label { Text("Кайт") } icon: { EquipmentGlyph(kind: .kite).stroke(lineWidth: 1.5).frame(width: 18, height: 20) }
+                }
             }
             Button { showingBoards = true } label: {
-                LabeledContent("Доска", value: equipment.boardTitle.isEmpty ? "Выбрать" : equipment.boardTitle)
+                LabeledContent {
+                    Text(equipment.boardTitle.isEmpty ? "Выбрать" : equipment.boardTitle)
+                } label: {
+                    Label { Text("Доска") } icon: { EquipmentGlyph(kind: .board).stroke(lineWidth: 1.5).frame(width: 18, height: 20) }
+                }
             }
             Button("Сохранить комплект") {
                 if recorder.saveGearPreset(named: name, equipment: equipment) { didSave() }
@@ -1058,7 +1095,7 @@ struct SessionDetail: View {
     var body: some View {
         List {
             if let highlight = RiderSessionHighlight.best(for: session, history: recorder.history) {
-                RiderSessionFinish(session: session, highlight: highlight, spots: recorder.spots, presets: recorder.gearPresets,
+                RiderSessionFinish(session: session, highlight: highlight, recorder: recorder,
                                    unlocked: RiderMission.firstCompletions(in: recorder.history).contains { $0.id == session.id })
                     .listRowBackground(Color.clear)
                     .listRowInsets(EdgeInsets())
@@ -1178,6 +1215,12 @@ struct SessionDetail: View {
 
         NavigationLink { SessionCardPreview(session: session) } label: {
             Label("Карточка сессии", systemImage: "photo")
+        }
+        if let highlight = RiderSessionHighlight.best(for: session, history: recorder.history) {
+            ShareLink(item: RiderSessionFinish.shareText(session: session, highlight: highlight,
+                       unlocked: RiderMission.firstCompletions(in: recorder.history).contains { $0.id == session.id })) {
+                Label("Поделиться", systemImage: "square.and.arrow.up")
+            }
         }
         ShareLink(item: SessionResultExport(session: session), preview: SharePreview("Результаты Rider")) {
             Label("Экспортировать результат", systemImage: "square.and.arrow.up")
@@ -1351,8 +1394,7 @@ private struct RiderMissionProgress: View {
 private struct RiderSessionFinish: View {
     let session: SessionSummary
     let highlight: RiderSessionHighlight
-    let spots: [RiderSpot]
-    let presets: [GearPreset]
+    @ObservedObject var recorder: SessionRecorder
     let unlocked: Bool
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -1370,7 +1412,8 @@ private struct RiderSessionFinish: View {
         return mission
     }
 
-    private var shareText: String {
+    static func shareText(session: SessionSummary, highlight: RiderSessionHighlight, unlocked: Bool) -> String {
+        let success = session.mission.flatMap { $0.completed(RiderMission.Metrics(session)) ? $0 : nil }
         let parts = [highlight.title, highlight.detail,
                      success.map { unlocked ? "\($0.rule.title) · +\($0.rule.points) ПТС" : $0.rule.title }]
         return parts.compactMap { $0 }.joined(separator: " · ") + " · Rider"
@@ -1383,10 +1426,10 @@ private struct RiderSessionFinish: View {
                 failedMission(mission)
                     .padding(.horizontal, 5)
             }
-            ViewThatFits {
-                HStack { actions }
-                VStack(alignment: .leading, spacing: 8) { actions }
+            Button(action: compose) {
+                Label("Создать пост", systemImage: "square.and.pencil").frame(maxWidth: .infinity)
             }
+            .buttonStyle(.borderedProminent)
             .padding(.horizontal, 5)
             if renderFailed { Text("Не удалось подготовить картинку для поста.").font(.footnote).foregroundStyle(.secondary) }
         }
@@ -1394,7 +1437,12 @@ private struct RiderSessionFinish: View {
             withAnimation(reduceMotion ? nil : .spring(response: 0.55, dampingFraction: 0.58)) { revealed = true }
         }
         .sheet(item: $draft) { draft in
-            RiderPostComposer(spots: spots, presets: presets, artwork: draft.image, caption: shareText)
+            let spot = recorder.spots.first { $0.matches(session.setup) }
+            let name = session.setup?.spot ?? ""
+            let location = name.isEmpty ? nil : RiderPostLocation(name: name, latitude: spot?.latitude, longitude: spot?.longitude)
+            RiderPostComposer(recorder: recorder, artwork: draft.image,
+                              caption: Self.shareText(session: session, highlight: highlight, unlocked: unlocked),
+                              sessionEquipment: session.setup.flatMap(RiderPostEquipment.init(setup:)), location: location)
         }
     }
 
@@ -1432,13 +1480,6 @@ private struct RiderSessionFinish: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RiderTheme.lagoon, in: RoundedRectangle(cornerRadius: 20))
         .accessibilityElement(children: .combine)
-    }
-
-    @ViewBuilder private var actions: some View {
-        Button(action: compose) { Label("Создать пост", systemImage: "square.and.pencil") }
-            .buttonStyle(.borderless)
-        ShareLink(item: shareText) { Label("Поделиться", systemImage: "square.and.arrow.up") }
-            .buttonStyle(.borderless)
     }
 
     private func failedMission(_ mission: RiderMission) -> some View {

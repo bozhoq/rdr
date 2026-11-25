@@ -125,7 +125,7 @@ enum RiderCommunity {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.waitsForConnectivity = true
         configuration.timeoutIntervalForRequest = 12
-        configuration.timeoutIntervalForResource = 20
+        configuration.timeoutIntervalForResource = 100
         return URLSession(configuration: configuration, delegate: lanTrust, delegateQueue: nil)
     }()
 
@@ -207,7 +207,23 @@ enum RiderCommunity {
 
     static func publishPost(_ post: RiderPost) async throws {
         let path = "posts/" + post.id.uuidString.lowercased()
-        _ = try await requestData(path, method: "PUT", body: JSONEncoder().encode(post))
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .withoutEscapingSlashes
+        _ = try await requestData(path, method: "PUT", body: encoder.encode(post), timeout: post.isVideo ? 90 : 12)
+    }
+
+    static func video(for post: UUID) async throws -> Data {
+        let data = try await requestData("posts/\(post.uuidString.lowercased())/video", method: "GET", body: nil, timeout: 60)
+        guard data.count <= RiderPost.maxVideoBytes else { throw URLError(.dataLengthExceedsMaximum) }
+        return data
+    }
+
+    static func shakas(for post: UUID, offset: Int) async throws -> RiderReaction {
+        try await decode("posts/\(post.uuidString.lowercased())/shakas/\(offset)")
+    }
+
+    static func likeComment(_ id: UUID, for post: UUID, enabled: Bool) async throws -> [RiderComment] {
+        try await decode(commentPath(post, id) + "/like", method: enabled ? "PUT" : "DELETE")
     }
 
     static func deletePost(_ id: UUID) async throws {
@@ -303,7 +319,7 @@ enum RiderCommunity {
 
     enum Rejection: Error { case conflict, forbidden }
 
-    private static func requestData(_ path: String, method: String, body: Data?) async throws -> Data {
+    private static func requestData(_ path: String, method: String, body: Data?, timeout: TimeInterval = 12) async throws -> Data {
         guard let base = endpoint else { throw URLError(.unsupportedURL) }
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
                                     kSecAttrService as String: "RiderCommunity", kSecAttrAccount as String: base.absoluteString]
@@ -331,7 +347,7 @@ enum RiderCommunity {
                 throw URLError(.userAuthenticationRequired)
             }
         }
-        var req = URLRequest(url: base.appendingPathComponent(path), cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 12)
+        var req = URLRequest(url: base.appendingPathComponent(path), cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: timeout)
         req.httpMethod = method
         req.setValue("Bearer " + token, forHTTPHeaderField: "Authorization")
         if let body {
@@ -356,6 +372,9 @@ struct RiderProfileView: View {
     @AppStorage("rider.profilePhoto") private var photo = Data()
     @State private var picked: PhotosPickerItem?
     @State private var editing = false
+    @State private var publicationSection = RiderPublicationSection.gallery
+    @State private var remotePublications: [RiderFeedEntry] = []
+    @AppStorage("rider.appearance") private var appearance = RiderAppearance.lagoon
     @State private var draftUsername = ""
     @State private var draftName = ""
     @State private var draftBio = ""
@@ -411,7 +430,10 @@ struct RiderProfileView: View {
                     RiderProfileShortcut(title: "Личная статистика", subtitle: "Комплекты, споты и ветер")
                 }
                 .buttonStyle(.plain)
-                RiderProfileRecords(totals: totals)
+                NavigationLink(value: RiderDestination.statistics) {
+                    RiderProfileShortcut(title: "История каталок", subtitle: "Сессии, прыжки и маршруты", icon: "clock.arrow.circlepath")
+                }.buttonStyle(.plain)
+                RiderProfileRecords(totals: totals, distance: RiderPublicRide.summaries(in: recorder.history).compactMap(\.distance).max())
                 RiderProfileSummary(timeOnWater: totals.timeOnWater, unlocked: badges.filter(\.unlocked).count,
                                     total: badges.count) { showingAchievements = true }
                 posts
@@ -431,9 +453,14 @@ struct RiderProfileView: View {
                 }
             }
         }
-        .task { await social.refreshReposts() }
+        .task(id: social.posts.map { "\($0.id)-\($0.published == true)" }) {
+            guard RiderCommunity.endpoint != nil else { return }
+            if let page: RiderPublicPage = try? await RiderCommunity.decode("riders/me"), !Task.isCancelled {
+                remotePublications = page.posts
+            }
+        }
         .sheet(isPresented: $composing) {
-            RiderPostComposer(spots: recorder.spots, presets: recorder.gearPresets)
+            RiderPostComposer(recorder: recorder, section: publicationSection)
         }
         .sheet(isPresented: $showingRanks) {
             NavigationStack {
@@ -571,6 +598,8 @@ struct RiderProfileView: View {
                     Section("Домашний сервер") { lanServerCheck }
                 }
             }
+            .scrollContentBackground(.hidden)
+            .background(appearance == .lagoon ? RiderTheme.canvas : Color(uiColor: .systemGroupedBackground))
             .navigationTitle("Профиль")
             .navigationBarTitleDisplayMode(.inline)
             .task(id: editorPicker) {
@@ -759,45 +788,81 @@ struct RiderProfileView: View {
         return false
     }
 
-    private struct ProfilePublication: Identifiable {
-        let post: RiderPost
-        var repost: RiderFeedEntry?
-        var id: UUID { post.id }
-    }
-
     private var posts: some View {
-        var publications = social.posts.map { ProfilePublication(post: $0) }
-        publications.append(contentsOf: social.reposts.map { ProfilePublication(post: $0.post, repost: $0) })
-        publications.sort { $0.post.createdAt > $1.post.createdAt }
-        return LazyVStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("Посты").font(.title3.bold()).accessibilityAddTraits(.isHeader)
-                Spacer()
-                Button { composing = true } label: {
-                    Label("Добавить пост", systemImage: "plus").font(.subheadline.weight(.semibold))
-                }.buttonStyle(.bordered)
+        VStack(alignment: .leading, spacing: 8) {
+            Button { composing = true } label: {
+                Label("Добавить пост", systemImage: "plus").font(.subheadline.weight(.semibold))
             }
-            if publications.isEmpty {
-                Text("Здесь будут твои фото с каталок.").font(.subheadline).foregroundStyle(.secondary)
-            }
-            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: 3), spacing: 3) {
-                ForEach(publications) { publication in
-                    NavigationLink {
-                        let entry = publication.repost
-                        RiderPostDetail(original: publication.post, author: entry?.author ?? name,
-                                        username: entry == nil ? username : entry?.username,
-                                        avatar: entry == nil ? photo : entry?.avatar,
-                                        editable: entry == nil, entry: entry)
-                    } label: {
-                        RiderPostSquare(post: publication.post)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .buttonStyle(.bordered)
+            .frame(maxWidth: .infinity, alignment: .trailing)
+            RiderProfilePublications(entries: remotePublications, isMine: true, name: name,
+                                     username: username, avatar: photo, selection: $publicationSection)
         }
     }
 
+}
+
+private struct RiderProfilePublications: View {
+    struct Entry: Identifiable {
+        let post: RiderPost
+        let remote: RiderFeedEntry?
+        var id: UUID { post.id }
+
+        static func merged(remote: [RiderFeedEntry], local: [RiderPost]) -> [Self] {
+            var collected: [UUID: Self] = [:]
+            for entry in remote { collected[entry.id] = Self(post: entry.post, remote: entry) }
+            for post in local {
+                collected[post.id] = Self(post: post, remote: collected[post.id]?.remote)
+            }
+            return collected.values.sorted {
+                $0.post.createdAt == $1.post.createdAt ? $0.id.uuidString < $1.id.uuidString : $0.post.createdAt > $1.post.createdAt
+            }
+        }
+    }
+
+    @EnvironmentObject private var social: RiderSocialStore
+    let entries: [RiderFeedEntry]
+    let isMine: Bool
+    let name: String
+    let username: String?
+    let avatar: Data?
+    @Binding var selection: RiderPublicationSection
+
+    var body: some View {
+        let posts = Entry.merged(remote: entries.filter { !social.deletedPosts.contains($0.id) },
+                                 local: isMine ? social.posts : []).filter { $0.post.publicationSection == selection }
+        VStack(alignment: .leading, spacing: 8) {
+            Picker("Публикации", selection: $selection) {
+                ForEach(RiderPublicationSection.allCases) { section in
+                    Image(systemName: section.icon).accessibilityLabel(section.title).tag(section)
+                }
+            }.pickerStyle(.segmented)
+            if posts.isEmpty {
+                Text(selection == .gallery ? "Пока нет фото и видео." : "Пока нет заметок.")
+                    .font(.subheadline).foregroundStyle(.secondary)
+            } else if selection == .gallery {
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: 3), spacing: 3) {
+                    ForEach(posts) { item in
+                        NavigationLink { detail(item) } label: { RiderPostSquare(post: item.post) }
+                            .buttonStyle(.plain)
+                    }
+                }.clipShape(RoundedRectangle(cornerRadius: 10))
+            } else {
+                LazyVStack(spacing: 8) {
+                    ForEach(posts) { item in
+                        RiderFeedCard(post: item.post, author: item.remote?.author ?? name, username: item.remote?.username ?? username,
+                                      avatar: item.remote?.avatar ?? avatar, editable: isMine && item.post.sourceID == nil, entry: item.remote)
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func detail(_ item: Entry) -> some View {
+        RiderPostDetail(original: item.post, author: item.remote?.author ?? name, username: item.remote?.username ?? username,
+                        avatar: item.remote?.avatar ?? avatar, editable: isMine && item.post.sourceID == nil, entry: item.remote)
+    }
 }
 
 private struct RiderProfileShortcut: View {
@@ -832,12 +897,17 @@ private struct RiderProfileRecords: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             Text("Рекорды").font(.title3.bold()).accessibilityAddTraits(.isHeader)
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 92), spacing: 5, alignment: .leading)], spacing: 5) {
-                record("Топ прыжок", value: metric(totals.height, unit: "м"), icon: "arrow.up.right")
-                record("Топ завис", value: metric(totals.airtime, unit: "с"), icon: "timer")
-                if let distance { record("Топ дистанция", value: metric(distance, unit: "м"), icon: "arrow.left.and.right") }
-            }
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .top, spacing: 0) { recordItems }
+                VStack(alignment: .leading, spacing: 8) { recordItems }
+            }.padding(.vertical, 8).background(RiderTheme.surface, in: RoundedRectangle(cornerRadius: 14))
         }.frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder private var recordItems: some View {
+        record("Топ прыжок", value: metric(totals.height, unit: "м"), icon: "arrow.up.right")
+        record("Топ завис", value: metric(totals.airtime, unit: "с"), icon: "timer")
+        record("Топ дистанция", value: metric(distance, unit: "м"), icon: "arrow.left.and.right")
     }
 
     private func record(_ title: String, value: String, icon: String) -> some View {
@@ -846,7 +916,8 @@ private struct RiderProfileRecords: View {
             Text(value).font(.headline.monospacedDigit())
             Text(title).font(.footnote.weight(.medium)).foregroundStyle(.secondary)
         }
-        .padding(9).background(RiderTheme.surface, in: RoundedRectangle(cornerRadius: 14))
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 9)
         .accessibilityElement(children: .combine)
     }
 
@@ -1148,6 +1219,8 @@ struct RiderPublicProfileView: View {
     @State private var actionError = false
     @State private var showingAchievements = false
 
+    @State private var publicationSection = RiderPublicationSection.gallery
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 9) {
@@ -1159,7 +1232,9 @@ struct RiderPublicProfileView: View {
                         Label("Статистика закрыта", systemImage: "lock")
                             .font(.subheadline).foregroundStyle(.secondary).lagoonCard()
                     }
-                    publications(page.posts)
+                    RiderProfilePublications(entries: page.posts, isMine: page.mine, name: page.rider.profile.name,
+                                             username: page.rider.profile.username, avatar: page.rider.profile.avatar,
+                                             selection: $publicationSection)
                 } else if unavailable {
                     ContentUnavailableView("Профиль недоступен", systemImage: "person.crop.circle",
                                            description: Text("Профиль закрыт или связь с сервером потеряна."))
@@ -1282,27 +1357,6 @@ struct RiderPublicProfileView: View {
         RiderProfileRecords(totals: totals, distance: page.distance)
         RiderProfileSummary(timeOnWater: totals.timeOnWater, unlocked: awards.filter(\.unlocked).count,
                             total: awards.count) { showingAchievements = true }
-    }
-
-    private func publications(_ posts: [RiderFeedEntry]) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Посты").font(.title3.bold())
-            if posts.isEmpty {
-                Text("Пока нет публикаций").font(.subheadline).foregroundStyle(.secondary)
-            }
-            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: 3), spacing: 3) {
-                ForEach(posts) { entry in
-                    NavigationLink {
-                        RiderPostDetail(original: entry.post, author: entry.author, username: entry.username,
-                                        avatar: entry.avatar, entry: entry)
-                    } label: {
-                        RiderPostSquare(post: entry.post)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel(entry.post.caption.isEmpty ? "Открыть пост" : entry.post.caption)
-                }
-            }.clipShape(RoundedRectangle(cornerRadius: 10))
-        }.frame(maxWidth: .infinity, alignment: .leading)
     }
 
     @MainActor private func load() async {

@@ -206,24 +206,51 @@ struct SpotChoice: View {
     let spots: [RiderSpot]
     var recent: [String] = []
     @State private var manual: String?
+    @State private var search = ""
+    private var query: String { search.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    private var matches: [RiderSpot] {
+        spots.filter { spot in
+            [spot.name, spot.region ?? "", spot.locality ?? ""]
+                .contains { $0.replacingOccurrences(of: "ё", with: "е").localizedCaseInsensitiveContains(query.replacingOccurrences(of: "ё", with: "е")) }
+        }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
 
     var body: some View {
         NavigationStack {
             Form {
-                SpotGroups(spots: spots) { spot in
-                    Button(spot.name) { setup.selectSpot(spot); dismiss() }
+                if query.isEmpty {
+                    SpotGroups(spots: spots) { spot in
+                        Button(spot.name) { setup.selectSpot(spot); dismiss() }
+                    }
+                } else {
+                    Section("Найденные споты") {
+                        ForEach(matches) { spot in
+                            Button { setup.selectSpot(spot); dismiss() } label: {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(spot.name)
+                                    if let region = spot.region { Text(region).font(.caption).foregroundStyle(.secondary) }
+                                }
+                            }
+                        }
+                        if matches.isEmpty { Text("Споты не найдены").foregroundStyle(.secondary) }
+                        Button("Указать «\(query)» вручную") { saveName(query) }
+                    }
                 }
                 let recentNames = recent.filter { candidate in !spots.contains { $0.matchesName(candidate) } }
-                if !recentNames.isEmpty {
+                if query.isEmpty && !recentNames.isEmpty {
                     Section("Недавние") {
                         ForEach(recentNames, id: \.self) { name in Button(name) { saveName(name) } }
                     }
                 }
-                Section {
-                    TextField("Название спота", text: Binding(get: { manual ?? setup.spot }, set: { manual = $0 }))
-                    Button("Указать название") { saveName(manual ?? setup.spot) }
+                if query.isEmpty {
+                    Section {
+                        TextField("Название спота", text: Binding(get: { manual ?? setup.spot }, set: { manual = $0 }))
+                        Button("Указать название") { saveName(manual ?? setup.spot) }
+                    }
                 }
             }
+            .searchable(text: $search, placement: .navigationBarDrawer(displayMode: .always), prompt: "Найти спот")
             .navigationTitle("Выбрать спот")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Отмена") { dismiss() } } }
