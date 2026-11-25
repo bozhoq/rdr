@@ -1,4 +1,5 @@
 import CoreLocation
+import MapKit
 import SwiftUI
 import UIKit
 import UserNotifications
@@ -22,7 +23,14 @@ struct RiderSOSFix: Codable {
 
 final class RiderSOSAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
-        UNUserNotificationCenter.current().delegate = self
+        let center = UNUserNotificationCenter.current()
+        center.delegate = self
+        let actions = [
+            UNNotificationAction(identifier: "RIDER_SOS_ACCEPT", title: "Отозваться", options: [.foreground]),
+            UNNotificationAction(identifier: "RIDER_SOS_SKIP", title: "Пропустить", options: [])
+        ]
+        center.setNotificationCategories([UNNotificationCategory(identifier: "RIDER_SOS", actions: actions,
+                                                                  intentIdentifiers: [])])
         return true
     }
 
@@ -37,26 +45,52 @@ final class RiderSOSAppDelegate: NSObject, UIApplicationDelegate, UNUserNotifica
 
     func userNotificationCenter(_ center: UNUserNotificationCenter,
                                 willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
-        notification.request.content.userInfo["riderSOS"] == nil ? [] : [.banner, .sound]
+        let info = notification.request.content.userInfo
+        return info["riderSOS"] != nil || info["riderSOSReply"] != nil ? [.banner, .sound] : []
     }
 
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
-        guard let id = (response.notification.request.content.userInfo["riderSOS"] as? String).flatMap(UUID.init(uuidString:)) else {
+        let info = response.notification.request.content.userInfo
+        if let id = (info["riderSOSReply"] as? String).flatMap(UUID.init(uuidString:)) {
+            await MainActor.run { RiderSOSService.shared.openReceipt(id) }
             return
         }
-        await MainActor.run { RiderSOSService.shared.open(id) }
+        guard let id = (info["riderSOS"] as? String).flatMap(UUID.init(uuidString:)) else { return }
+        await RiderSOSService.shared.handleNotification(id, action: response.actionIdentifier)
     }
 }
 
 @MainActor final class RiderSOSService: ObservableObject {
     static let shared = RiderSOSService()
 
+    struct Responder: Decodable, Identifiable {
+        let id: String
+        let name: String
+        let decidedAt: TimeInterval
+    }
+
     struct Receipt: Decodable {
         let id: UUID
         let recipients: Int
         let acceptedByAPNs: Int
         let pending: Int
+        let location: RiderSOSFix?
+        let responders: [Responder]?
+        let createdAt: TimeInterval?
+
+        var active: Bool {
+            createdAt.map { Date().timeIntervalSince1970 - $0 < 900 } ?? true
+        }
+
+        var status: String {
+            if !active { return "Время оповещения истекло" }
+            if recipients == 0 { return "Сигнал принят. Нет доступных райдеров поблизости." }
+            if pending > 0 { return "Сигнал принят сервером · адресатов \(recipients)" }
+            return "Apple приняла \(acceptedByAPNs) из \(recipients) уведомлений"
+        }
     }
+
+    enum Decision: String, Codable { case accept, skip }
 
     struct Alert: Decodable, Identifiable {
         let id: UUID
@@ -66,11 +100,13 @@ final class RiderSOSAppDelegate: NSObject, UIApplicationDelegate, UNUserNotifica
         let latitude: Double
         let longitude: Double
         let accuracy: Double
+        let decision: Decision?
     }
 
     struct Inbox: Identifiable {
         let id = UUID()
         let selected: UUID?
+        var outgoing = false
     }
 
     private struct Receiver: Codable {
@@ -78,6 +114,8 @@ final class RiderSOSAppDelegate: NSObject, UIApplicationDelegate, UNUserNotifica
         let location: RiderSOSFix
     }
     private struct ReceiverStatus: Decodable { let enabled: Bool }
+    private struct DecisionBody: Codable { let action: Decision; let name: String }
+    private struct DecisionResult: Decodable { let action: Decision }
     private struct Incident: Encodable {
         let id: UUID
         let name: String
@@ -85,97 +123,98 @@ final class RiderSOSAppDelegate: NSObject, UIApplicationDelegate, UNUserNotifica
         let location: RiderSOSFix
     }
 
-    @Published private(set) var enabled = UserDefaults.standard.bool(forKey: "rider.sos.receive")
+    @Published private(set) var available = false
     @Published private(set) var receiverStatus: String?
     @Published var inbox: Inbox?
+    private(set) var radarVisible = false
     private var token: String?
     private var latestFix: RiderSOSFix?
     private var lastUpdate = Date.distantPast
     private var receiverTask: Task<Void, Never>?
-    private var changingConsent = false
+    private var requestingPermission = false
+    private let registeredKey = "rider.sos.registered"
 
     func open(_ selected: UUID? = nil) {
         inbox = Inbox(selected: selected)
     }
 
-    func refreshAuthorization() async {
-        guard enabled, RiderCommunity.endpoint != nil else { return }
-        let settings = await UNUserNotificationCenter.current().notificationSettings()
-        guard settings.authorizationStatus == .authorized else {
-            await disableReceiving()
-            receiverStatus = "Разреши уведомления Rider в настройках iPhone."
+    func openReceipt(_ id: UUID) {
+        if !radarVisible { inbox = Inbox(selected: id, outgoing: true) }
+    }
+
+    func showRadar(_ visible: Bool) { radarVisible = visible }
+
+    func handleNotification(_ id: UUID, action: String) async {
+        switch action {
+        case "RIDER_SOS_ACCEPT":
+            do {
+                let decision = try await decide(.accept, for: id)
+                if decision == .accept { open(id) }
+            } catch { open(id) }
+        case "RIDER_SOS_SKIP":
+            do { _ = try await decide(.skip, for: id) }
+            catch { receiverStatus = "Не удалось сохранить пропуск. Сигнал остаётся в списке." }
+        case UNNotificationDefaultActionIdentifier: open(id)
+        default: break
+        }
+    }
+
+    func refreshAuthorization(prompt: Bool = false) async {
+        guard RiderCommunity.endpoint != nil, !requestingPermission else { return }
+        requestingPermission = true
+        defer { requestingPermission = false }
+        let center = UNUserNotificationCenter.current()
+        var status = await center.notificationSettings().authorizationStatus
+        if status == .notDetermined && prompt {
+            _ = try? await center.requestAuthorization(options: [.alert, .sound])
+            status = await center.notificationSettings().authorizationStatus
+        }
+        available = status == .authorized || status == .provisional || status == .ephemeral
+        guard available else {
+            receiverStatus = status == .denied ? "Для SOS разреши уведомления Rider в настройках iPhone." : nil
+            token = nil
+            receiverTask?.cancel()
+            await receiverTask?.value
+            if UserDefaults.standard.bool(forKey: registeredKey) {
+                do {
+                    let _: ReceiverStatus = try await RiderCommunity.decode("sos/device", method: "DELETE")
+                    UserDefaults.standard.removeObject(forKey: registeredKey)
+                } catch { /* Try again the next time the app becomes active. */ }
+            }
             return
         }
         UIApplication.shared.registerForRemoteNotifications()
-    }
-
-    func setReceiving(_ enabled: Bool) async {
-        guard !changingConsent else { return }
-        changingConsent = true
-        defer { changingConsent = false }
-        if !enabled {
-            await disableReceiving()
-            return
-        }
-        guard RiderCommunity.endpoint != nil else {
-            receiverStatus = "Приём SOS станет доступен после подключения сервера Rider."
-            return
-        }
-        do {
-            guard try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) else {
-                receiverStatus = "Разреши уведомления Rider в настройках iPhone."
-                return
-            }
-            setEnabled(true)
-            receiverStatus = "Регистрируем уведомления и ждём GPS…"
-            UIApplication.shared.registerForRemoteNotifications()
-        } catch {
-            receiverStatus = "Не удалось включить уведомления."
-        }
-    }
-
-    private func disableReceiving() async {
-        setEnabled(false)
-        token = nil
-        latestFix = nil
-        lastUpdate = .distantPast
-        receiverTask?.cancel()
-        await receiverTask?.value
-        receiverTask = nil
-        guard RiderCommunity.endpoint != nil else { return }
-        do {
-            let _: ReceiverStatus = try await RiderCommunity.decode("sos/receiver", method: "DELETE")
-            receiverStatus = nil
-        } catch {
-            receiverStatus = "Приём выключен здесь. Последняя отметка сервера истечёт через 5 минут."
-        }
-    }
-
-    private func setEnabled(_ state: Bool) {
-        enabled = state
-        UserDefaults.standard.set(state, forKey: "rider.sos.receive")
-    }
-
-    func register(_ token: String) {
-        guard enabled else { return }
-        if self.token != token { lastUpdate = .distantPast }
-        self.token = token
         uploadLocationIfNeeded()
     }
 
+    func register(_ token: String) {
+        guard available else { return }
+        if self.token != token { lastUpdate = .distantPast }
+        self.token = token
+        uploadLocationIfNeeded()
+        Task {
+            do {
+                let body = try JSONEncoder().encode(["token": token])
+                let _: ReceiverStatus = try await RiderCommunity.decode("sos/device", method: "PUT", body: body)
+                if available { UserDefaults.standard.set(true, forKey: registeredKey) }
+            } catch {
+                if available { receiverStatus = "Не удалось зарегистрировать уведомления SOS." }
+            }
+        }
+    }
+
     func registrationFailed() {
-        guard enabled else { return }
+        guard available else { return }
         receiverStatus = "iOS не разрешила push для этой установки Rider."
     }
 
     func observeLocation(_ fix: CLLocation) {
-        guard enabled else { return }
         latestFix = RiderSOSFix(fix)
         uploadLocationIfNeeded()
     }
 
     private func uploadLocationIfNeeded() {
-        guard enabled, RiderCommunity.endpoint != nil, let token, let latestFix,
+        guard available, RiderCommunity.endpoint != nil, let token, let latestFix,
               dateIsFresh(latestFix), Date().timeIntervalSince(lastUpdate) >= 50, receiverTask == nil else { return }
         lastUpdate = Date()
         receiverTask = Task {
@@ -183,9 +222,9 @@ final class RiderSOSAppDelegate: NSObject, UIApplicationDelegate, UNUserNotifica
             do {
                 let body = try JSONEncoder().encode(Receiver(token: token, location: latestFix))
                 let _: ReceiverStatus = try await RiderCommunity.decode("sos/receiver", method: "PUT", body: body)
-                if enabled && !Task.isCancelled { receiverStatus = "Геопозиция обновлена. Принимаешь SOS рядом." }
+                if available && !Task.isCancelled { receiverStatus = "Геопозиция обновлена. Принимаешь SOS рядом." }
             } catch {
-                if enabled && !Task.isCancelled {
+                if available && !Task.isCancelled {
                     receiverStatus = "Не удалось обновить позицию для SOS."
                     lastUpdate = Date().addingTimeInterval(-35)
                 }
@@ -207,41 +246,56 @@ final class RiderSOSAppDelegate: NSObject, UIApplicationDelegate, UNUserNotifica
         try await RiderCommunity.decode("sos/\(id.uuidString.lowercased())/receipt")
     }
 
+    func decide(_ action: Decision, for id: UUID) async throws -> Decision {
+        let name = UserDefaults.standard.string(forKey: "rider.profileName") ?? "Райдер"
+        let payload = DecisionBody(action: action, name: String(name.prefix(50)))
+        let result: DecisionResult = try await RiderCommunity.decode("sos/\(id.uuidString.lowercased())/decision",
+                                                                    method: "PUT", body: JSONEncoder().encode(payload))
+        return result.action
+    }
+
     func alerts() async throws -> [Alert] {
         try await RiderCommunity.decode("sos/inbox")
     }
 }
 
-struct RiderSOSSettings: View {
-    @ObservedObject var service = RiderSOSService.shared
+struct RiderSOSReadiness: View {
+    @ObservedObject private var service = RiderSOSService.shared
     @ObservedObject var recorder: SessionRecorder
+    @Environment(\.openURL) private var openURL
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
-            Toggle("Получать SOS рядом", isOn: Binding(get: { service.enabled }, set: { enabled in
-                Task {
-                    await service.setReceiving(enabled)
-                    if service.enabled {
-                        if let fix = recorder.usableFix { service.observeLocation(fix) }
-                        recorder.locateSpot()
+            Label("SOS рядом", systemImage: "dot.radiowaves.left.and.right").font(.headline)
+            if RiderCommunity.endpoint == nil {
+                Text("Приём появится после подключения сервера Rider.")
+            } else if !service.available {
+                Text(service.receiverStatus ?? "Чтобы получать сигналы от райдеров рядом, разреши уведомления.")
+                Button("Разрешить уведомления") {
+                    Task {
+                        await service.refreshAuthorization(prompt: true)
+                        if !service.available, let url = URL(string: UIApplication.openSettingsURLString) { openURL(url) }
                     }
-                }
-            }))
-            Text(service.receiverStatus ?? "После включения Rider отправляет свежую точку GPS серверу для поиска сигналов в радиусе 1,5 км.")
-                .font(.caption).foregroundStyle(.secondary)
+                }.buttonStyle(.borderless)
+            } else if !recorder.locationAuthorized {
+                Text("Для поиска сигналов в радиусе 1,5 км нужна точная геопозиция.")
+                Button("Разрешить геопозицию") { recorder.locateSpot() }.buttonStyle(.borderless)
+            } else {
+                Text(service.receiverStatus ?? "Приём включён. Rider обновляет позицию для поиска сигналов в радиусе 1,5 км.")
+            }
         }
+        .font(.caption)
     }
 }
 
 struct RiderSOSControl: View {
-    @Environment(\.openURL) private var openURL
     @AppStorage("rider.profileName") private var name = "Райдер"
     @ObservedObject var recorder: SessionRecorder
     let session: SessionSummary
 
     @GestureState private var offset: CGFloat = 0
     @State private var started: Date?
-    @State private var confirming = false
+    @State private var showingRadar = false
     @State private var sending = false
     @State private var feedback: String?
     @State private var receipt: RiderSOSService.Receipt?
@@ -249,8 +303,8 @@ struct RiderSOSControl: View {
 
     private var equipment: String? {
         guard let setup = session.setup else { return nil }
-        let items = [recorder.gearPresets.first { $0.matches(setup) }?.name, setup.kiteTitle, setup.boardTitle]
-            .compactMap { $0 }.filter { !$0.isEmpty }
+        let labels: [String?] = [recorder.gearPresets.first { $0.matches(setup) }?.name, setup.kiteTitle, setup.boardTitle]
+        let items = labels.compactMap { $0 }.filter { !$0.isEmpty }
         return items.isEmpty ? nil : items.joined(separator: " · ")
     }
 
@@ -261,11 +315,11 @@ struct RiderSOSControl: View {
                 ZStack(alignment: .leading) {
                     Capsule().fill(Color(red: 0.63, green: 0.12, blue: 0.15))
                     Capsule().strokeBorder(Color.white.opacity(0.55))
-                    Text(sending ? "Связываемся с сервером…" : "SOS · веди ползунок медленно")
+                    Text(receipt?.active == true ? "SOS активен · открыть радар" : "SOS · веди ползунок медленно")
                         .font(.caption.bold()).frame(maxWidth: .infinity)
                         .padding(.leading, 45).padding(.trailing, 8)
                     Circle().fill(.white).frame(width: 40, height: 40)
-                        .overlay { Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 13, weight: .black)).foregroundStyle(.red) }
+                        .overlay { Image(systemName: "dot.radiowaves.left.and.right").font(.system(size: 14, weight: .bold)).foregroundStyle(.red) }
                         .contentShape(Circle())
                         .offset(x: min(travel, max(0, offset)))
                         .gesture(DragGesture(minimumDistance: 4)
@@ -273,10 +327,11 @@ struct RiderSOSControl: View {
                             .onChanged { value in if started == nil { started = value.time } }
                             .onEnded { value in
                                 defer { started = nil }
-                                guard !sending, value.translation.width >= travel * 0.95 else { return }
+                                guard value.translation.width >= travel * 0.95 else { return }
                                 if let started, value.time.timeIntervalSince(started) >= 2 {
-                                    confirming = true
-                                } else {
+                                    showingRadar = true
+                                    feedback = nil
+                                } else if receipt?.active != true {
                                     feedback = "Проведи ползунок за 2 секунды или дольше."
                                 }
                             })
@@ -285,49 +340,51 @@ struct RiderSOSControl: View {
             }
             .frame(height: 50)
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel("SOS райдерам поблизости")
+            .accessibilityLabel("Открыть радар SOS")
             .accessibilityAddTraits(.isButton)
-            .accessibilityAction { if !sending { confirming = true } }
+            .accessibilityAction { showingRadar = true }
             .onChange(of: offset) { _, value in if value == 0 { started = nil } }
 
-            if let text = feedback ?? receipt.map(receiptText) {
-                Text(text).multilineTextAlignment(.center).font(.caption2.weight(.semibold))
+            if receipt?.active == true {
+                Button("Открыть радар SOS") { showingRadar = true }
+                    .font(.caption2.bold()).buttonStyle(.plain)
+            } else if let feedback {
+                Text(feedback).multilineTextAlignment(.center).font(.caption2.weight(.semibold))
             }
         }
-        .confirmationDialog("Подать сигнал SOS?", isPresented: $confirming, titleVisibility: .visible) {
-            if RiderCommunity.endpoint != nil {
-                Button("Отправить SOS", role: .destructive) { Task { await send() } }
-            }
-            Button("Позвонить 112") { if let url = URL(string: "tel:112") { openURL(url) } }
-            Button("Отмена", role: .cancel) {}
-        } message: {
-            Text(RiderCommunity.endpoint == nil
-                 ? "Сервер Rider ещё не подключён. В опасности звони 112."
-                 : "Имя, комплект и точная точка GPS будут доступны райдерам в радиусе 1,5 км. В опасности звони 112.")
-        }
-        .task(id: receipt?.id) {
-            guard let id = receipt?.id else { return }
-            for _ in 0..<15 {
-                guard (receipt?.pending ?? 0) > 0 else { break }
-                do {
-                    try await Task.sleep(for: .seconds(4))
-                    let result = try await RiderSOSService.shared.receipt(id)
-                    if !Task.isCancelled { receipt = result }
-                } catch { break }
-            }
+        .sheet(isPresented: $showingRadar) {
+            RiderSOSRadarScreen(fix: receipt?.location ?? RiderSOSFix(recorder.usableFix),
+                                receipt: receipt, sending: sending, message: feedback,
+                                send: RiderCommunity.endpoint != nil ? { Task { await send() } } : nil,
+                                enableReplies: RiderCommunity.endpoint != nil ? {
+                Task { await RiderSOSService.shared.refreshAuthorization(prompt: true) }
+            } : nil)
+            .onAppear { RiderSOSService.shared.showRadar(true) }
+            .onDisappear { RiderSOSService.shared.showRadar(false) }
+            .task(id: receipt?.id) { await followResponses() }
         }
     }
 
-    private func receiptText(_ received: RiderSOSService.Receipt) -> String {
-        if received.recipients == 0 { return "Сигнал принят сервером. Райдеров с активным приёмом рядом нет." }
-        if received.pending > 0 { return "SOS принят сервером · адресатов \(received.recipients)" }
-        return "Apple приняла \(received.acceptedByAPNs) из \(received.recipients) уведомлений."
+    @MainActor private func followResponses() async {
+        guard let id = receipt?.id else { return }
+        for _ in 0..<225 {
+            guard receipt?.active == true else { break }
+            do {
+                try await Task.sleep(for: .seconds(4))
+                let updated = try await RiderSOSService.shared.receipt(id)
+                guard !Task.isCancelled else { return }
+                receipt = updated
+                feedback = nil
+            } catch {
+                if !Task.isCancelled, receipt?.active == true { feedback = "Связь прервалась. Проверяем отклики снова." }
+            }
+        }
     }
 
     @MainActor private func send() async {
-        guard !sending else { return }
+        guard !sending, receipt?.active != true else { return }
         guard let fix = RiderSOSFix(recorder.usableFix) else {
-            feedback = "Нет свежей точной GPS-позиции для SOS. В опасности звони 112."
+            feedback = "Для отправки нужна свежая точная GPS-позиция."
             return
         }
         sending = true
@@ -341,9 +398,184 @@ struct RiderSOSControl: View {
                 receipt = received
                 incidentID = UUID()
             } else {
-                feedback = "Сервер не подтвердил SOS. Проверь связь. В опасности звони 112."
+                feedback = "Сервер не подтвердил сигнал SOS."
             }
         }
+    }
+}
+
+private struct RiderSOSRadarScreen: View {
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject private var service = RiderSOSService.shared
+    let fix: RiderSOSFix?
+    let receipt: RiderSOSService.Receipt?
+    let sending: Bool
+    let message: String?
+    let send: (() -> Void)?
+    let enableReplies: (() -> Void)?
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 15) {
+                    RiderRadarMap(fix: fix, transmitting: sending || (receipt?.active == true && receipt?.recipients != 0))
+                    if let receipt {
+                        RiderSOSResponseSummary(receipt: receipt)
+                    } else if sending {
+                        Label("Связываемся с сервером", systemImage: "antenna.radiowaves.left.and.right")
+                            .font(.headline)
+                    } else {
+                        if send != nil {
+                            Text(fix == nil ? "Ждём точную GPS-позицию" : "Готов к отправке").font(.title3.bold())
+                            Text("Имя, комплект и точка GPS будут доступны райдерам в зоне оповещения.")
+                                .font(.subheadline).foregroundStyle(.secondary)
+                        } else if RiderCommunity.endpoint == nil {
+                            Text("Сервер Rider ещё не подключён.").font(.title3.bold())
+                        } else if message == nil {
+                            ProgressView("Загружаем отклики")
+                        }
+                    }
+                    if let message { Text(message).font(.subheadline.bold()).foregroundStyle(.secondary) }
+                    if let send, receipt?.active != true {
+                        Button(action: send) {
+                            Label("Отправить SOS", systemImage: "antenna.radiowaves.left.and.right")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent).controlSize(.large).tint(.red)
+                        .disabled(sending || fix == nil)
+                    }
+                    if let enableReplies, !service.available, !sending {
+                        Button("Разрешить push для откликов", action: enableReplies)
+                            .font(.subheadline).buttonStyle(.borderless)
+                    }
+                }.padding(16)
+            }
+            .background(RiderTheme.canvas)
+            .navigationTitle("Радар SOS")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Закрыть") { dismiss() } } }
+        }
+    }
+}
+
+private struct RiderRadarMap: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let fix: RiderSOSFix?
+    let transmitting: Bool
+    private let color = Color(red: 1, green: 0.36, blue: 0.31)
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            GeometryReader { proxy in
+                ZStack {
+                    Color(red: 0.12, green: 0.06, blue: 0.08)
+                    if let fix {
+                        let center = CLLocationCoordinate2D(latitude: fix.latitude, longitude: fix.longitude)
+                        let region = MKCoordinateRegion(center: center, latitudinalMeters: 3900, longitudinalMeters: 3900)
+                        Map(initialPosition: .region(region), interactionModes: []) {
+                            MapCircle(center: center, radius: 1500)
+                                .foregroundStyle(color.opacity(0.16))
+                                .stroke(color.opacity(0.9), lineWidth: 1.5)
+                        }
+                        .id("\(fix.latitude),\(fix.longitude)")
+                        .environment(\.colorScheme, .dark)
+                    }
+                    reticle
+                    if transmitting && !reduceMotion {
+                        TimelineView(.animation(minimumInterval: 1.0 / 30)) { context in
+                            let time = context.date.timeIntervalSinceReferenceDate / 3.5
+                            ZStack {
+                                ForEach(0..<3) { index in
+                                    let phase = (time + Double(index) / 3).truncatingRemainder(dividingBy: 1)
+                                    Circle().strokeBorder(color.opacity((1 - phase) * 0.85), lineWidth: 2)
+                                        .frame(width: min(proxy.size.width, proxy.size.height) * phase * 0.77)
+                                }
+                            }
+                        }
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+                    }
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 20))
+                .accessibilityLabel(fix == nil ? "Схема зоны SOS, координаты ожидаются" : "Карта зоны оповещения 1,5 километра")
+            }
+            .aspectRatio(1, contentMode: .fit)
+            HStack(spacing: 6) {
+                Label("Радиус 1,5 км", systemImage: "scope")
+                Spacer()
+                if let fix {
+                    Text(String(format: "%.4f, %.4f", fix.latitude, fix.longitude))
+                } else {
+                    Text("Схема")
+                }
+            }
+            .font(.caption.monospacedDigit())
+            .foregroundStyle(.secondary)
+        }
+    }
+
+    private var reticle: some View {
+        ZStack {
+            Circle().strokeBorder(color.opacity(0.34), style: StrokeStyle(lineWidth: 1, dash: [4, 6]))
+                .padding(45)
+            Circle().strokeBorder(color.opacity(0.25), lineWidth: 1).padding(93)
+            Circle().fill(color).frame(width: 14, height: 14)
+                .overlay { Circle().strokeBorder(.white, lineWidth: 2) }
+                .shadow(color: color, radius: transmitting ? 14 : 5)
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}
+
+private struct RiderSOSResponseSummary: View {
+    let receipt: RiderSOSService.Receipt
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label(receipt.status, systemImage: receipt.active ? "dot.radiowaves.left.and.right" : "clock")
+                .font(.subheadline.weight(.semibold))
+            if let responders = receipt.responders, !responders.isEmpty {
+                Text("Райдеры откликнулись").font(.headline)
+                ForEach(responders) { responder in
+                    Label {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(responder.name).font(.subheadline.bold())
+                            Text("Сообщил, что идёт на помощь").font(.caption).foregroundStyle(.secondary)
+                        }
+                    } icon: {
+                        Image(systemName: "person.fill.checkmark").foregroundStyle(RiderTheme.accent)
+                    }
+                }
+            } else if receipt.active && receipt.recipients > 0 {
+                Text("Пока ждём откликов").font(.subheadline).foregroundStyle(.secondary)
+            }
+        }
+        .lagoonCard()
+    }
+}
+
+struct RiderSOSOutgoing: View {
+    let id: UUID
+    @State private var current: RiderSOSService.Receipt?
+    @State private var message: String?
+
+    var body: some View {
+        RiderSOSRadarScreen(fix: current?.location, receipt: current, sending: false,
+                            message: message, send: nil, enableReplies: nil)
+            .task(id: id) {
+                for _ in 0..<225 {
+                    do {
+                        current = try await RiderSOSService.shared.receipt(id)
+                        message = nil
+                        guard current?.active == true else { break }
+                        try await Task.sleep(for: .seconds(4))
+                    } catch {
+                        if !Task.isCancelled { message = "Сигнал недоступен или срок оповещения истёк." }
+                        break
+                    }
+                }
+            }
     }
 }
 
@@ -354,6 +586,7 @@ struct RiderSOSInbox: View {
     @State private var alerts: [RiderSOSService.Alert] = []
     @State private var error: String?
     @State private var loaded = false
+    @State private var deciding = Set<UUID>()
 
     var body: some View {
         NavigationStack {
@@ -367,6 +600,20 @@ struct RiderSOSInbox: View {
                     Section {
                         Text(alert.name).font(.headline)
                         if let equipment = alert.equipment { LabeledContent("Комплект", value: equipment) }
+                        if alert.decision == .accept {
+                            Label("Ты откликнулся на SOS", systemImage: "checkmark.circle.fill")
+                                .foregroundStyle(RiderTheme.accent)
+                        } else {
+                            HStack {
+                                Button("Отозваться") { Task { await decide(.accept, alert: alert) } }
+                                    .buttonStyle(.borderedProminent).tint(RiderTheme.action)
+                                Button("Пропустить") { Task { await decide(.skip, alert: alert) } }
+                                    .buttonStyle(.bordered)
+                            }
+                            .disabled(deciding.contains(alert.id))
+                            Text("Отклик сообщит автору SOS, что ты идёшь на помощь.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
                         LabeledContent("Время", value: Date(timeIntervalSince1970: alert.createdAt).formatted(.dateTime.hour().minute()))
                         Text(String(format: "%.5f, %.5f", alert.latitude, alert.longitude))
                             .font(.subheadline.monospacedDigit()).textSelection(.enabled)
@@ -388,6 +635,18 @@ struct RiderSOSInbox: View {
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Закрыть") { dismiss() } } }
             .task { await load() }
             .refreshable { await load() }
+        }
+    }
+
+    @MainActor private func decide(_ decision: RiderSOSService.Decision, alert: RiderSOSService.Alert) async {
+        guard deciding.insert(alert.id).inserted else { return }
+        defer { deciding.remove(alert.id) }
+        do {
+            let saved = try await RiderSOSService.shared.decide(decision, for: alert.id)
+            if saved == .skip { alerts.removeAll { $0.id == alert.id } }
+            await load()
+        } catch {
+            self.error = "Сервер не подтвердил действие. Попробуй ещё раз."
         }
     }
 

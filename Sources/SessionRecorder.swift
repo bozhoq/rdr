@@ -91,6 +91,11 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
         if authorization == .notDetermined { location.requestWhenInUseAuthorization() }
         else if locationAuthorized { locating = true; location.requestLocation() }
     }
+    func refreshSOSFix() {
+        guard summary == nil, locationAuthorized else { return }
+        location.requestLocation()
+    }
+
     var manualWindValid: Bool { manualDirection == nil || manualWind != nil }
 
     private var effectivePlacement: PhonePlacement { .chest }

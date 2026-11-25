@@ -16,8 +16,19 @@ struct SessionApp: App {
             Tabs(recorder: recorder)
                 .environment(\.locale, Locale(identifier: "ru_RU"))
                 .onChange(of: scenePhase) { _, phase in recorder.sceneChanged(phase) }
-                .task(id: scenePhase) { if scenePhase == .active { await sos.refreshAuthorization() } }
-                .sheet(item: $sos.inbox) { inbox in RiderSOSInbox(selected: inbox.selected) }
+                .task(id: scenePhase) {
+                    guard scenePhase == .active, RiderCommunity.endpoint != nil else { return }
+                    await sos.refreshAuthorization()
+                    while !Task.isCancelled {
+                        if sos.available { recorder.refreshSOSFix() }
+                        do { try await Task.sleep(for: .seconds(55)) }
+                        catch { break }
+                    }
+                }
+                .sheet(item: $sos.inbox) { inbox in
+                    if let id = inbox.selected, inbox.outgoing { RiderSOSOutgoing(id: id) }
+                    else { RiderSOSInbox(selected: inbox.selected) }
+                }
         }
     }
 }
@@ -423,14 +434,20 @@ private struct RecordingView: View {
                     Label("Калибровать датчики", systemImage: "scope").frame(maxWidth: .infinity)
                 }.buttonStyle(.bordered).disabled(device == .watch)
 
-                RiderSOSSettings(recorder: recorder).lagoonCard()
+                RiderSOSReadiness(recorder: recorder).lagoonCard()
 
                 if !recorder.hasRecordingSensors { Text("Датчики записи пока недоступны.").foregroundStyle(.secondary) }
                 if recorder.analyzingSessionID != nil { ProgressView("Разбираем сохранённую сессию…") }
             }.padding(20)
         }
         .background(RiderTheme.canvas.ignoresSafeArea())
-        .task { prepareSecretGoal() }
+        .task {
+            prepareSecretGoal()
+            await RiderSOSService.shared.refreshAuthorization(prompt: true)
+            if RiderCommunity.endpoint != nil, recorder.locationAuthorized, recorder.usableFix == nil {
+                recorder.locateSpot()
+            }
+        }
         .onChange(of: recorder.history.count) { _, _ in prepareSecretGoal() }
         .onChange(of: recorder.automaticConditions) { _, _ in recorder.automaticSpotOverride = nil }
         .task(id: recorder.automaticConditions) {
