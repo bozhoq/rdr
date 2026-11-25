@@ -68,6 +68,14 @@ CREATE TABLE IF NOT EXISTS direct_messages(
 );
 CREATE INDEX IF NOT EXISTS direct_sender ON direct_messages(sender, recipient, created_at);
 CREATE INDEX IF NOT EXISTS direct_recipient ON direct_messages(recipient, sender, created_at);
+CREATE TABLE IF NOT EXISTS message_attachments(
+    message TEXT PRIMARY KEY REFERENCES direct_messages(id) ON DELETE CASCADE,
+    filename TEXT NOT NULL, content_type TEXT NOT NULL, data BLOB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS rider_public_rides(
+    owner TEXT PRIMARY KEY REFERENCES profiles(id) ON DELETE CASCADE,
+    document TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS records(
     owner TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
     session_id TEXT NOT NULL, spot_id TEXT, spot_name TEXT, started_at REAL NOT NULL,
@@ -266,11 +274,10 @@ def season_rankings(db, start, end, year):
     SELECT id,document,points FROM ranked WHERE points>0
     ORDER BY points DESC,id LIMIT 50""", (start, end, year))
     output = []
-    for index, (rider, document, points) in enumerate(rows):
+    for rider, document, points in rows:
         profile = json.loads(document)
         entry = dict(id=rider, name=profile["name"], username=profile.get("username"), points=points)
-        if index < 3:
-            entry["avatar"] = profile.get("avatar")
+        entry["avatar"] = profile.get("avatar")
         output.append(entry)
     return output
 
@@ -361,6 +368,9 @@ def rider_path_result(db, owner, key, relation):
                 bonus for threshold, bonus in ((1, 20), (10, 40), (50, 120)) if count >= threshold)
             result["distance"] = db.execute("SELECT max(distance) FROM record_details WHERE owner=?",
                                             (key,)).fetchone()[0]
+            history = db.execute("SELECT document FROM rider_public_rides WHERE owner=?", (key,)).fetchone()
+            result["rides"] = json.loads(history[0]) if history else []
+            result["year"] = year
         return result
     return [rider_card(*item) for item in db.execute(query + " ORDER BY p.id", (key,))]
 
@@ -408,6 +418,48 @@ def score_rows(items):
         normalized[key] = (key, spot_id, spot.strip().casefold() if spot else None, started, height, airtime,
                            distance, kite.strip() if kite else None, board.strip() if board else None)
     return list(normalized.values())
+
+
+def public_ride_rows(items):
+    if not isinstance(items, list) or len(items) > 300:
+        raise ValueError("invalid public rides")
+    cleaned = {}
+    for item in items:
+        key = identifier(item["id"])
+        if key in cleaned or not number(item.get("startedAt"), 0, 4e9) or not number(item.get("seconds"), 1, 86400):
+            raise ValueError("invalid public ride")
+        if type(item.get("jumps")) is not int or not 0 <= item["jumps"] <= 10000:
+            raise ValueError("invalid jump count")
+        ride = {field: item[field] for field in ("id", "startedAt", "seconds", "jumps")}
+        for field, maximum in (("height", 100), ("airtime", 120), ("distance", 100000)):
+            value = item.get(field)
+            if value is not None:
+                if not number(value, 0, maximum):
+                    raise ValueError("invalid ride metric")
+                ride[field] = value
+        cleaned[key] = ride
+    return sorted(cleaned.values(), key=lambda item: (-item["startedAt"], item["id"]))
+
+
+MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024
+
+
+def message_attachment(item):
+    if not isinstance(item, dict):
+        raise ValueError("invalid attachment")
+    name, mime, encoded = item.get("filename"), item.get("contentType"), item.get("data")
+    if not isinstance(name, str) or not 1 <= len(name) <= 120 or name != name.strip():
+        raise ValueError("invalid filename")
+    if name in (".", "..") or any(character in name for character in ("/", chr(92), ":")) or any(ord(c) < 32 for c in name):
+        raise ValueError("invalid filename")
+    if not isinstance(mime, str) or not re.fullmatch(r"[a-z0-9.+-]{1,64}/[a-z0-9.+-]{1,64}", mime):
+        raise ValueError("invalid content type")
+    if not isinstance(encoded, str) or len(encoded) > 4 * ((MAX_ATTACHMENT_BYTES + 2) // 3):
+        raise ValueError("invalid attachment size")
+    data = base64.b64decode(encoded, validate=True)
+    if not 1 <= len(data) <= MAX_ATTACHMENT_BYTES:
+        raise ValueError("invalid attachment size")
+    return name, mime, data
 
 
 def post_fields(raw, target):
@@ -481,7 +533,7 @@ def feed(db, owner, mode, post_id=None):
         if entry_id != source:
             original = rider_card(source_owner, source_doc)
             post.update(sourceID=source, sourceAuthor=original["name"], sourceUsername=original["username"])
-        entries.append({"post": post, "author": author["name"], "username": author["username"],
+        entries.append({"post": post, "commentSummary": comment_summary(db, source), "author": author["name"], "username": author["username"],
                         "avatar": author["avatar"], "authorID": author_id, "following": bool(following),
                         "mine": owner == author_id, "reposted": bool(reposted), "reaction": reactions(db, source, owner)})
     return entries
@@ -514,18 +566,32 @@ def inbox(db, owner):
 
 
 def thread(db, owner, peer):
-    query = """SELECT id,sender,body,created_at,post FROM direct_messages
-    WHERE (sender=? AND recipient=?) OR (sender=? AND recipient=?)
-    ORDER BY created_at DESC,id DESC LIMIT 100"""
+    query = """SELECT m.id,m.sender,m.body,m.created_at,m.post,a.filename,a.content_type,length(a.data)
+    FROM direct_messages m LEFT JOIN message_attachments a ON a.message=m.id
+    WHERE (m.sender=? AND m.recipient=?) OR (m.sender=? AND m.recipient=?)
+    ORDER BY m.created_at DESC,m.id DESC LIMIT 100"""
     shared = {}
     output = []
-    for key, sender, body, date, post in reversed(list(db.execute(query, (owner, peer, peer, owner)))):
+    for key, sender, body, date, post, filename, mime, size in reversed(list(db.execute(query, (owner, peer, peer, owner)))):
         if post and post not in shared:
             shared[post] = next(iter(feed(db, owner, "single", post)), None)
         entry = shared.get(post)
         output.append({"id": key, "mine": sender == owner, "text": body, "createdAt": date, "postID": post,
-                       "postCaption": entry["post"]["caption"] if entry else None, "sharedPost": entry})
+                       "postCaption": entry["post"]["caption"] if entry else None, "sharedPost": entry,
+                       "attachment": {"filename": filename, "contentType": mime, "size": size} if filename else None})
     return output
+
+
+def comment_summary(db, post_id):
+    where = "FROM post_comments c JOIN public_profiles p ON p.id=c.author WHERE c.post=?"
+    total = db.execute("SELECT count(*) " + where, (post_id,)).fetchone()[0]
+    result = {"total": total}
+    if total:
+        body, document = db.execute("SELECT substr(c.body,1,181),p.document " + where +
+                                    " ORDER BY c.created_at DESC,c.id DESC LIMIT 1", (post_id,)).fetchone()
+        profile = json.loads(document)
+        result["preview"] = {"text": body, "author": profile["name"], "username": profile.get("username")}
+    return result
 
 
 def comments(db, post_id, owner):
@@ -586,8 +652,9 @@ def top_rows(db, raw):
         profile = json.loads(doc)
         entry = {"id": owner, "name": profile["name"], "username": profile.get("username"),
                  "height": height, "airtime": airtime, "distance": distance}
+        entry["avatar"] = profile.get("avatar")
         if index < 3:
-            entry.update(avatar=profile.get("avatar"), kite=kite, board=board)
+            entry.update(kite=kite, board=board)
         output.append(entry)
     return output
 
@@ -669,6 +736,7 @@ def application(env, start_response):
 
     post_action = re.fullmatch(r"/posts/([a-fA-F0-9-]{36})/(details|shaka|repost)", path)
     rider_path = re.fullmatch(r"/riders/([a-z0-9_]{2,64})(?:/(followers|following))?", path)
+    attachment_path = re.fullmatch(r"/messages/([0-9a-f]{64})/([a-fA-F0-9-]{36})/attachment", path)
     direct_path = re.fullmatch(r"/messages/([0-9a-f]{64})(?:/([a-fA-F0-9-]{36}))?", path)
     photo_path = re.fullmatch(r"/posts/([a-fA-F0-9-]{36})/photo", path)
     comment_path = re.fullmatch(r"/posts/([a-fA-F0-9-]{36})/comments(?:/([a-fA-F0-9-]{36}))?", path)
@@ -799,6 +867,7 @@ def application(env, start_response):
                         return send("409 Conflict", {"error": "season changed"})
                     points = activity_points(update["rides"], start, end, now)
                     scores = score_rows(update["records"])
+                    public_rides = public_ride_rows(update["publicRides"]) if "publicRides" in update else None
                     secrets = update.get("secrets")
                     if secrets is not None and (not isinstance(secrets, list) or len(secrets) > len(MISSION_RULES)
                                                 or any(not isinstance(key, str) or key not in MISSION_RULES for key in secrets)):
@@ -826,6 +895,10 @@ def application(env, start_response):
                         doc["secrets"] = list(dict.fromkeys(secrets))
                     db.execute("UPDATE profiles SET document=? WHERE id=?", (json.dumps(doc), owner))
                     replace_records(db, owner, scores)
+                    if public_rides is not None:
+                        db.execute("""INSERT INTO rider_public_rides VALUES (?,?)
+                            ON CONFLICT(owner) DO UPDATE SET document=excluded.document""",
+                            (owner, json.dumps(public_rides)))
                 return send("200 OK", season_credit(db, owner, year, start, end))
             elif (path, method) == ("/me", "DELETE"):
                 db.execute("DELETE FROM follows WHERE owner=?", (owner,))
@@ -852,6 +925,22 @@ def application(env, start_response):
                 return send("200 OK", activity(db, owner))
             elif (path, method) == ("/messages", "GET"):
                 return send("200 OK", inbox(db, owner))
+            elif method == "GET" and attachment_path:
+                peer, message_id = attachment_path.groups()
+                try:
+                    message_id = identifier(message_id)
+                except ValueError:
+                    return send("404 Not Found", {"error": "unknown attachment"})
+                row = db.execute("""SELECT a.data FROM message_attachments a JOIN direct_messages m ON m.id=a.message
+                    WHERE m.id=? AND ((m.sender=? AND m.recipient=?) OR (m.sender=? AND m.recipient=?))""",
+                    (message_id, owner, peer, peer, owner)).fetchone()
+                if row is None:
+                    return send("404 Not Found", {"error": "unknown attachment"})
+                blob, = row
+                start_response("200 OK", [("Content-Type", "application/octet-stream"),
+                    ("Content-Length", str(len(blob))), ("Cache-Control", "no-store"),
+                    ("Content-Disposition", "attachment"), ("X-Content-Type-Options", "nosniff")])
+                return [blob]
             elif direct_path:
                 peer, message_id = direct_path.groups()
                 if (method, bool(message_id)) not in (("GET", False), ("PUT", True)):
@@ -859,12 +948,13 @@ def application(env, start_response):
                 if method == "PUT":
                     try:
                         message_id = identifier(message_id)
-                        raw = read_json(env, 8192)
+                        raw = read_json(env, 4 * ((MAX_ATTACHMENT_BYTES + 2) // 3) + 8192)
                         if not isinstance(raw, dict) or not isinstance(raw.get("text"), str):
                             raise ValueError("invalid message")
                         body = raw["text"].strip()
                         shared = identifier(raw["postID"]) if raw.get("postID") is not None else None
-                        if len(body) > 1000 or not (body or shared):
+                        attachment = message_attachment(raw["attachment"]) if raw.get("attachment") is not None else None
+                        if len(body) > 1000 or not (body or shared or attachment):
                             raise ValueError("invalid message length")
                     except (ValueError, TypeError, RecursionError):
                         return send("400 Bad Request", {"error": "invalid message"})
@@ -877,10 +967,17 @@ def application(env, start_response):
                         return send("404 Not Found", {"error": "unknown post"})
                     changed = db.execute("INSERT INTO direct_messages VALUES (?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING",
                                          (message_id, owner, peer, time.time(), body, shared))
-                    if not changed.rowcount and not db.execute("""SELECT 1 FROM direct_messages
-                        WHERE id=? AND sender=? AND recipient=? AND body=? AND post IS ?""",
-                        (message_id, owner, peer, body, shared)).fetchone():
-                        return send("409 Conflict", {"error": "message ID is taken"})
+                    if changed.rowcount:
+                        if attachment is not None:
+                            db.execute("INSERT INTO message_attachments VALUES (?,?,?,?)", (message_id, *attachment))
+                    else:
+                        same_message = db.execute("""SELECT 1 FROM direct_messages
+                            WHERE id=? AND sender=? AND recipient=? AND body=? AND post IS ?""",
+                            (message_id, owner, peer, body, shared)).fetchone()
+                        previous = db.execute("SELECT filename,content_type,data FROM message_attachments WHERE message=?",
+                                              (message_id,)).fetchone()
+                        if not same_message or previous != attachment:
+                            return send("409 Conflict", {"error": "message ID is taken"})
                 return send("200 OK", thread(db, owner, peer))
             elif post_action:
                 try:

@@ -23,7 +23,7 @@ class CommunityTests(unittest.TestCase):
         self.totals = {"sessions": 1, "seconds": 900, "jumps": 2, "height": 5.2, "airtime": 3.1}
         self.ride = dict(id=str(UUID(int=1)), startedAt=self.now - 1000, seconds=900, jumps=2, scoringJumps=2, height=5.2, airtime=3.1)
 
-    def call(self, method, path, token, data=None, expect=200):
+    def call(self, method, path, token, data=None, expect=200, raw=False):
         payload = json.dumps(data).encode() if data is not None else b""
         env = dict(REQUEST_METHOD=method, PATH_INFO=path, CONTENT_LENGTH=str(len(payload)))
         env["wsgi.input"] = io.BytesIO(payload)
@@ -31,7 +31,7 @@ class CommunityTests(unittest.TestCase):
         headers = []
         response = b"".join(service.application(env, lambda status, _: headers.append(status)))
         self.assertEqual(int(headers[0].split()[0]), expect, response)
-        return json.loads(response)
+        return response if raw else json.loads(response)
 
     def publish(self, token, handle):
         return self.call("PUT", "/me", token, dict(name=handle, username=handle, totals=self.totals, records=[]))
@@ -181,6 +181,9 @@ class CommunityTests(unittest.TestCase):
         comment = str(UUID(int=3))
         self.call("PUT", path + "/comments/" + comment, self.audience, {"text": "Отличная каталка"})
         self.assertEqual(len(self.call("GET", path + "/comments", self.me)), 1)
+        summary = self.call("GET", path + "/details", self.me)["commentSummary"]
+        self.assertEqual(summary["total"], 1)
+        self.assertEqual(summary["preview"]["text"], "Отличная каталка")
         self.call("PUT", path + "/repost", self.audience, {"id": str(UUID(int=4))})
         self.assertEqual(len(self.call("GET", "/feed/my-reposts", self.audience)), 1)
         self.assertEqual(self.call("GET", path + "/details", self.me)["reaction"]["total"], 1)
@@ -204,7 +207,8 @@ class CommunityTests(unittest.TestCase):
             name="Rider", username="rider", totals=self.totals, records=[record]))["mine"]
         self.call("PUT", "/follow/" + rider["id"], self.audience)
         self.call("PUT", "/statistics", self.me, dict(generatedAt=self.now, update=dict(year=2026,
-                  rides=[self.ride], totals=self.totals, records=[record], secrets=["height3"])))
+                  rides=[self.ride], totals=self.totals, records=[record], secrets=["height3"],
+                  publicRides=[dict(record, seconds=900, jumps=2, latitude=1, longitude=2)])))
         post = str(UUID(int=101))
         path = "/posts/" + post
         self.call("PUT", path, self.me, dict(id=post, caption="Ветер", photo="/9j/2Q=="))
@@ -214,6 +218,8 @@ class CommunityTests(unittest.TestCase):
         page = self.call("GET", "/riders/rider", self.audience)
         self.assertEqual(page["points"], 165)
         self.assertEqual(page["distance"], 19)
+        self.assertEqual(page["rides"][0]["seconds"], 900)
+        self.assertNotIn("latitude", page["rides"][0])
         self.assertEqual(page["rider"]["profile"]["secrets"], ["height3"])
         self.assertEqual(page["posts"][0]["post"]["id"], post)
         self.assertEqual(self.call("GET", "/riders/rider/followers", self.audience)[0]["id"], viewer["id"])
@@ -227,6 +233,7 @@ class CommunityTests(unittest.TestCase):
         page = self.call("GET", "/riders/rider", self.audience)
         self.assertNotIn("points", page)
         self.assertNotIn("distance", page)
+        self.assertNotIn("rides", page)
         self.assertNotIn("secrets", page["rider"]["profile"])
         self.assertEqual(page["rider"]["profile"]["totals"], {"seconds": 0, "sessions": 0, "jumps": 0})
         self.assertEqual(len(page["posts"]), 1)
@@ -248,6 +255,25 @@ class CommunityTests(unittest.TestCase):
         self.assertTrue(page["rider"]["following"])
         self.assertEqual(page["points"], 165)
         self.assertEqual(self.call("GET", thread, self.audience)[0]["sharedPost"]["post"]["caption"], "Ветер")
+
+
+    def test_message_attachment_private_and_retry_safe(self):
+        sender = self.publish(self.me, "rider")["mine"]["id"]
+        peer = self.publish(self.audience, "viewer")["mine"]["id"]
+        message = str(UUID(int=105))
+        outgoing = "/messages/" + peer + "/" + message
+        incoming = "/messages/" + sender + "/" + message
+        file = {"filename": "Каталка.txt", "contentType": "text/plain", "data": "cmlkZXI="}
+        payload = {"text": "", "attachment": file}
+        result = self.call("PUT", outgoing, self.me, payload)
+        self.assertEqual(result[0]["attachment"], {"filename": "Каталка.txt", "contentType": "text/plain", "size": 5})
+        self.assertEqual(self.call("PUT", outgoing, self.me, payload), result)
+        self.call("PUT", outgoing, self.me, {"text": "", "attachment": dict(file, data="ZmFrZQ==")}, expect=409)
+        self.assertEqual(self.call("GET", incoming + "/attachment", self.audience, raw=True), b"rider")
+        self.assertEqual(self.call("GET", outgoing + "/attachment", self.me, raw=True), b"rider")
+        self.call("GET", incoming + "/attachment", "f" * 72, expect=404)
+        self.call("GET", incoming + "/attachment", self.me, expect=404)
+        self.call("PUT", outgoing, self.me, {"text": "", "attachment": dict(file, filename="../secret.txt")}, expect=400)
 
 
 if __name__ == "__main__":
