@@ -158,6 +158,7 @@ class CommunityTests(unittest.TestCase):
         self.assertEqual(self.call("GET", "/sos/inbox", person_a)[0]["decision"], "accept")
         receipt = self.call("GET", endpoint + "/receipt", self.me)
         self.assertEqual([r["name"] for r in receipt["responders"]], ["Nearby Rider"])
+        self.assertEqual(receipt["pending"], 0)
         self.assertEqual(receipt["location"]["latitude"], coords["latitude"])
         self.call("GET", endpoint + "/receipt", person_a, expect=404)
 

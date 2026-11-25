@@ -160,9 +160,9 @@ def handle(db, owner, path, method, body):
                       ON CONFLICT(incident,receiver) DO NOTHING""",
                    (identifier, owner, name, action, now, "pending" if action == "accept" else "skipped"))
         saved = db.execute("SELECT action FROM sos_responses WHERE incident=? AND receiver=?", (identifier, owner)).fetchone()
-        if saved[0] == "skip":
-            db.execute("""UPDATE sos_outbox SET status='skipped'
-                          WHERE incident=? AND receiver=? AND status IN ('pending','sending')""", (identifier, owner))
+        status = "responded" if saved[0] == "accept" else "skipped"
+        db.execute("""UPDATE sos_outbox SET status=?
+                      WHERE incident=? AND receiver=? AND status IN ('pending','sending')""", (status, identifier, owner))
         return "200 OK", {"action": saved[0]}
     if (path, method) != ("/sos", "POST"):
         return "404 Not Found", {"error": "unknown SOS endpoint"}
