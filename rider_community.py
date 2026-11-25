@@ -41,6 +41,11 @@ CREATE TABLE IF NOT EXISTS post_comments(
     created_at REAL NOT NULL, body TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS comments_by_post ON post_comments(post, created_at DESC);
+CREATE TABLE IF NOT EXISTS comment_replies(
+    comment TEXT PRIMARY KEY REFERENCES post_comments(id) ON DELETE CASCADE,
+    parent TEXT NOT NULL REFERENCES post_comments(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS replies_by_parent ON comment_replies(parent);
 CREATE TABLE IF NOT EXISTS post_equipment(
     post TEXT PRIMARY KEY REFERENCES posts(id) ON DELETE CASCADE, document TEXT NOT NULL
 );
@@ -256,7 +261,7 @@ def season_credit(db, owner, year, start, end):
     return {"year": year, "followers": followers}
 
 
-def season_rankings(db, start, end, year):
+def season_rankings(db, start, end, year, viewer=None):
     rows = db.execute("""WITH followers AS (
         SELECT target, count(*) AS n
         FROM follow_activity
@@ -267,17 +272,17 @@ def season_rankings(db, start, end, year):
              + CASE WHEN f.n>=1 THEN 20 ELSE 0 END
              + CASE WHEN f.n>=10 THEN 40 ELSE 0 END
              + CASE WHEN f.n>=50 THEN 120 ELSE 0 END AS points
-        FROM public_stats_profiles p
+        FROM profiles p
         LEFT JOIN season_scores s ON s.owner=p.id AND s.year=?
         LEFT JOIN followers f ON f.target=p.id
     )
-    SELECT id,document,points FROM ranked WHERE points>0
-    ORDER BY points DESC,id LIMIT 50""", (start, end, year))
+    , places AS (SELECT *,row_number() OVER (ORDER BY points DESC,id) AS position FROM ranked)
+    SELECT id,document,points,position FROM places WHERE position<=50 OR id=? ORDER BY position""", (start, end, year, viewer))
     output = []
-    for rider, document, points in rows:
+    for rider, document, points, position in rows:
         profile = json.loads(document)
         entry = dict(id=rider, name=profile["name"], username=profile.get("username"), points=points)
-        entry["avatar"] = profile.get("avatar")
+        entry.update(avatar=profile.get("avatar"), premium=is_premium(profile), position=position)
         output.append(entry)
     return output
 
@@ -329,9 +334,8 @@ RIDER_QUERY = """SELECT p.id,p.document,
 def rider_entry(row, owner):
     key, document, followers, following, following_count = row
     profile = json.loads(document)
-    if key != owner and not profile.get("statsPublic", True):
-        profile["totals"] = {"seconds": 0, "sessions": 0, "jumps": 0}
-        profile.pop("secrets", None)
+    profile["premium"] = is_premium(profile)
+    profile.pop("premiumUntil", None)
     return dict(id=key, profile=profile, followers=followers, following=bool(following),
                 followingCount=following_count)
 
@@ -348,10 +352,12 @@ def rider_path_result(db, owner, key, relation):
     if key == "me":
         key = owner
     row = db.execute(RIDER_QUERY + """WHERE (p.id=? OR p.id=(SELECT owner FROM handles WHERE username=?))
-        AND (p.id=? OR p.id IN (SELECT id FROM public_profiles))""", (owner, key, key, owner)).fetchone()
+        """, (owner, key, key)).fetchone()
     if row is None:
         return None
     key = row[0]
+    if relation and key != owner and not json.loads(row[1]).get("publicProfile", True):
+        return None
     if relation == "followers":
         query = "SELECT p.id,p.document FROM follows f JOIN public_profiles p ON p.id=f.owner WHERE f.target=?"
     elif relation == "following":
@@ -359,18 +365,24 @@ def rider_path_result(db, owner, key, relation):
     else:
         rider = rider_entry(row, owner)
         result = {"rider": rider, "posts": feed(db, owner, "profile", key), "mine": owner == key}
-        if rider["profile"].get("statsPublic", True):
-            year, start, end = season_at(time.time())
-            points = db.execute("SELECT activity_points FROM season_scores WHERE owner=? AND year=?",
-                                (key, year)).fetchone()
-            count = season_credit(db, key, year, start, end)["followers"]
-            result["points"] = (points[0] if points else 0) + sum(
-                bonus for threshold, bonus in ((1, 20), (10, 40), (50, 120)) if count >= threshold)
-            result["distance"] = db.execute("SELECT max(distance) FROM record_details WHERE owner=?",
-                                            (key,)).fetchone()[0]
-            history = db.execute("SELECT document FROM rider_public_rides WHERE owner=?", (key,)).fetchone()
-            result["rides"] = json.loads(history[0]) if history else []
-            result["year"] = year
+        year, start, end = season_at(time.time())
+        points = db.execute("SELECT activity_points FROM season_scores WHERE owner=? AND year=?",
+                            (key, year)).fetchone()
+        count = season_credit(db, key, year, start, end)["followers"]
+        result["points"] = (points[0] if points else 0) + sum(
+            bonus for threshold, bonus in ((1, 20), (10, 40), (50, 120)) if count >= threshold)
+        result["distance"] = db.execute("SELECT max(distance) FROM record_details WHERE owner=?",
+                                        (key,)).fetchone()[0]
+        result["year"] = year
+        history = db.execute("SELECT document FROM rider_public_rides WHERE owner=?", (key,)).fetchone()
+        rides = json.loads(history[0]) if history else []
+        result["sessionRecords"] = [{k: v for k, v in ride.items() if k in
+                                     ("id", "startedAt", "seconds", "jumps", "height", "airtime", "distance")}
+                                    for ride in rides]
+        if key == owner or (rider["profile"].get("publicProfile", True) and rider["profile"].get("statsPublic", True)):
+            result["rides"] = rides
+        if key != owner and not rider["profile"].get("publicProfile", True):
+            rider["profile"].pop("bio", None)
         return result
     return [rider_card(*item) for item in db.execute(query + " ORDER BY p.id", (key,))]
 
@@ -421,7 +433,7 @@ def score_rows(items):
 
 
 def public_ride_rows(items):
-    if not isinstance(items, list) or len(items) > 300:
+    if not isinstance(items, list) or len(items) > 50000:
         raise ValueError("invalid public rides")
     cleaned = {}
     for item in items:
@@ -437,6 +449,18 @@ def public_ride_rows(items):
                 if not number(value, 0, maximum):
                     raise ValueError("invalid ride metric")
                 ride[field] = value
+        for field in ("spot", "kite", "board"):
+            value = item.get(field)
+            if value is not None:
+                if not isinstance(value, str) or len(value) > 255:
+                    raise ValueError("invalid analytics label")
+                if value.strip():
+                    ride[field] = value.strip()
+        for field, upper in (("windMS", 150), ("heightSum", 100 * item["jumps"])):
+            if item.get(field) is not None:
+                if not number(item[field], 0, upper):
+                    raise ValueError("invalid ride measurement")
+                ride[field] = item[field]
         cleaned[key] = ride
     return sorted(cleaned.values(), key=lambda item: (-item["startedAt"], item["id"]))
 
@@ -494,9 +518,13 @@ def post_fields(raw, target):
     return caption.strip(), location, image, equipment
 
 
+def is_premium(profile):
+    return profile.get("premiumUntil", 0) > time.time()
+
+
 def rider_card(owner, document):
     rider = json.loads(document)
-    return {"id": owner, "name": rider["name"], "username": rider.get("username"), "avatar": rider.get("avatar")}
+    return {"id": owner, "premium": is_premium(rider), "name": rider["name"], "username": rider.get("username"), "avatar": rider.get("avatar")}
 
 
 def reactions(db, post_id, owner):
@@ -537,7 +565,7 @@ def feed(db, owner, mode, post_id=None):
             original = rider_card(source_owner, source_doc)
             post.update(sourceID=source, sourceAuthor=original["name"], sourceUsername=original["username"])
         entries.append({"post": post, "commentSummary": comment_summary(db, source), "author": author["name"], "username": author["username"],
-                        "avatar": author["avatar"], "authorID": author_id, "following": bool(following),
+                        "premium": author["premium"], "avatar": author["avatar"], "authorID": author_id, "following": bool(following),
                         "mine": owner == author_id, "reposted": bool(reposted), "reaction": reactions(db, source, owner)})
     return entries
 
@@ -548,6 +576,12 @@ def activity(db, owner):
         FROM shakas s JOIN posts r ON r.id=s.post WHERE r.owner=?
         UNION ALL
         SELECT 'comment',c.author,c.post,c.created_at FROM post_comments c JOIN posts r ON r.id=c.post WHERE r.owner=?
+          AND NOT EXISTS (SELECT 1 FROM comment_replies x JOIN post_comments parent ON parent.id=x.parent
+                          WHERE x.comment=c.id AND parent.author=r.owner)
+        UNION ALL
+        SELECT 'reply',c.author,c.post,c.created_at FROM comment_replies x
+          JOIN post_comments c ON c.id=x.comment JOIN post_comments parent ON parent.id=x.parent
+          JOIN posts r ON r.id=c.post JOIN public_profiles visible ON visible.id=r.owner WHERE parent.author=?
         UNION ALL
         SELECT 'follow',f.owner,NULL,f.created_at FROM follow_activity f WHERE f.target=?
         UNION ALL
@@ -555,7 +589,7 @@ def activity(db, owner):
     ) AS a JOIN public_profiles p ON p.id=a.actor
     WHERE a.actor<>? ORDER BY a.date DESC,a.actor LIMIT 60"""
     return [{"kind": kind, "person": rider_card(actor, document), "postID": post, "createdAt": date}
-            for kind, actor, post, date, document in db.execute(query, (owner,) * 5)]
+            for kind, actor, post, date, document in db.execute(query, (owner,) * 6)]
 
 
 def inbox(db, owner):
@@ -598,24 +632,27 @@ def comment_summary(db, post_id):
 
 
 def comments(db, post_id, owner):
-    query = """SELECT c.id,c.author,c.created_at,c.body,p.document
+    query = """SELECT c.id,c.author,c.created_at,c.body,p.document,parent.id,pp.document
         FROM post_comments c JOIN public_profiles p ON p.id=c.author
+        LEFT JOIN comment_replies x ON x.comment=c.id LEFT JOIN post_comments parent ON parent.id=x.parent
+        LEFT JOIN public_profiles pp ON pp.id=parent.author
         WHERE c.post=? ORDER BY c.created_at DESC,c.id DESC LIMIT 100"""
     output = []
-    for comment_id, author_id, created_at, body, document in reversed(list(db.execute(query, (post_id,)))):
+    for comment_id, author_id, created_at, body, document, parent, parent_doc in reversed(list(db.execute(query, (post_id,)))):
         person = rider_card(author_id, document)
         output.append({"id": comment_id, "createdAt": created_at, "text": body,
                        "author": person["name"], "username": person["username"], "avatar": person["avatar"],
+                       "premium": person["premium"], "replyTo": parent, "replyName": (json.loads(parent_doc).get("username") or json.loads(parent_doc)["name"]) if parent_doc else None,
                        "authorID": author_id, "mine": author_id == owner})
     return output
 
 
-def top_rows(db, raw):
+def top_rows(db, raw, viewer=None):
     if isinstance(raw, dict) and raw.get("metric") == "rank":
         year, start, end = season_at(time.time())
         if type(raw.get("season")) is not int:
             raise ValueError("invalid season")
-        return season_rankings(db, start, end, year) if raw["season"] == year else []
+        return season_rankings(db, start, end, year, viewer) if raw["season"] == year else []
     columns = {"height": "r.height", "airtime": "r.airtime", "distance": "d.distance"}
     if not isinstance(raw, dict) or not isinstance(raw.get("metric"), str) or raw["metric"] not in columns:
         raise ValueError("invalid metric")
@@ -641,22 +678,23 @@ def top_rows(db, raw):
     query = f"""WITH ranked AS (
         SELECT p.id,p.document,r.height,r.airtime,d.distance,d.kite,d.board,
                ROW_NUMBER() OVER (PARTITION BY r.owner ORDER BY {selected} DESC,r.started_at DESC,r.session_id) AS place
-        FROM records r JOIN public_stats_profiles p ON p.id=r.owner
+        FROM records r JOIN profiles p ON p.id=r.owner
         LEFT JOIN record_details d ON d.owner=r.owner AND d.session_id=r.session_id
         WHERE r.started_at>=? AND r.started_at<? AND {selected} IS NOT NULL
           AND ((? IS NULL AND ? IS NULL) OR r.spot_id=?
                OR ((r.spot_id IS NULL OR ? IS NULL) AND r.spot_name=?))
         )
-        SELECT id,document,height,airtime,distance,kite,board FROM ranked
-        WHERE place=1 ORDER BY {metric} DESC,id LIMIT 50"""
-    rows = db.execute(query, (start_at, end_at, spot_id, name, spot_id, spot_id, name))
+        , places AS (SELECT *,row_number() OVER (ORDER BY {metric} DESC,id) AS position FROM ranked WHERE place=1)
+        SELECT id,document,height,airtime,distance,kite,board,position FROM places
+        WHERE position<=50 OR id=? ORDER BY position"""
+    rows = db.execute(query, (start_at, end_at, spot_id, name, spot_id, spot_id, name, viewer))
     output = []
-    for index, (owner, doc, height, airtime, distance, kite, board) in enumerate(rows):
+    for owner, doc, height, airtime, distance, kite, board, position in rows:
         profile = json.loads(doc)
         entry = {"id": owner, "name": profile["name"], "username": profile.get("username"),
                  "height": height, "airtime": airtime, "distance": distance}
-        entry["avatar"] = profile.get("avatar")
-        if index < 3:
+        entry.update(avatar=profile.get("avatar"), premium=is_premium(profile), position=position)
+        if position <= 3:
             entry.update(kite=kite, board=board)
         output.append(entry)
     return output
@@ -792,6 +830,19 @@ def application(env, start_response):
             if method == "GET" and rider_path:
                 result = rider_path_result(db, owner, *rider_path.groups())
                 return send("200 OK", result) if result is not None else send("404 Not Found", {"error": "unknown rider"})
+            if (path, method) == ("/membership", "PUT"):
+                db.execute("BEGIN IMMEDIATE")
+                if not db.execute("SELECT 1 FROM profiles WHERE id=?", (owner,)).fetchone():
+                    tag = "rider_" + owner[:12]
+                    suffix = 0
+                    while db.execute("SELECT 1 FROM handles WHERE username=?", (tag,)).fetchone():
+                        suffix += 1
+                        tag = f"rider_{owner[:12]}{suffix}"
+                    doc = dict(name="Райдер", username=tag, publicProfile=False, statsPublic=False,
+                               totals=dict(seconds=0, sessions=0, jumps=0))
+                    db.execute("INSERT INTO profiles VALUES (?,?)", (owner, json.dumps(doc)))
+                    db.execute("INSERT INTO handles VALUES (?,?)", (tag, owner))
+                return send("200 OK", {"member": True})
             if (path, method) == ("/me", "GET"):
                 return send("200 OK", state(db, owner, include_directory=False))
             if (path, method) == ("/me", "PATCH"):
@@ -828,6 +879,8 @@ def application(env, start_response):
                     doc[key] = value
                 if scores is None and previous:
                     doc["totals"] = old["totals"]
+                if "premiumUntil" in old:
+                    doc["premiumUntil"] = old["premiumUntil"]
                 if "secrets" in old:
                     doc["secrets"] = old["secrets"]
                 handle = doc.get("username") or old.get("username")
@@ -847,10 +900,10 @@ def application(env, start_response):
                 db.execute("DELETE FROM handles WHERE owner=?", (owner,))
                 if handle:
                     db.execute("INSERT INTO handles VALUES (?,?)", (handle, owner))
-                if scores is not None and doc["publicProfile"] and doc["statsPublic"]:
+                if scores is not None:
                     replace_records(db, owner, scores)
             elif (path, method) == ("/statistics", "GET"):
-                row = db.execute("SELECT document FROM public_profiles WHERE id=?", (owner,)).fetchone()
+                row = db.execute("SELECT document FROM profiles WHERE id=?", (owner,)).fetchone()
                 if not row:
                     return send("403 Forbidden", {"error": "publish a profile first"})
                 credit = season_credit(db, owner, *season_at(time.time()))
@@ -861,7 +914,7 @@ def application(env, start_response):
                 try:
                     now = time.time()
                     year, start, end = season_at(now)
-                    raw = read_json(env, 2500000)
+                    raw = read_json(env, 32000000)
                     update = raw["update"]
                     generated = raw["generatedAt"]
                     if not number(generated, 0, now + 300) or type(update.get("year")) is not int:
@@ -880,14 +933,10 @@ def application(env, start_response):
                 except (ValueError, TypeError, KeyError, AttributeError, OverflowError, RecursionError):
                     return send("400 Bad Request", {"error": "invalid statistics"})
                 db.execute("BEGIN IMMEDIATE")
-                profile = db.execute("SELECT document FROM public_profiles WHERE id=?", (owner,)).fetchone()
+                profile = db.execute("SELECT document FROM profiles WHERE id=?", (owner,)).fetchone()
                 if not profile:
                     return send("403 Forbidden", {"error": "publish a profile first"})
                 doc = json.loads(profile[0])
-                if not doc.get("statsPublic", True):
-                    credit = season_credit(db, owner, year, start, end)
-                    credit["statsPublic"] = False
-                    return send("200 OK", credit)
                 saved = db.execute("""INSERT INTO season_scores VALUES (?,?,?,?)
                     ON CONFLICT(owner,year) DO UPDATE SET
                       activity_points=excluded.activity_points, generated_at=excluded.generated_at
@@ -1022,7 +1071,12 @@ def application(env, start_response):
                 return send("200 OK", {"reposted": method == "PUT"})
             elif (path, method) == ("/tops", "POST"):
                 try:
-                    rows = top_rows(db, read_json(env, 4096))
+                    filters = read_json(env, 4096)
+                    personal = isinstance(filters, dict) and filters.get("withMyPlace") is True
+                    rows = top_rows(db, filters, owner if personal else None)
+                    if personal:
+                        rows = {"leaders": [r for r in rows if r["position"] <= 50],
+                                "myPlace": next((r["position"] for r in rows if r["id"] == owner), None)}
                 except (ValueError, RecursionError):
                     return send("400 Bad Request", {"error": "invalid filters"})
                 return send("200 OK", rows)
@@ -1037,6 +1091,7 @@ def application(env, start_response):
                         if not isinstance(raw, dict) or not isinstance(raw.get("text"), str):
                             raise ValueError("invalid comment")
                         body = raw["text"].strip()
+                        parent = identifier(raw["replyTo"]) if raw.get("replyTo") else None
                         if not 1 <= len(body) <= 2000:
                             raise ValueError("invalid comment length")
                 except (ValueError, RecursionError):
@@ -1048,12 +1103,21 @@ def application(env, start_response):
                 if method == "PUT":
                     if not db.execute("SELECT 1 FROM public_profiles WHERE id=?", (owner,)).fetchone():
                         return send("403 Forbidden", {"error": "publish a profile first"})
+                    if parent and (parent == comment_id or not db.execute("""SELECT 1 FROM post_comments c
+                            JOIN public_profiles p ON p.id=c.author WHERE c.id=? AND c.post=?""", (parent, post_id)).fetchone()):
+                        return send("404 Not Found", {"error": "unknown parent comment"})
+                    previous = db.execute("""SELECT x.parent FROM post_comments c LEFT JOIN comment_replies x
+                        ON x.comment=c.id WHERE c.id=?""", (comment_id,)).fetchone()
+                    if previous and previous[0] != parent:
+                        return send("409 Conflict", {"error": "reply target changed"})
                     changed = db.execute("""INSERT INTO post_comments VALUES (?,?,?,?,?)
                         ON CONFLICT(id) DO UPDATE SET body=excluded.body
                         WHERE post_comments.author=excluded.author AND post_comments.post=excluded.post""",
                         (comment_id, post_id, owner, time.time(), body))
                     if not changed.rowcount:
                         return send("409 Conflict", {"error": "comment ID is taken"})
+                    if parent:
+                        db.execute("INSERT OR IGNORE INTO comment_replies VALUES (?,?)", (comment_id, parent))
                 elif method == "DELETE":
                     db.execute("DELETE FROM post_comments WHERE id=? AND post=? AND author=?",
                                (comment_id, post_id, owner))

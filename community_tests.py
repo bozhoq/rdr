@@ -1,4 +1,5 @@
 import base64
+from contextlib import closing
 import io
 import json
 import os
@@ -60,7 +61,7 @@ class CommunityTests(unittest.TestCase):
         self.stats([self.ride], revision=1)
         self.assertEqual(self.ranking(2026)[0]["points"], 20)
         self.now = datetime.fromisoformat("2027-01-01T00:00:00+03:00").timestamp()
-        self.assertEqual(self.ranking(2027), [])
+        self.assertEqual([row["points"] for row in self.ranking(2027)], [0, 0])
         self.assertEqual(self.ranking(2026), [])
         self.stats([self.ride], expect=409)
         self.call("DELETE", "/me", self.me)
@@ -209,7 +210,7 @@ class CommunityTests(unittest.TestCase):
         self.call("PUT", "/follow/" + rider["id"], self.audience)
         self.call("PUT", "/statistics", self.me, dict(generatedAt=self.now, update=dict(year=2026,
                   rides=[self.ride], totals=self.totals, records=[record], secrets=["height3"],
-                  publicRides=[dict(record, seconds=900, jumps=2, latitude=1, longitude=2)])))
+                  publicRides=[dict(record, seconds=900, jumps=2, windMS=7, spot="Example", kite="Kite", board="Board", heightSum=8.3, latitude=1, longitude=2)])))
         post = str(UUID(int=101))
         path = "/posts/" + post
         self.call("PUT", path, self.me, dict(id=post, caption="Ветер", photo="/9j/2Q=="))
@@ -230,21 +231,25 @@ class CommunityTests(unittest.TestCase):
 
         self.call("PATCH", "/me", self.me, {"statsPublic": False})
         self.assertEqual(self.call("GET", "/statistics", self.me)["statsPublic"], False)
-        self.stats([], revision=1)
         page = self.call("GET", "/riders/rider", self.audience)
-        self.assertNotIn("points", page)
-        self.assertNotIn("distance", page)
+        self.assertEqual(page["points"], 165)
+        self.assertEqual(page["distance"], 19)
         self.assertNotIn("rides", page)
-        self.assertNotIn("secrets", page["rider"]["profile"])
-        self.assertEqual(page["rider"]["profile"]["totals"], {"seconds": 0, "sessions": 0, "jumps": 0})
+        self.assertEqual(page["rider"]["profile"]["secrets"], ["height3"])
+        self.assertEqual(page["rider"]["profile"]["totals"], self.totals)
         self.assertEqual(len(page["posts"]), 1)
-        self.assertEqual(self.call("POST", "/tops", self.audience, {"metric": "height"}), [])
-        self.assertEqual(self.ranking(2026), [])
+        self.assertEqual(page["sessionRecords"][0]["height"], 5.2)
+        self.assertTrue(set(page["sessionRecords"][0]).isdisjoint({"spot", "board", "windMS", "kite", "heightSum"}))
+        self.assertEqual(self.call("POST", "/tops", self.audience, {"metric": "height"})[0]["id"], rider["id"])
+        self.assertEqual(self.ranking(2026)[0]["points"], 165)
 
         self.call("PATCH", "/me", self.me, {"publicProfile": False})
         self.call("PUT", "/me", self.me, dict(name="Renamed", username="rider", totals=self.totals))
         self.assertFalse(self.call("GET", "/me", self.me)["mine"]["profile"]["publicProfile"])
-        self.call("GET", "/riders/rider", self.audience, expect=404)
+        closed = self.call("GET", "/riders/rider", self.audience)
+        self.assertEqual(closed["points"], 165)
+        self.assertEqual(closed["posts"], [])
+        self.assertNotIn("rides", closed)
         for suffix in ("details", "comments", "view", "photo"):
             self.call("GET", path + "/" + suffix, self.audience, expect=404)
         self.assertEqual(self.call("GET", "/feed/following", self.audience), [])
@@ -257,6 +262,59 @@ class CommunityTests(unittest.TestCase):
         self.assertEqual(page["points"], 165)
         self.assertEqual(self.call("GET", thread, self.audience)[0]["sharedPost"]["post"]["caption"], "Ветер")
 
+
+    def test_reply_links_and_alerts(self):
+        self.publish(self.me, "author")
+        self.publish(self.audience, "visitor")
+        other = "c" * 72
+        self.publish(other, "third")
+        post = str(UUID(int=21))
+        path = "/posts/" + post
+        self.call("PUT", path, self.me, dict(id=post, caption="Test", photo="/9j/2Q=="))
+        parent, reply = str(UUID(int=22)), str(UUID(int=23))
+        self.call("PUT", path + "/comments/" + parent, self.audience, {"text": "Hello"})
+        payload = {"text": "A reply", "replyTo": parent}
+        for _ in range(2):
+            rows = self.call("PUT", path + "/comments/" + reply, other, payload)
+            self.assertEqual(rows[-1]["replyName"], "visitor")
+        events = self.call("GET", "/activity", self.audience)
+        self.assertEqual([(e["kind"], e["postID"]) for e in events], [("reply", post)])
+        self.assertEqual(len(self.call("GET", path + "/comments", self.me)), 2)
+        self.call("PUT", path + "/comments/" + reply, other, {"text": "Change target"}, expect=409)
+        second = str(UUID(int=24))
+        self.call("PUT", "/posts/" + second, self.me, dict(id=second, caption="", photo="/9j/2Q=="))
+        self.call("PUT", "/posts/" + second + "/comments/" + str(UUID(int=25)), other, payload, expect=404)
+        own = str(UUID(int=26))
+        self.call("PUT", path + "/comments/" + own, self.me, {"text": "Question"})
+        self.call("PUT", path + "/comments/" + str(UUID(int=27)), self.audience, {"text": "Answer", "replyTo": own})
+        self.assertEqual([e["kind"] for e in self.call("GET", "/activity", self.me)].count("reply"), 1)
+        self.call("DELETE", path + "/comments/" + reply, other)
+        self.assertEqual(self.call("GET", "/activity", self.audience), [])
+
+    def test_private_member_placement_outside_public_fifty(self):
+        for _ in range(2):
+            self.call("PUT", "/membership", self.me)
+        me = self.call("GET", "/me", self.me)["mine"]["id"]
+        with closing(sqlite3.connect(os.environ["RIDER_DB"])) as db, db:
+            for i in range(60):
+                key = f"{i:064x}"
+                db.execute("INSERT INTO profiles VALUES (?,?)", (key, json.dumps(dict(
+                    name=str(i), publicProfile=False, statsPublic=False, totals=self.totals))))
+                db.execute("INSERT INTO season_scores VALUES (?,?,?,?)", (key, 2026, 100+i, self.now))
+                service.replace_records(db, key, service.score_rows([dict(self.ride, height=3+i)]))
+            service.replace_records(db, me, service.score_rows([dict(self.ride, height=1)]))
+        for query in (dict(metric="height"), dict(metric="rank", season=2026)):
+            result = self.call("POST", "/tops", self.me, dict(query, withMyPlace=True))
+            self.assertEqual(len(result["leaders"]), 50)
+            self.assertEqual(result["myPlace"], 61)
+            self.assertNotIn(me, [row["id"] for row in result["leaders"]])
+        scoped = self.call("POST", "/tops", self.me, dict(metric="height", spot="Elsewhere", withMyPlace=True))
+        self.assertEqual(scoped, dict(leaders=[], myPlace=None))
+        profile = self.call("PUT", "/me", self.me, dict(name="Member", totals=self.totals, premium=True,
+                                                        premiumUntil=4e9))["mine"]["profile"]
+        self.assertFalse(profile["premium"])
+        self.assertFalse(profile["publicProfile"])
+        self.assertFalse(profile["statsPublic"])
 
     def test_message_attachment_private_and_retry_safe(self):
         sender = self.publish(self.me, "rider")["mine"]["id"]
