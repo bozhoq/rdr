@@ -160,7 +160,7 @@ final class RiderSOSAppDelegate: NSObject, UIApplicationDelegate, UNUserNotifica
     }
 
     func refreshAuthorization(prompt: Bool = false) async {
-        guard RiderCommunity.endpoint != nil, !requestingPermission else { return }
+        guard RiderCommunity.endpoint != nil, !RiderCommunity.usesLANTrust, !requestingPermission else { return }
         requestingPermission = true
         defer { requestingPermission = false }
         let center = UNUserNotificationCenter.current()
@@ -267,7 +267,9 @@ struct RiderSOSReadiness: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             Label("SOS рядом", systemImage: "dot.radiowaves.left.and.right").font(.headline)
-            if RiderCommunity.endpoint == nil {
+            if RiderCommunity.usesLANTrust {
+                Text("В домашнем тесте можно посмотреть радар. Для уведомлений SOS нужна отдельная настройка Apple Push.")
+            } else if RiderCommunity.endpoint == nil {
                 Text("Приём появится после подключения сервера Rider.")
             } else if !service.available {
                 Text(service.receiverStatus ?? "Чтобы получать сигналы от райдеров рядом, разреши уведомления.")
@@ -355,8 +357,8 @@ struct RiderSOSControl: View {
         .sheet(isPresented: $showingRadar) {
             RiderSOSRadarScreen(fix: receipt?.location ?? RiderSOSFix(recorder.usableFix),
                                 receipt: receipt, sending: sending, message: feedback,
-                                send: RiderCommunity.endpoint != nil ? { Task { await send() } } : nil,
-                                enableReplies: RiderCommunity.endpoint != nil ? {
+                                send: RiderCommunity.endpoint != nil && !RiderCommunity.usesLANTrust ? { Task { await send() } } : nil,
+                                enableReplies: RiderCommunity.endpoint != nil && !RiderCommunity.usesLANTrust ? {
                 Task { await RiderSOSService.shared.refreshAuthorization(prompt: true) }
             } : nil)
             .onAppear { RiderSOSService.shared.showRadar(true) }
@@ -429,6 +431,8 @@ private struct RiderSOSRadarScreen: View {
                             Text(fix == nil ? "Ждём точную GPS-позицию" : "Готов к отправке").font(.title3.bold())
                             Text("Имя, комплект и точка GPS будут доступны райдерам в зоне оповещения.")
                                 .font(.subheadline).foregroundStyle(.secondary)
+                        } else if RiderCommunity.usesLANTrust {
+                            Text("Домашний режим · просмотр радара").font(.title3.bold())
                         } else if RiderCommunity.endpoint == nil {
                             Text("Сервер Rider ещё не подключён.").font(.title3.bold())
                         } else if message == nil {

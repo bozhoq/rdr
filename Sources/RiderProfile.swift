@@ -42,7 +42,87 @@ struct RiderStatisticsUpdate: Encodable, Equatable {
     }
 }
 
+/// A test IPA can pin its LAN server without installing a root CA on the iPhone.
+private final class RiderLANTrust: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    let origin: URL
+    let root: Data
+    let serverCertificate: Data
+
+    init(origin: URL, root: Data, serverCertificate: Data) {
+        self.origin = origin
+        self.root = root
+        self.serverCertificate = serverCertificate
+    }
+
+    func matches(_ url: URL?) -> Bool {
+        guard let url else { return false }
+        return url.scheme == "https" && url.host == origin.host && url.port == origin.port &&
+            url.user == nil && url.password == nil
+    }
+
+    func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge)
+        async -> (URLSession.AuthChallengeDisposition, URLCredential?) {
+        let space = challenge.protectionSpace
+        guard space.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+              space.host == origin.host, space.port == (origin.port ?? 443),
+              let trust = space.serverTrust,
+              let rootCertificate = SecCertificateCreateWithData(nil, root as CFData),
+              SecTrustSetPolicies(trust, SecPolicyCreateSSL(true, space.host as CFString)) == errSecSuccess,
+              SecTrustSetAnchorCertificates(trust, [rootCertificate] as CFArray) == errSecSuccess,
+              SecTrustSetAnchorCertificatesOnly(trust, true) == errSecSuccess,
+              SecTrustEvaluateWithError(trust, nil),
+              let chain = SecTrustCopyCertificateChain(trust) as? [SecCertificate],
+              let leaf = chain.first,
+              SecCertificateCopyData(leaf) as Data == serverCertificate else {
+            return (.cancelAuthenticationChallenge, nil)
+        }
+        return (.useCredential, URLCredential(trust: trust))
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest) async -> URLRequest? {
+        matches(request.url) ? request : nil
+    }
+}
+
 enum RiderCommunity {
+    private static let lanTrust: RiderLANTrust? = {
+        guard let address = endpoint, let host = address.host,
+              let root = Bundle.main.object(forInfoDictionaryKey: "RiderLANRootCertificate") as? Data,
+              let certificate = Bundle.main.object(forInfoDictionaryKey: "RiderLANServerCertificate") as? Data else { return nil }
+        let octets = host.split(separator: ".").compactMap { UInt8($0) }
+        guard octets.count == 4, octets.map(String.init).joined(separator: ".") == host else { return nil }
+        let local = octets[0] == 10 || (octets[0] == 172 && (16...31).contains(octets[1])) ||
+            (octets[0] == 192 && octets[1] == 168)
+        guard local else { return nil }
+        return RiderLANTrust(origin: address, root: root, serverCertificate: certificate)
+    }()
+
+    static var usesLANTrust: Bool { lanTrust != nil }
+
+    private static let networkSession: URLSession = {
+        guard let lanTrust else { return .shared }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.waitsForConnectivity = true
+        configuration.timeoutIntervalForRequest = 12
+        configuration.timeoutIntervalForResource = 20
+        return URLSession(configuration: configuration, delegate: lanTrust, delegateQueue: nil)
+    }()
+
+    static func localPhoto(_ url: URL) async -> Data? {
+        guard lanTrust?.matches(url) == true,
+              let (data, response) = try? await networkSession.data(from: url),
+              (response as? HTTPURLResponse)?.statusCode == 200,
+              data.count <= 390_000 else { return nil }
+        return data
+    }
+
+    private struct Health: Decodable { let status: String }
+    static func checkHealth() async throws -> Bool {
+        let result: Health = try await decode("health")
+        return result.status == "ready"
+    }
+
     struct SeasonCredit: Decodable, Equatable {
         let year: Int
         let followers: Int
@@ -224,7 +304,7 @@ enum RiderCommunity {
             req.httpBody = body
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
-        let (data, response) = try await URLSession.shared.data(for: req)
+        let (data, response) = try await networkSession.data(for: req)
         let statusCode = (response as? HTTPURLResponse)?.statusCode
         if statusCode == 409 { throw Rejection.conflict }
         if statusCode == 403 { throw Rejection.forbidden }
@@ -247,6 +327,8 @@ struct RiderProfileView: View {
     @State private var composing = false
     @State private var mine: RemoteRider?
     @State private var showingRanks = false
+    @State private var lanServerStatus: String?
+    @State private var checkingLANServer = false
 
     private var cleanedUsername: String {
         draftUsername.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -264,6 +346,7 @@ struct RiderProfileView: View {
         return ScrollView {
             VStack(spacing: 18) {
                 profile
+                if RiderCommunity.usesLANTrust { lanServerCheck }
                 TimelineView(.everyMinute) { context in
                     Button { showingRanks = true } label: {
                         RiderRankCard(progress: social.progress(recorder.history, at: max(context.date, Date())))
@@ -363,6 +446,23 @@ struct RiderProfileView: View {
                   jpg.count <= 96_000, !Task.isCancelled else { return }
             photo = jpg
         }
+    }
+
+    private var lanServerCheck: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("Домашний сервер Rider", systemImage: "network").font(.subheadline.bold())
+            if let lanServerStatus { Text(lanServerStatus).font(.caption).foregroundStyle(.secondary) }
+            Button(checkingLANServer ? "Проверяем…" : "Проверить сервер") {
+                checkingLANServer = true
+                Task {
+                    defer { checkingLANServer = false }
+                    do { lanServerStatus = try await RiderCommunity.checkHealth() ? "Сервер отвечает" : "Сервер пока не готов" }
+                    catch { lanServerStatus = "Нет связи. Проверь Wi-Fi, доступ к локальной сети и запуск сервера на ПК." }
+                }
+            }
+            .buttonStyle(.bordered).disabled(checkingLANServer)
+        }
+        .lagoonCard()
     }
 
     private func profileEditor(_ totals: RiderTotals) -> some View {

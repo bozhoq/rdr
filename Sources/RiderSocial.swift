@@ -231,12 +231,16 @@ final class RiderSocialStore: ObservableObject {
 
 struct RiderPostSquare: View {
     let post: RiderPost
+    @State private var localImage: UIImage?
 
     var body: some View {
         GeometryReader { bounds in
             Group {
                 if let data = post.photo, let loaded = UIImage(data: data) {
                     Image(uiImage: loaded).resizable().scaledToFill()
+                } else if RiderCommunity.usesLANTrust {
+                    if let localImage { Image(uiImage: localImage).resizable().scaledToFill() }
+                    else { placeholder }
                 } else {
                     AsyncImage(url: post.remotePhoto) { phase in
                         if let photo = phase.image { photo.resizable().scaledToFill() }
@@ -250,6 +254,11 @@ struct RiderPostSquare: View {
         .aspectRatio(1, contentMode: .fit)
         .background(RiderTheme.surface)
         .accessibilityLabel(post.caption.isEmpty ? "Фото публикации" : post.caption)
+        .task(id: post.remotePhoto) {
+            guard RiderCommunity.usesLANTrust, post.photo == nil, let url = post.remotePhoto else { return }
+            localImage = nil
+            if let data = await RiderCommunity.localPhoto(url), !Task.isCancelled { localImage = UIImage(data: data) }
+        }
     }
 
     private var placeholder: some View {
@@ -897,7 +906,9 @@ struct RiderFeedCard: View {
                         }
                         .disabled(changingRepost)
                     }
-                    ShareLink(item: url) { Label("Поделиться ссылкой", systemImage: "square.and.arrow.up") }
+                    if !RiderCommunity.usesLANTrust {
+                        ShareLink(item: url) { Label("Поделиться ссылкой", systemImage: "square.and.arrow.up") }
+                    }
                 } else if let bytes = post.photo, let image = UIImage(data: bytes) {
                     ShareLink(item: RiderPostPhoto(bytes: bytes),
                               message: Text(post.caption), preview: SharePreview("Фото Rider", image: Image(uiImage: image))) {
