@@ -246,6 +246,63 @@ class CommunityTests(unittest.TestCase):
         events = self.call("GET", "/people/alerts", self.me)
         self.assertEqual([e["kind"] for e in events], ["message","message"])
 
+    def test_journal_video_privacy_and_idempotent_publish(self):
+        rider = self.publish(self.me, "author")["mine"]
+        self.publish(self.audience, "viewer")
+        note = str(UUID(int=700))
+        path = "/posts/" + note
+        self.call("PUT", path, self.me, dict(id=note, caption="   ", section="journal"), expect=400)
+        self.call("PUT", path, self.me, dict(id=note, caption="Тест"), expect=400)
+        self.call("PUT", path, self.me, dict(id=note, caption="Текст заметки", section="journal"))
+        self.call("PUT", path, self.me, dict(id=note, caption="Текст заметки", section="journal"))
+        items = self.call("GET", "/riders/" + rider["id"], self.me)["posts"]
+        self.assertEqual(len(items), 1)
+        self.assertFalse(items[0]["post"]["hasCover"])
+        self.assertEqual(items[0]["post"]["section"], "journal")
+        self.assertNotIn(b"<img", self.call("GET", path + "/view", self.audience, raw=True))
+        self.call("GET", path + "/photo", self.audience, expect=404)
+
+        clip = bytes.fromhex("000000186674797069736f6d30303030")
+        video = str(UUID(int=701))
+        video_path = "/posts/" + video
+        content = dict(id=video, caption="", photo="/9j/2Q==", video=base64.b64encode(clip).decode())
+        self.call("PUT", video_path, self.me, dict(content, video="c2NyaXB0"), expect=400)
+        self.call("PUT", video_path, self.me, content)
+        self.call("PUT", video_path, self.audience, content, expect=409)
+        self.assertEqual(self.call("GET", video_path + "/video", self.audience, raw=True), clip)
+        captured = []
+        response = service.application(dict(REQUEST_METHOD="GET", PATH_INFO=video_path + "/video", HTTP_RANGE="bytes=4-7"),
+                                       lambda status, headers: captured.append((status, dict(headers))))
+        self.assertEqual(b"".join(response), b"ftyp")
+        self.assertEqual(captured[0][0], "206 Partial Content")
+        self.assertEqual(captured[0][1]["Content-Range"], f"bytes 4-7/{len(clip)}")
+        self.call("PATCH", "/me", self.me, {"publicProfile":False})
+        self.call("GET", video_path + "/video", self.audience, expect=404)
+
+    def test_comment_likes_and_complete_shaka_list(self):
+        self.publish(self.me, "author")
+        tokens = [letter * 72 for letter in "bcde"]
+        people = [self.publish(token, "rider_" + token[0])["mine"]["id"] for token in tokens]
+        identifier = str(UUID(int=710))
+        post = "/posts/" + identifier
+        self.call("PUT", post, self.me, dict(id=identifier, caption="Фото", photo="/9j/2Q=="))
+        for token in tokens:
+            self.now += 1
+            preview = self.call("PUT", post + "/shaka", token)
+        self.assertEqual((preview["total"], len(preview["people"])), (4, 3))
+        full = self.call("GET", post + "/shakas/0", self.me)
+        self.assertEqual({person["id"] for person in full["people"]}, set(people))
+        self.assertEqual(self.call("GET", post + "/shakas/3", self.me)["people"][0]["id"], people[0])
+        comment = post + "/comments/" + str(UUID(int=711))
+        self.call("PUT", comment, tokens[0], {"text":"Круто!"})
+        for _ in range(2):
+            updated = self.call("PUT", comment + "/like", tokens[1])
+        self.assertEqual((updated[0]["likes"], updated[0]["liked"]), (1, True))
+        other = self.call("GET", post + "/comments", tokens[2])[0]
+        self.assertEqual((other["likes"], other["liked"]), (1, False))
+        self.call("PUT", post + "/comments/" + str(UUID(int=712)) + "/like", tokens[1], expect=404)
+        self.assertEqual(self.call("DELETE", comment + "/like", tokens[1])[0]["likes"], 0)
+
     def test_post_interaction_endpoints(self):
         rider = self.publish(self.me, "rider")["mine"]
         self.publish(self.audience, "viewer")

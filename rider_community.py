@@ -50,6 +50,15 @@ CREATE INDEX IF NOT EXISTS replies_by_parent ON comment_replies(parent);
 CREATE TABLE IF NOT EXISTS post_equipment(
     post TEXT PRIMARY KEY REFERENCES posts(id) ON DELETE CASCADE, document TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS post_media(
+    post TEXT PRIMARY KEY REFERENCES posts(id) ON DELETE CASCADE,
+    section TEXT NOT NULL CHECK(section IN ('gallery','journal')), video BLOB
+);
+CREATE TABLE IF NOT EXISTS comment_likes(
+    comment TEXT NOT NULL REFERENCES post_comments(id) ON DELETE CASCADE,
+    owner TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+    PRIMARY KEY(comment, owner)
+);
 CREATE TABLE IF NOT EXISTS shakas(
     post TEXT NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
     owner TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
@@ -507,11 +516,25 @@ def post_fields(raw, target):
     if not isinstance(raw, dict) or identifier(raw.get("id")) != target:
         raise ValueError("invalid post")
     caption, location, photo = raw.get("caption"), raw.get("location"), raw.get("photo")
-    if not isinstance(caption, str) or len(caption) > 800 or not isinstance(photo, str):
-        raise ValueError("invalid caption or photo")
-    image = base64.b64decode(photo, validate=True)
-    if not 3 < len(image) <= 390000 or not image.startswith(b"\xff\xd8\xff"):
-        raise ValueError("invalid post photo")
+    section, clip = raw.get("section", "gallery"), raw.get("video")
+    if not isinstance(caption, str) or len(caption) > 800 or section not in ("gallery", "journal"):
+        raise ValueError("invalid caption or section")
+    image = b""
+    if photo is not None:
+        if not isinstance(photo, str):
+            raise ValueError("invalid post photo")
+        image = base64.b64decode(photo, validate=True)
+        if not 3 < len(image) <= 390000 or not image.startswith(b"\xff\xd8\xff"):
+            raise ValueError("invalid post photo")
+    video = None
+    if clip is not None:
+        if not isinstance(clip, str):
+            raise ValueError("invalid video")
+        video = base64.b64decode(clip, validate=True)
+        if not 12 < len(video) <= 12 * 1024 * 1024 or video[4:8] != b"ftyp" or not image:
+            raise ValueError("invalid video or missing cover")
+    if (section == "gallery" and not image) or (not caption.strip() and not image):
+        raise ValueError("empty post or missing gallery media")
     if location is not None:
         if not isinstance(location, dict) or not isinstance(location.get("name"), str):
             raise ValueError("invalid geotag")
@@ -529,7 +552,7 @@ def post_fields(raw, target):
         if any(not isinstance(equipment.get(key), str) or not 1 <= len(equipment[key].strip()) <= 120 for key in fields):
             raise ValueError("invalid equipment")
         equipment = json.dumps({key: equipment[key].strip() for key in fields}, ensure_ascii=False)
-    return caption.strip(), location, image, equipment
+    return caption.strip(), location, image, equipment, section, video
 
 
 def is_premium(profile):
@@ -541,11 +564,11 @@ def rider_card(owner, document):
     return {"id": owner, "premium": is_premium(rider), "name": rider["name"], "username": rider.get("username"), "avatar": rider.get("avatar")}
 
 
-def reactions(db, post_id, owner):
+def reactions(db, post_id, owner, limit=3, offset=0):
     count, mine = db.execute("""SELECT count(*),max(s.owner=?) FROM shakas s
         JOIN public_profiles r ON r.id=s.owner WHERE s.post=?""", (owner, post_id)).fetchone()
     recent = db.execute("""SELECT r.id,r.document FROM shakas s JOIN public_profiles r ON r.id=s.owner
-        WHERE s.post=? ORDER BY s.created_at DESC,s.owner LIMIT 3""", (post_id,))
+        WHERE s.post=? ORDER BY s.created_at DESC,s.owner LIMIT ? OFFSET ?""", (post_id, limit, offset))
     return {"total": count, "mine": bool(mine), "people": [rider_card(*row) for row in recent]}
 
 
@@ -563,18 +586,19 @@ def feed(db, owner, mode, post_id=None):
         UNION ALL SELECT id,post,owner,created_at FROM reposts
     )
     SELECT e.id,p.id,e.created_at,p.caption,p.location,g.document,
-           e.owner,r.document,p.owner,src.document,
+           e.owner,r.document,p.owner,src.document,coalesce(m.section,'gallery'),m.video IS NOT NULL,length(p.photo)>0,
            EXISTS(SELECT 1 FROM follows WHERE owner=? AND target=e.owner),
            EXISTS(SELECT 1 FROM reposts WHERE owner=? AND post=p.id)
     FROM entries e JOIN posts p ON p.id=e.source JOIN public_profiles r ON r.id=e.owner
-    JOIN public_profiles src ON src.id=p.owner LEFT JOIN post_equipment g ON g.post=p.id
+    JOIN public_profiles src ON src.id=p.owner LEFT JOIN post_equipment g ON g.post=p.id LEFT JOIN post_media m ON m.post=p.id
     WHERE """ + filters[mode] + " ORDER BY e.created_at DESC,e.id LIMIT 40"
     entries = []
     for row in db.execute(query, (owner, owner, *params)):
-        entry_id, source, created, caption, location, gear, author_id, document, source_owner, source_doc, following, reposted = row
+        entry_id, source, created, caption, location, gear, author_id, document, source_owner, source_doc, section, video, photo, following, reposted = row
         author = rider_card(author_id, document)
         post = {"id": entry_id, "createdAt": created, "caption": caption, "published": True,
-                "location": json.loads(location) if location else None, "equipment": json.loads(gear) if gear else None}
+                "location": json.loads(location) if location else None, "equipment": json.loads(gear) if gear else None,
+                "section": section, "hasVideo": bool(video), "hasCover": bool(photo)}
         if entry_id != source:
             original = rider_card(source_owner, source_doc)
             post.update(sourceID=source, sourceAuthor=original["name"], sourceUsername=original["username"])
@@ -646,18 +670,20 @@ def comment_summary(db, post_id):
 
 
 def comments(db, post_id, owner):
-    query = """SELECT c.id,c.author,c.created_at,c.body,p.document,parent.id,pp.document
+    query = """SELECT c.id,c.author,c.created_at,c.body,p.document,parent.id,pp.document,
+        (SELECT count(*) FROM comment_likes l JOIN public_profiles r ON r.id=l.owner WHERE l.comment=c.id),
+        EXISTS(SELECT 1 FROM comment_likes WHERE comment=c.id AND owner=?)
         FROM post_comments c JOIN public_profiles p ON p.id=c.author
         LEFT JOIN comment_replies x ON x.comment=c.id LEFT JOIN post_comments parent ON parent.id=x.parent
         LEFT JOIN public_profiles pp ON pp.id=parent.author
         WHERE c.post=? ORDER BY c.created_at DESC,c.id DESC LIMIT 100"""
     output = []
-    for comment_id, author_id, created_at, body, document, parent, parent_doc in reversed(list(db.execute(query, (post_id,)))):
+    for comment_id, author_id, created_at, body, document, parent, parent_doc, likes, liked in reversed(list(db.execute(query, (owner, post_id)))):
         person = rider_card(author_id, document)
         output.append({"id": comment_id, "createdAt": created_at, "text": body,
                        "author": person["name"], "username": person["username"], "avatar": person["avatar"],
                        "premium": person["premium"], "replyTo": parent, "replyName": (json.loads(parent_doc).get("username") or json.loads(parent_doc)["name"]) if parent_doc else None,
-                       "authorID": author_id, "mine": author_id == owner})
+                       "authorID": author_id, "mine": author_id == owner, "likes": likes, "liked": bool(liked)})
     return output
 
 
@@ -776,15 +802,17 @@ def application(env, start_response):
             return send("404 Not Found", {"error": "unknown post"})
         with closing(sqlite3.connect(os.environ.get("RIDER_DB", "rider-profiles.sqlite3"), timeout=5)) as db:
             db.executescript(SCHEMA)
-            row = db.execute("""SELECT r.document,p.caption FROM posts p JOIN public_profiles r ON r.id=p.owner WHERE p.id=?""",
+            row = db.execute("""SELECT r.document,p.caption,length(p.photo)>0,m.video IS NOT NULL FROM posts p JOIN public_profiles r ON r.id=p.owner LEFT JOIN post_media m ON m.post=p.id WHERE p.id=?""",
                              (post_id,)).fetchone()
         if row is None:
             return send("404 Not Found", {"error": "unknown post"})
         name, caption = escape(json.loads(row[0])["name"]), escape(row[1])
+        media = ('<video width="100%" src="video" poster="photo" controls playsinline></video>' if row[3]
+                 else '<img width="100%" src="photo" alt="Фото публикации">' if row[2] else '')
         page = (f'<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width">'
                 f'<title>{name} · Rider</title><body style="max-width:680px;margin:24px auto;padding:0 16px;'
                 f'font:17px system-ui;background:#eaf9f7;color:#083d43"><h1>{name} · Rider</h1>'
-                f'<img width="100%" src="photo" alt="Фото публикации"><p>{caption}</p></body></html>').encode("utf-8")
+                f'{media}<p style="white-space:pre-wrap">{caption}</p></body></html>').encode("utf-8")
         start_response("200 OK", [("Content-Type", "text/html; charset=utf-8"),
                                   ("Cache-Control", "no-store"), ("Content-Length", str(len(page)))])
         return [page]
@@ -793,22 +821,46 @@ def application(env, start_response):
     rider_path = re.fullmatch(r"/riders/([a-z0-9_]{2,64})(?:/(followers|following))?", path)
     attachment_path = re.fullmatch(r"/messages/([0-9a-f]{64})/([a-fA-F0-9-]{36})/attachment", path)
     direct_path = re.fullmatch(r"/messages/([0-9a-f]{64})(?:/([a-fA-F0-9-]{36}))?", path)
-    photo_path = re.fullmatch(r"/posts/([a-fA-F0-9-]{36})/photo", path)
+    media_path = re.fullmatch(r"/posts/([a-fA-F0-9-]{36})/(photo|video)", path)
     comment_path = re.fullmatch(r"/posts/([a-fA-F0-9-]{36})/comments(?:/([a-fA-F0-9-]{36}))?", path)
-    if method == "GET" and photo_path:
+    comment_reaction = re.fullmatch(r"/posts/([a-fA-F0-9-]{36})/comments/([a-fA-F0-9-]{36})/like", path)
+    if method in ("GET", "HEAD") and media_path:
         try:
-            post_id = identifier(photo_path[1])
+            post_id = identifier(media_path[1])
         except ValueError:
-            return send("404 Not Found", {"error": "unknown photo"})
+            return send("404 Not Found", {"error": "unknown media"})
+        video = media_path[2] == "video"
+        column = "m.video" if video else "s.photo"
         with closing(sqlite3.connect(os.environ.get("RIDER_DB", "rider-profiles.sqlite3"), timeout=5)) as db:
             db.executescript(SCHEMA)
-            row = db.execute("SELECT s.photo FROM posts s JOIN public_profiles p ON p.id=s.owner WHERE s.id=?", (post_id,)).fetchone()
-        if row is None:
-            return send("404 Not Found", {"error": "unknown photo"})
-        photo, = row
-        start_response("200 OK", [("Content-Type", "image/jpeg"), ("Content-Length", str(len(photo))),
-                                  ("Cache-Control", "no-store"), ("X-Content-Type-Options", "nosniff")])
-        return [photo]
+            row = db.execute(f"""SELECT {column} FROM posts s JOIN public_profiles p ON p.id=s.owner
+                LEFT JOIN post_media m ON m.post=s.id WHERE s.id=?""", (post_id,)).fetchone()
+        if not row or not row[0]:
+            return send("404 Not Found", {"error": "unknown media"})
+        data = row[0]
+        status = "200 OK"
+        headers = [("Content-Type", "video/mp4" if video else "image/jpeg"),
+                   ("Cache-Control", "no-store"), ("X-Content-Type-Options", "nosniff")]
+        if video:
+            size = len(data)
+            headers.append(("Accept-Ranges", "bytes"))
+            requested = env.get("HTTP_RANGE")
+            if requested:
+                bounds = re.fullmatch(r"bytes=([0-9]{0,12})-([0-9]{0,12})", requested)
+                if bounds and bounds[1]:
+                    first, last = int(bounds[1]), min(int(bounds[2]), size-1) if bounds[2] else size-1
+                elif bounds and bounds[2]:
+                    first, last = max(0, size - int(bounds[2])), size-1
+                else:
+                    first, last = 0, -1
+                if first > last:
+                    start_response("416 Range Not Satisfiable", headers + [("Content-Range", f"bytes */{size}"), ("Content-Length", "0")])
+                    return [b""]
+                data = data[first:last+1]
+                status = "206 Partial Content"
+                headers.append(("Content-Range", f"bytes {first}-{last}/{size}"))
+        start_response(status, headers + [("Content-Length", str(len(data)))])
+        return [data if method == "GET" else b""]
 
     auth = re.fullmatch(r"Bearer ([a-fA-F0-9-]{72})", env.get("HTTP_AUTHORIZATION", ""))
     if not auth:
@@ -1145,10 +1197,30 @@ def application(env, start_response):
                     db.execute("DELETE FROM post_comments WHERE id=? AND post=? AND author=?",
                                (comment_id, post_id, owner))
                 return send("200 OK", comments(db, post_id, owner))
+            elif method == "GET" and (reactors := re.fullmatch(r"/posts/([a-fA-F0-9-]{36})/shakas/([0-9]{1,9})", path)):
+                source = identifier(reactors[1])
+                if not db.execute("SELECT 1 FROM posts p JOIN public_profiles r ON r.id=p.owner WHERE p.id=?", (source,)).fetchone():
+                    return send("404 Not Found", {"error": "unknown post"})
+                return send("200 OK", reactions(db, source, owner, 50, int(reactors[2])))
+            elif comment_reaction and method in ("PUT", "DELETE"):
+                post, comment = map(identifier, comment_reaction.groups())
+                db.execute("BEGIN IMMEDIATE")
+                visible = db.execute("""SELECT 1 FROM post_comments c JOIN public_profiles author ON author.id=c.author
+                    JOIN posts s ON s.id=c.post JOIN public_profiles p ON p.id=s.owner
+                    WHERE c.id=? AND c.post=?""", (comment, post)).fetchone()
+                if not visible:
+                    return send("404 Not Found", {"error": "unknown comment"})
+                if not db.execute("SELECT 1 FROM public_profiles WHERE id=?", (owner,)).fetchone():
+                    return send("403 Forbidden", {"error": "publish a profile first"})
+                if method == "PUT":
+                    db.execute("INSERT OR IGNORE INTO comment_likes VALUES (?,?)", (comment, owner))
+                else:
+                    db.execute("DELETE FROM comment_likes WHERE comment=? AND owner=?", (comment, owner))
+                return send("200 OK", comments(db, post, owner))
             elif path.startswith("/posts/") and method in ("PUT", "DELETE"):
                 try:
                     post_id = identifier(path.removeprefix("/posts/"))
-                    fields = post_fields(read_json(env, 560000), post_id) if method == "PUT" else None
+                    fields = post_fields(read_json(env, 17_400_000), post_id) if method == "PUT" else None
                 except (ValueError, TypeError, RecursionError):
                     return send("400 Bad Request", {"error": "invalid post"})
                 if fields is None:
@@ -1159,7 +1231,7 @@ def application(env, start_response):
                     return send("403 Forbidden", {"error": "publish a profile first"})
                 if db.execute("SELECT 1 FROM reposts WHERE id=?", (post_id,)).fetchone():
                     return send("409 Conflict", {"error": "post ID is taken"})
-                caption, location, image, equipment = fields
+                caption, location, image, equipment, section, video = fields
                 affected = db.execute("""INSERT INTO posts VALUES (?,?,?,?,?,?)
                     ON CONFLICT(id) DO UPDATE SET caption=excluded.caption,location=excluded.location,photo=excluded.photo
                     WHERE posts.owner=excluded.owner""", (post_id, owner, time.time(), caption, location, image))
@@ -1170,6 +1242,8 @@ def application(env, start_response):
                 else:
                     db.execute("""INSERT INTO post_equipment VALUES (?,?)
                         ON CONFLICT(post) DO UPDATE SET document=excluded.document""", (post_id, equipment))
+                db.execute("""INSERT INTO post_media VALUES (?,?,?) ON CONFLICT(post)
+                              DO UPDATE SET section=excluded.section,video=excluded.video""", (post_id, section, video))
                 return send("200 OK", {"published": True})
             elif (path, method) != ("/riders", "GET"):
                 return send("404 Not Found", {"error": "unknown endpoint"})
