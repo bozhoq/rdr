@@ -192,7 +192,7 @@ private struct RiderPeopleView: View {
             }
             try Task.checkCancellation()
             page = response
-        } catch { if !Task.isCancelled { error = "Не удалось получить список райдеров." } }
+        } catch { if !Task.isCancelled { self.error = "Не удалось получить список райдеров." } }
     }
 }
 
