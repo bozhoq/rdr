@@ -80,6 +80,18 @@ class CommunityTests(unittest.TestCase):
         self.stats(long_season, revision=3)
         self.assertEqual(self.ranking(2026)[0]["points"], 3660)
 
+    def test_missions_use_session_metrics(self):
+        self.publish(self.me, "rider")
+        self.stats([dict(self.ride, mission="jumps1", scoringJumps=1)])
+        self.assertEqual(self.ranking(2026)[0]["points"], 146)
+        self.stats([dict(self.ride, mission="route1")], revision=1)
+        self.assertEqual(self.ranking(2026)[0]["points"], 145)
+        self.stats([dict(self.ride, mission="route1", missionDistance=1000)], revision=2)
+        self.assertEqual(self.ranking(2026)[0]["points"], 151)
+        self.stats([dict(self.ride, mission="height3", seconds=899)], revision=3)
+        self.assertEqual(self.ranking(2026)[0]["points"], 144)
+        self.stats([dict(self.ride, mission="unknown")], expect=400)
+
     def test_post_interaction_endpoints(self):
         rider = self.publish(self.me, "rider")["mine"]
         self.publish(self.audience, "viewer")

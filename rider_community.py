@@ -83,6 +83,38 @@ CREATE INDEX IF NOT EXISTS scores_by_year ON season_scores(year);
 
 SEASON_ZONE = timezone(timedelta(hours=3))
 MINIMUM_SCORING_HEIGHT = 2.0
+MINIMUM_MISSION_SECONDS = 15 * 60
+# Keep the stable mission IDs and rewards in sync with RiderMission in SessionInsights.swift.
+MISSION_RULES = {
+    "water15": ("water", 15, 5),
+    "water25": ("water", 25, 8),
+    "water35": ("water", 35, 10),
+    "water45": ("water", 45, 12),
+    "water60": ("water", 60, 15),
+    "water90": ("water", 90, 20),
+    "route1": ("route", 1000, 6),
+    "route2": ("route", 2000, 8),
+    "route3": ("route", 3000, 10),
+    "route5": ("route", 5000, 14),
+    "route8": ("route", 8000, 18),
+    "route12": ("route", 12000, 22),
+    "jumps1": ("jumps", 1, 6),
+    "jumps3": ("jumps", 3, 9),
+    "jumps5": ("jumps", 5, 12),
+    "jumps8": ("jumps", 8, 15),
+    "jumps12": ("jumps", 12, 20),
+    "jumps20": ("jumps", 20, 25),
+    "height2": ("height", 2, 6),
+    "height3": ("height", 3, 8),
+    "height4": ("height", 4, 11),
+    "height5": ("height", 5, 14),
+    "height6": ("height", 6, 18),
+    "air1": ("air", 1, 6),
+    "air15": ("air", 1.5, 8),
+    "air2": ("air", 2, 10),
+    "air25": ("air", 2.5, 13),
+    "air3": ("air", 3, 16),
+}
 
 
 def season_at(now):
@@ -96,7 +128,7 @@ def activity_points(items, start, end, now):
     if not isinstance(items, list) or len(items) > 5000:
         raise ValueError("invalid rides")
     seen = set()
-    seconds = jumps = scoring_jumps = 0
+    seconds = jumps = scoring_jumps = mission_points = 0
     best_height = best_airtime = 0
     for item in items:
         if not isinstance(item, dict):
@@ -124,10 +156,24 @@ def activity_points(items, start, end, now):
         scoring_jumps += qualifying
         best_height = max(best_height, height or 0)
         best_airtime = max(best_airtime, airtime or 0)
+        mission = item.get("mission")
+        if mission is not None:
+            if not isinstance(mission, str) or mission not in MISSION_RULES:
+                raise ValueError("invalid mission")
+            category, target, reward = MISSION_RULES[mission]
+            distance = item.get("missionDistance")
+            if distance is not None and (category != "route" or not number(distance, 0, 500000)):
+                raise ValueError("invalid mission distance")
+            values = {"water": duration / 60, "route": distance or 0, "jumps": qualifying,
+                      "height": height or 0, "air": airtime or 0}
+            if duration >= MINIMUM_MISSION_SECONDS and values[category] >= target:
+                mission_points += reward
     achievements = ((bool(seen), 20), (seconds >= 36000, 80), (seconds >= 180000, 200),
                     (best_height >= 5, 60), (best_height >= 10, 120),
                     (best_airtime >= 3, 40), (jumps >= 50, 80))
-    return seconds // 60 + scoring_jumps * 5 + sum(bonus for reached, bonus in achievements if reached)
+    return seconds // 60 + scoring_jumps * 5 + mission_points + sum(
+        bonus for reached, bonus in achievements if reached
+    )
 
 
 def replace_records(db, owner, scores):

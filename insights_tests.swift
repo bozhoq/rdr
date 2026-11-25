@@ -116,6 +116,28 @@ import FoundationXML
         let afterS = RiderSeasonProgress(longSeason, at: origin.addingTimeInterval(7 * 86400))
         check(afterS.rank == .s && afterS.points == 3660 && afterS.fraction == 1,
               "Riding alone can reach S, and the rank does not cap points")
+        var missionRide = twoMeterRide
+        missionRide.mission = .jumps1
+        let earnedMission = RiderSeasonProgress([missionRide, missionRide], at: origin)
+        check(earnedMission.points == boundary.points + 6 && RiderMission.earned(in: [missionRide, missionRide]) == [.jumps1],
+              "A completed selected mission contributes one seasonal bonus and one sticker")
+        missionRide.durationSeconds = 899
+        check(RiderSeasonProgress([missionRide], at: origin).rides.first?.missionPoints == 0 &&
+              RiderMission.earned(in: [missionRide]).isEmpty,
+              "A brief test cannot award a mission even when the jump qualifies")
+        missionRide.durationSeconds = 900
+        missionRide.mission = .route1
+        missionRide.gpsMetrics = RouteMetrics(accepted: 4, distanceMeters: 1200)
+        check(RiderSeasonProgress([missionRide], at: origin).rides.first?.missionPoints == 0,
+              "Route missions need enough accepted GPS fixes")
+        missionRide.gpsMetrics?.accepted = 5
+        check(RiderSeasonProgress([missionRide], at: origin).rides.first?.missionPoints == 6 &&
+              RiderSessionHighlight.best(for: missionRide, history: [missionRide])?.title == "Первая каталка в Rider",
+              "GPS completion and a personal highlight appear on a finished ride")
+        missionRide.status = .interrupted
+        check(RiderMission.earned(in: [missionRide]).isEmpty &&
+              RiderSessionHighlight.best(for: missionRide, history: []) == nil,
+              "Interrupted rides do not earn stickers or finish highlights")
         let january = ISO8601DateFormatter().date(from: "2024-01-01T00:00:00+03:00")!
         check(RiderSeasonProgress([rideForProfile], at: january).points == 0 &&
               RiderRank.forPoints(2999) == .a && RiderRank.forPoints(3000) == .s,
