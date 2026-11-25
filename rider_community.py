@@ -82,6 +82,7 @@ CREATE INDEX IF NOT EXISTS scores_by_year ON season_scores(year);
 """
 
 SEASON_ZONE = timezone(timedelta(hours=3))
+MINIMUM_SCORING_HEIGHT = 2.0
 
 
 def season_at(now):
@@ -95,7 +96,7 @@ def activity_points(items, start, end, now):
     if not isinstance(items, list) or len(items) > 5000:
         raise ValueError("invalid rides")
     seen = set()
-    seconds = jumps = 0
+    seconds = jumps = scoring_jumps = 0
     best_height = best_airtime = 0
     for item in items:
         if not isinstance(item, dict):
@@ -111,15 +112,22 @@ def activity_points(items, start, end, now):
             raise ValueError("invalid ride height")
         if airtime is not None and (count == 0 or not number(airtime, 0.01, 120)):
             raise ValueError("invalid ride airtime")
+        # Older clients only sent the total. A peak cannot show how many jumps cleared 2 m.
+        qualifying = item.get("scoringJumps", 0)
+        if type(qualifying) is not int or not 0 <= qualifying <= count:
+            raise ValueError("invalid scoring jump count")
+        if qualifying and (height is None or height < MINIMUM_SCORING_HEIGHT):
+            raise ValueError("invalid scoring jump height")
         seen.add(key)
         seconds += duration
         jumps += count
+        scoring_jumps += qualifying
         best_height = max(best_height, height or 0)
         best_airtime = max(best_airtime, airtime or 0)
     achievements = ((bool(seen), 25), (seconds >= 36000, 100), (seconds >= 180000, 250),
                     (best_height >= 5, 75), (best_height >= 10, 150),
                     (best_airtime >= 3, 50), (jumps >= 50, 100))
-    return seconds // 60 + jumps * 5 + sum(bonus for reached, bonus in achievements if reached)
+    return seconds // 60 + scoring_jumps * 5 + sum(bonus for reached, bonus in achievements if reached)
 
 
 def replace_records(db, owner, scores):

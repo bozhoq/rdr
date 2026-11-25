@@ -19,7 +19,7 @@ class CommunityTests(unittest.TestCase):
         self.me = "a" * 72
         self.audience = "b" * 72
         self.totals = {"sessions": 1, "seconds": 900, "jumps": 2, "height": 5.2, "airtime": 3.1}
-        self.ride = dict(id=str(UUID(int=1)), startedAt=self.now - 1000, seconds=900, jumps=2, height=5.2, airtime=3.1)
+        self.ride = dict(id=str(UUID(int=1)), startedAt=self.now - 1000, seconds=900, jumps=2, scoringJumps=2, height=5.2, airtime=3.1)
 
     def call(self, method, path, token, data=None, expect=200):
         payload = json.dumps(data).encode() if data is not None else b""
@@ -62,6 +62,23 @@ class CommunityTests(unittest.TestCase):
         self.stats([self.ride], expect=409)
         self.call("DELETE", "/me", self.me)
         self.call("GET", "/statistics", self.me, expect=403)
+
+    def test_scoring_threshold_legacy_and_points_above_s(self):
+        self.publish(self.me, "rider")
+        self.stats([dict(self.ride, height=1.999, scoringJumps=1)], expect=400)
+        self.stats([dict(self.ride, height=2, scoringJumps=3)], expect=400)
+        small = dict(self.ride, height=1.999, scoringJumps=0)
+        self.stats([small])
+        self.assertEqual(self.ranking(2026)[0]["points"], 90)
+        self.stats([dict(small, height=2, scoringJumps=1)], revision=1)
+        self.assertEqual(self.ranking(2026)[0]["points"], 95)
+        legacy = {key: value for key, value in self.ride.items() if key != "scoringJumps"}
+        self.stats([legacy], revision=2)
+        self.assertEqual(self.ranking(2026)[0]["points"], 165)
+        long_season = [dict(id=str(UUID(int=i + 10)), startedAt=self.now - i * 86400,
+                            seconds=28800, jumps=0, scoringJumps=0) for i in range(1, 8)]
+        self.stats(long_season, revision=3)
+        self.assertEqual(self.ranking(2026)[0]["points"], 3735)
 
     def test_post_interaction_endpoints(self):
         rider = self.publish(self.me, "rider")["mine"]

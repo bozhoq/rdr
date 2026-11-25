@@ -94,6 +94,28 @@ import FoundationXML
                                            at: origin.addingTimeInterval(100), followers: 1)
         check(annualProgress.rides.count == 1 && annualProgress.points == 600 && annualProgress.achievementPoints == 175 &&
               annualProgress.rank == .c && annualProgress.fraction > 0, "Seasonal rank includes each completed ride once and awards achievement bonuses")
+        var twoMeterRide = rideForProfile
+        twoMeterRide.liveJumpEstimates = [
+            SessionReview.key(for: event, version: JumpDetector.version):
+                LiveJumpEstimate(heightMeters: 1.999, airtimeSeconds: 3, distanceMeters: nil),
+            SessionReview.key(for: unmeasuredJump, version: JumpDetector.version):
+                LiveJumpEstimate(heightMeters: 2, airtimeSeconds: 2, distanceMeters: nil),
+        ]
+        let boundary = RiderSeasonProgress([twoMeterRide], at: origin)
+        check(boundary.rides.first?.scoringJumps == 1 && boundary.rides.first?.jumps == 2 &&
+              boundary.points == 500 && RiderTotals([twoMeterRide]).jumps == 2,
+              "Only jumps reaching two metres earn per-jump points before rounding; both count toward achievements")
+        let longSeason = (0..<7).map { i -> SessionSummary in
+            var ride = SessionSummary(startedAt: origin.addingTimeInterval(Double(i) * 86400),
+                                      gpsEnabledAtStart: false, batteryAtStartPercent: nil)
+            ride.status = .finished
+            ride.setup = SessionSetup(sport: .kite)
+            ride.durationSeconds = 8 * 3600
+            return ride
+        }
+        let afterS = RiderSeasonProgress(longSeason, at: origin.addingTimeInterval(7 * 86400))
+        check(afterS.rank == .s && afterS.points == 3735 && afterS.fraction == 1,
+              "Riding alone can reach S, and the rank does not cap points")
         let january = ISO8601DateFormatter().date(from: "2024-01-01T00:00:00+03:00")!
         check(RiderSeasonProgress([rideForProfile], at: january).points == 0 &&
               RiderRank.forPoints(2999) == .a && RiderRank.forPoints(3000) == .s,
