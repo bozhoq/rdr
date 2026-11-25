@@ -10,6 +10,8 @@ struct SessionApp: App {
     @ObservedObject private var sos = RiderSOSService.shared
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var recorder = SessionRecorder()
+    @State private var showRegistration = false
+    @AppStorage("rider.registrationComplete") private var registrationComplete = false
     @AppStorage("rider.appearance") private var theme = RiderAppearance.lagoon
     @AppStorage("rider.textSize") private var textSize = 0
     @Environment(\.dynamicTypeSize) private var systemSize
@@ -33,6 +35,31 @@ struct SessionApp: App {
                         do { try await Task.sleep(for: .seconds(55)) }
                         catch { break }
                     }
+                }
+                .task(id: scenePhase) {
+                    guard scenePhase == .active, RiderCommunity.endpoint != nil, !registrationComplete else { return }
+                    for _ in 0..<3 {
+                        do {
+                            let status: RiderCommunity.Registration = try await RiderCommunity.decode("registration")
+                            if !Task.isCancelled {
+                                if status.required { showRegistration = true }
+                                else { registrationComplete = true }
+                            }
+                            return
+                        } catch {
+                            do { try await Task.sleep(for: .seconds(3)) } catch { return }
+                        }
+                    }
+                    // Registration can be retried if Wi-Fi or the server is unavailable.
+                    if !Task.isCancelled { showRegistration = true }
+                }
+                .fullScreenCover(isPresented: $showRegistration) {
+                    RiderRegistrationView {
+                        registrationComplete = true
+                        showRegistration = false
+                    }
+                    .interactiveDismissDisabled()
+                    .tint(RiderTheme.accent)
                 }
                 .sheet(item: $sos.inbox) { inbox in
                     if let id = inbox.selected, inbox.outgoing { RiderSOSOutgoing(id: id) }
@@ -224,6 +251,7 @@ private struct Tabs: View {
                     else { Image(systemName: "person.crop.circle") }
                 }
             }
+            .badge(social.unread.messages + social.unread.activity)
             .tag(Tab.rider)
 
         }

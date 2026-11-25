@@ -113,6 +113,7 @@ struct RiderAlertSettings: View {
 
 struct RiderSocialAlerts: ViewModifier {
     @Environment(\.scenePhase) private var phase
+    @EnvironmentObject private var social: RiderSocialStore
     @State private var latest: Int?
     @State private var banner: Alert?
     @State private var showDrill = false
@@ -165,6 +166,7 @@ struct RiderSocialAlerts: ViewModifier {
             let prefs = RiderAlertKind.values
             var synced = false
             while !Task.isCancelled {
+                await social.refreshUnread()
                 if !synced {
                     let saved: [String:Bool]? = try? await RiderCommunity.decode("people/preferences", method: "PUT", body: JSONEncoder().encode(prefs))
                     synced = saved?["saved"] == true
@@ -186,7 +188,7 @@ struct RiderSocialAlerts: ViewModifier {
                     }
                     latest = max(latest ?? 0, events.first?.id ?? 0)
                 }
-                do { try await Task.sleep(for: .seconds(RiderCommunity.usesLANTrust ? 8 : 60)) } catch { return }
+                do { try await Task.sleep(for: .seconds(5)) } catch { return }
             }
         }
         .task(id: banner?.id) {
@@ -194,5 +196,74 @@ struct RiderSocialAlerts: ViewModifier {
             do { try await Task.sleep(for: .seconds(4)); banner = nil } catch {}
         }
         .onChange(of: receiveSOS) { _, on in Task { await RiderSOSService.shared.updateReceiving(on) } }
+    }
+}
+
+
+struct RiderRegistrationView: View {
+    let onDone: () -> Void
+    @AppStorage("rider.profileName") private var savedName = "Райдер"
+    @AppStorage("rider.username") private var savedUsername = ""
+    @State private var name = ""
+    @State private var username = ""
+    @State private var publicProfile = true
+    @State private var publicStats = true
+    @State private var working = false
+    @State private var notice: String?
+
+    private var handle: String {
+        username.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "@"))
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextField("Имя или ник", text: $name)
+                        .onChange(of: name) { _, value in name = String(value.prefix(50)) }
+                    TextField("Уникальный @юзернейм", text: $username)
+                        .textInputAutocapitalization(.never).autocorrectionDisabled()
+                        .onChange(of: username) { _, value in username = String(value.prefix(25)) }
+                } header: { Text("Создай профиль Rider") }
+                footer: { Text("Для юзернейма используй 3–24 латинские буквы, цифры или подчёркивания.") }
+                Section {
+                    Toggle("Публичный профиль", isOn: $publicProfile)
+                    Toggle("Публичная статистика", isOn: $publicStats)
+                } footer: {
+                    Text("Открытый профиль позволяет сразу публиковать посты, подписываться и писать райдерам. Публичная статистика открывает графики каталок. Видимость можно изменить в профиле.")
+                }
+                if let notice { Text(notice).foregroundStyle(.red) }
+                Button(working ? "Регистрируем…" : "Зарегистрироваться", action: register)
+                    .disabled(working || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                              handle.range(of: #"^[a-z0-9_]{3,24}$"#, options: .regularExpression) == nil)
+            }
+            .scrollDismissesKeyboard(.interactively)
+            .navigationTitle("Добро пожаловать")
+            .task {
+                // A previous request may have succeeded while the connection was closing.
+                if let status: RiderCommunity.Registration = try? await RiderCommunity.decode("registration"),
+                   !status.required, !Task.isCancelled { onDone() }
+            }
+        }
+    }
+
+    private func register() {
+        guard !working else { return }
+        working = true
+        notice = nil
+        Task {
+            defer { working = false }
+            do {
+                let clean = name.trimmingCharacters(in: .whitespacesAndNewlines)
+                savedUsername = try await RiderCommunity.register(name: clean, username: handle,
+                                        publicProfile: publicProfile, statsPublic: publicStats)
+                savedName = clean
+                onDone()
+            } catch RiderCommunity.Rejection.conflict {
+                notice = "Этот юзернейм занят."
+            } catch {
+                notice = "Сервер Rider недоступен. Проверь подключение и попробуй ещё раз."
+            }
+        }
     }
 }

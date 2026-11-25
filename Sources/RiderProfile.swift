@@ -154,6 +154,41 @@ enum RiderCommunity {
         let generatedAt = Date().timeIntervalSince1970
     }
 
+    struct Registration: Decodable {
+        let required: Bool
+    }
+
+    static func register(name: String, username: String, publicProfile: Bool, statsPublic: Bool) async throws -> String {
+        let profile = RiderPublication(name: name, username: username, bio: nil, totals: RiderTotals([]), avatar: nil,
+                                       publicProfile: publicProfile, statsPublic: statsPublic)
+        let result = try await request("registration", method: "PUT", payload: profile)
+        return result.mine?.profile.username ?? username
+    }
+
+    static func unread() async throws -> RiderUnread {
+        try await decode("unread")
+    }
+
+    static func readMessages(from peer: String, ids: [UUID]) async throws -> RiderUnread {
+        try await decode("messages/" + peer + "/read", method: "PUT", body: JSONEncoder().encode(["messages": ids]))
+    }
+
+    static func readActivity(through sequence: Int) async throws -> RiderUnread {
+        try await decode("activity/read", method: "PUT", body: JSONEncoder().encode(["sequence":sequence]))
+    }
+
+    static func storyMedia(_ id: UUID) async throws -> Data {
+        try await requestData("stories/" + id.uuidString.lowercased() + "/media", method: "GET", body: nil, timeout: 60)
+    }
+
+    static func publishStory(_ post: RiderPost) async throws -> [RiderStory] {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .withoutEscapingSlashes
+        let data = try await requestData("stories/" + post.id.uuidString.lowercased(), method: "PUT",
+                                         body: encoder.encode(post), timeout: 90)
+        return try JSONDecoder().decode([RiderStory].self, from: data)
+    }
+
     static func statisticsCredit() async throws -> SeasonCredit {
         do {
             return try await decode("statistics")
@@ -309,7 +344,9 @@ enum RiderCommunity {
     static func sendMessage(to peer: String, id: UUID, text: String, post: UUID?,
                             attachment: RiderChatUpload? = nil) async throws -> [RiderMessage] {
         let body = try JSONEncoder().encode(MessageBody(text: text, postID: post, attachment: attachment))
-        return try await decode("messages/\(peer)/\(id.uuidString.lowercased())", method: "PUT", body: body)
+        let data = try await requestData("messages/\(peer)/\(id.uuidString.lowercased())", method: "PUT",
+                                         body: body, timeout: attachment == nil ? 12 : 60)
+        return try JSONDecoder().decode([RiderMessage].self, from: data)
     }
 
     static func decode<T: Decodable>(_ path: String, method: String = "GET", body: Data? = nil) async throws -> T {
@@ -446,10 +483,10 @@ struct RiderProfileView: View {
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
                 NavigationLink { RiderNotificationsView() } label: {
-                    Label("Уведомления", systemImage: "bell").labelStyle(.iconOnly)
+                    RiderBadgeIcon(icon: "bell", title: "Уведомления", count: social.unread.activity)
                 }
                 NavigationLink { RiderInboxView() } label: {
-                    Label("Сообщения", systemImage: "paperplane").labelStyle(.iconOnly)
+                    RiderBadgeIcon(icon: "paperplane", title: "Сообщения", count: social.unread.messages)
                 }
             }
         }
