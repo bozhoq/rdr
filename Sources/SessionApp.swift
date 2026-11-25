@@ -107,16 +107,12 @@ private struct Tabs: View {
                     do {
                         let current = try await RiderCommunity.statisticsCredit()
                         guard !Task.isCancelled else { return }
-                        let changed = current.statsPublic != false && lastSyncedStatistics != trigger.update
+                        let changed = lastSyncedStatistics != trigger.update
                         let credit = changed ? try await RiderCommunity.syncStatistics(trigger.update) : current
                         guard !Task.isCancelled else { return }
                         let changedCredit = social.seasonCredit != credit
                         if changedCredit { social.seasonCredit = credit }
-                        if credit.statsPublic == false {
-                            lastSyncedStatistics = nil
-                        } else if changed {
-                            lastSyncedStatistics = trigger.update
-                        }
+                        if changed { lastSyncedStatistics = trigger.update }
                         if changed || changedCredit { social.statisticsSynced += 1 }
                     } catch RiderCommunity.Rejection.forbidden {
                         if !Task.isCancelled {
@@ -959,7 +955,7 @@ private struct PersonalStatsView: View {
 
         .toolbarBackground(.visible, for: .navigationBar, .tabBar)
 
-        .navigationTitle("Личная статистика")
+        .navigationTitle("Мои каталки")
 
         .searchable(text: $search, prompt: "Название, спот, снаряжение, заметки")
 

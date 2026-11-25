@@ -34,6 +34,8 @@ struct RiderPerson: Decodable, Identifiable, Hashable {
     let username: String?
     let avatar: Data?
 
+    var premium: Bool? = nil
+
     var handle: String { riderHandle(username, or: name) }
 }
 
@@ -57,6 +59,7 @@ struct RiderActivity: Decodable {
     var description: String {
         switch kind {
         case "shaka": return "поставил(а) шаку твоему посту"
+        case "reply": return "ответил(а) на твой комментарий"
         case "comment": return "оставил(а) комментарий"
         case "repost": return "поделился(-ась) твоим постом"
         default: return "подписался(-ась) на тебя"
@@ -140,6 +143,7 @@ struct RiderFeedEntry: Decodable, Identifiable {
     let author: String
     let username: String?
     let avatar: Data?
+    var premium: Bool? = nil
     let authorID: String?
     let following: Bool?
     let mine: Bool?
@@ -156,8 +160,11 @@ struct RiderComment: Decodable, Identifiable {
     let author: String
     let username: String?
     let avatar: Data?
+    var premium: Bool? = nil
     let authorID: String?
     let mine: Bool
+    let replyTo: UUID?
+    let replyName: String?
 
     var date: Date { Date(timeIntervalSince1970: createdAt) }
 }
@@ -173,10 +180,16 @@ struct RiderTopEntry: Decodable, Identifiable {
     let kite: String?
     let board: String?
     var points: Int?
+    var premium: Bool? = nil
 
     func value(for metric: RiderTopMetric) -> Double? {
         metric == .rank ? points.map(Double.init) : metric.value(height: height, airtime: airtime, distance: distance)
     }
+}
+
+struct RiderTopPage: Decodable {
+    let leaders: [RiderTopEntry]
+    let myPlace: Int?
 }
 
 struct RiderTopFilter: Encodable, Equatable {
@@ -186,6 +199,7 @@ struct RiderTopFilter: Encodable, Equatable {
     let startAt: TimeInterval?
     let endAt: TimeInterval?
     var season: Int?
+    let withMyPlace = true
 
     func contains(_ date: Date) -> Bool {
         let seconds = date.timeIntervalSince1970
@@ -198,6 +212,7 @@ final class RiderSocialStore: ObservableObject {
     @Published private(set) var reposts: [RiderFeedEntry] = []
     @Published var reactions: [UUID: RiderReaction] = [:]
     @Published var commentSummaries: [UUID: RiderCommentSummary] = [:]
+    @Published var myPremium: Bool? = nil
     @Published var follows: [String: Bool] = [:]
     @Published var reposted: [UUID: Bool] = [:]
     @Published var statisticsRefresh = 0
@@ -417,16 +432,42 @@ struct RiderPostDetail: View {
     }
 }
 
+struct RiderFollowStyle: ButtonStyle {
+    let following: Bool
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label.font(.subheadline.weight(.semibold))
+            .foregroundStyle(Color.white).padding(.horizontal, 13).frame(minHeight: 44)
+            .background(following ? Color(red: 0.12, green: 0.24, blue: 0.29) : Color(red: 0.0, green: 0.35, blue: 0.37), in: Capsule())
+            .overlay { Capsule().strokeBorder(.white.opacity(configuration.isPressed ? 0.8 : 0.28)) }
+    }
+}
+
+struct RiderName: View {
+    let name: String
+    let premium: Bool?
+    init(_ name: String, premium: Bool?) { self.name = name; self.premium = premium }
+    var body: some View {
+        HStack(spacing: 4) {
+            Text(name)
+            if premium == true {
+                Image(systemName: "star.fill").font(.caption).foregroundStyle(.yellow)
+                    .accessibilityLabel("Премиум")
+            }
+        }.accessibilityElement(children: .combine)
+    }
+}
+
 struct RiderPostHeader: View {
     let author: String
     let username: String?
     let avatar: Data?
+    var premium: Bool? = nil
 
     var body: some View {
         HStack(spacing: 10) {
             RiderAvatar(photo: avatar ?? Data(), size: 38).accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
-                Text(author).font(.headline)
+                RiderName(author, premium: premium).font(.headline)
                 if let username, !username.isEmpty {
                     Text("@" + username).font(.caption).foregroundStyle(.secondary)
                 }
@@ -443,6 +484,8 @@ private struct RiderCommentsView: View {
     @State private var loading = false
     @State private var sending = false
     @State private var draft = ""
+    @State private var replying: RiderComment?
+    @FocusState private var composing: Bool
     @State private var draftID = UUID()
     @State private var error: String?
 
@@ -456,7 +499,7 @@ private struct RiderCommentsView: View {
                     Text("Пока нет комментариев").font(.subheadline).foregroundStyle(.secondary)
                 }
                 ForEach(comments) { comment in
-                    commentRow(comment)
+                    commentRow(comment).padding(.leading, comment.replyTo == nil ? 0 : 20)
                 }
             } else if loading {
                 ProgressView("Загружаем комментарии")
@@ -464,8 +507,16 @@ private struct RiderCommentsView: View {
                 Button("Обновить комментарии") { Task { await load() } }
             }
             if let error { Text(error).font(.footnote).foregroundStyle(.secondary) }
+            if let replying {
+                HStack {
+                    Text("Ответ для " + riderHandle(replying.username, or: replying.author)).font(.caption)
+                    Spacer()
+                    Button("Отмена") { self.replying = nil; draftID = UUID() }
+                }.disabled(sending)
+            }
             HStack(alignment: .bottom, spacing: 8) {
                 TextField("Написать комментарий", text: $draft, axis: .vertical)
+                    .focused($composing).disabled(sending)
                     .lineLimit(1...4)
                     .textFieldStyle(.roundedBorder)
                     .onChange(of: draft) { _, value in
@@ -494,12 +545,8 @@ private struct RiderCommentsView: View {
             }
             VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .top) {
-                    if let id = comment.authorID {
-                        NavigationLink { RiderPublicProfileView(id: id) } label: { commentName(comment) }
-                            .buttonStyle(.plain)
-                    } else {
-                        commentName(comment)
-                    }
+                    Button { beginReply(comment) } label: { commentName(comment) }
+                        .buttonStyle(.plain).disabled(sending)
                     Spacer(minLength: 5)
                     if comment.mine {
                         Menu {
@@ -513,10 +560,22 @@ private struct RiderCommentsView: View {
                         .disabled(sending)
                     }
                 }
+                if let recipient = comment.replyName {
+                    Text("В ответ @" + recipient).font(.caption2).foregroundStyle(.secondary)
+                }
                 Text(comment.text).font(.subheadline).textSelection(.enabled)
-                RiderPostDate(date: comment.date)
+                HStack(spacing: 10) {
+                    RiderPostDate(date: comment.date)
+                    Button("Ответить") { beginReply(comment) }.font(.caption).disabled(sending)
+                }
             }
         }
+    }
+
+    private func beginReply(_ comment: RiderComment) {
+        if replying?.id != comment.id { draftID = UUID() }
+        replying = comment
+        composing = true
     }
 
     private func commentAvatar(_ comment: RiderComment) -> some View {
@@ -525,7 +584,7 @@ private struct RiderCommentsView: View {
 
     private func commentName(_ comment: RiderComment) -> some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text(comment.author).font(.subheadline.weight(.semibold))
+            RiderName(comment.author, premium: comment.premium).font(.subheadline.weight(.semibold))
             if let username = comment.username, !username.isEmpty {
                 Text("@" + username).font(.caption).foregroundStyle(.secondary)
             }
@@ -550,10 +609,13 @@ private struct RiderCommentsView: View {
         let text = trimmed
         guard !text.isEmpty else { return }
         let id = draftID
+        let parent = replying?.id
         change {
-            let result = try await RiderCommunity.submitComment(text, id: id, for: postID)
+            let result = try await RiderCommunity.submitComment(text, id: id, for: postID, replyTo: parent)
             if draft.trimmingCharacters(in: .whitespacesAndNewlines) == text { draft = "" }
             draftID = UUID()
+            replying = nil
+            composing = false
             return result
         }
     }
@@ -892,19 +954,14 @@ struct RiderFeedCard: View {
         HStack {
             if let id = entry?.authorID {
                 NavigationLink { RiderPublicProfileView(id: id) } label: {
-                    RiderPostHeader(author: author, username: username, avatar: avatar)
+                    RiderPostHeader(author: author, username: username, avatar: avatar, premium: entry?.premium ?? (editable ? social.myPremium : nil))
                 }.buttonStyle(.plain)
             } else {
-                RiderPostHeader(author: author, username: username, avatar: avatar)
+                RiderPostHeader(author: author, username: username, avatar: avatar, premium: entry?.premium ?? (editable ? social.myPremium : nil))
             }
             if let target = entry?.authorID, entry?.mine != true {
                 Button(following ? "Подписан" : "Подписаться") { toggleFollow(target) }
-                    .font(.caption.weight(.bold))
-                    .foregroundStyle(following ? Color.primary : RiderTheme.foam)
-                    .padding(.horizontal, 10)
-                    .frame(minHeight: 36)
-                    .background(following ? RiderTheme.canvas : RiderTheme.action, in: Capsule())
-                    .buttonStyle(.borderless)
+                    .buttonStyle(RiderFollowStyle(following: following))
                     .disabled(changingFollow)
                     .accessibilityAddTraits(following ? .isSelected : [])
             }
@@ -990,10 +1047,10 @@ struct RiderFeedCard: View {
                 }
                 ForEach(reaction.people) { rider in
                     if rider.id == "local" {
-                        RiderPostHeader(author: rider.name, username: rider.username, avatar: rider.avatar)
+                        RiderPostHeader(author: rider.name, username: rider.username, avatar: rider.avatar, premium: rider.premium)
                     } else {
                         NavigationLink { RiderPublicProfileView(id: rider.id) } label: {
-                            RiderPostHeader(author: rider.name, username: rider.username, avatar: rider.avatar)
+                            RiderPostHeader(author: rider.name, username: rider.username, avatar: rider.avatar, premium: rider.premium)
                         }
                     }
                 }
@@ -1203,13 +1260,14 @@ private struct RiderPostDate: View {
 
 struct RiderSharedPostView: View {
     let id: UUID
+    var openComments = false
     @State private var entry: RiderFeedEntry?
     @State private var failed = false
 
     var body: some View {
         Group {
             if let entry {
-                RiderPostDetail(original: entry.post, author: entry.author, username: entry.username, avatar: entry.avatar, entry: entry)
+                RiderPostDetail(original: entry.post, author: entry.author, username: entry.username, avatar: entry.avatar, openComments: openComments, entry: entry)
             } else if failed {
                 ContentUnavailableView("Публикация недоступна", systemImage: "photo")
             } else {
@@ -1246,7 +1304,7 @@ struct RiderNotificationsView: View {
                 }
                 ForEach(Array(items.enumerated()), id: \.offset) { _, item in
                     if let post = item.postID {
-                        NavigationLink { RiderSharedPostView(id: post) } label: { activityRow(item) }
+                        NavigationLink { RiderSharedPostView(id: post, openComments: item.kind == "reply" || item.kind == "comment") } label: { activityRow(item) }
                     } else {
                         NavigationLink { RiderPublicProfileView(id: item.person.id) } label: { activityRow(item) }
                     }
@@ -1344,7 +1402,7 @@ struct RiderInboxView: View {
     }
 
     private func personRow(_ rider: RiderPerson) -> some View {
-        RiderPostHeader(author: rider.name, username: rider.username, avatar: rider.avatar)
+        RiderPostHeader(author: rider.name, username: rider.username, avatar: rider.avatar, premium: rider.premium)
             .padding(.vertical, 4).contentShape(Rectangle())
     }
 
@@ -1429,7 +1487,7 @@ struct RiderThreadView: View {
                 NavigationLink { RiderPublicProfileView(id: peer.id) } label: {
                     HStack(spacing: 7) {
                         RiderAvatar(photo: peer.avatar ?? Data(), size: 30).accessibilityHidden(true)
-                        Text(peer.handle).font(.subheadline.bold()).lineLimit(1)
+                        RiderName(peer.handle, premium: peer.premium).font(.subheadline.bold()).lineLimit(1)
                     }
                 }.buttonStyle(.plain)
             }
@@ -1666,7 +1724,7 @@ struct RiderTopsView: View {
     @State private var period = RiderTopPeriod.all
     @State private var spotID: UUID?
     @State private var choosingSpot = false
-    @State private var remote: [RiderTopEntry]?
+    @State private var remote: RiderTopPage?
     @State private var failed = false
     @State private var loadedFilter: RiderTopFilter?
 
@@ -1690,7 +1748,7 @@ struct RiderTopsView: View {
                                     endAt: interval?.end.timeIntervalSince1970,
                                     season: score == .rank ? progress.year : nil)
         let isLocal = RiderCommunity.endpoint == nil || (failed && loadedFilter == filter)
-        let entries = isLocal ? localRows(spot: spot, filter: filter, progress: progress) : (loadedFilter == filter ? remote : nil)
+        let entries = isLocal ? localRows(spot: spot, filter: filter, progress: progress) : (loadedFilter == filter ? remote?.leaders : nil)
         return List {
             filters(spot: spot)
                 .listRowBackground(Color.clear)
@@ -1698,7 +1756,7 @@ struct RiderTopsView: View {
             RiderRankCard(progress: progress)
                 .listRowBackground(Color.clear)
             if let entries {
-                Section(isLocal ? (score == .rank ? "Мой результат" : "Мои рекорды") : "Таблица лидеров") {
+                Section(isLocal ? (score == .rank ? "Мой результат" : "Мои рекорды") : "Топ-50") {
                     if isLocal {
                         Text(RiderCommunity.endpoint == nil
                              ? "Общий рейтинг появится после подключения сервера Rider."
@@ -1714,6 +1772,16 @@ struct RiderTopsView: View {
                             podiumRow(entry, place: index + 1)
                         } else {
                             leaderboardRow(entry, place: index + 1)
+                        }
+                    }
+                }
+                if !isLocal {
+                    Section {
+                        let label = score == .rank ? "по рангу" : score == .height ? "по высоте" : score == .airtime ? "по зависанию" : "по дистанции"
+                        if let place = remote?.myPlace {
+                            Label("Твоё место \(label) · №\(place)", systemImage: "person.crop.circle")
+                        } else {
+                            Text("Пока нет результата для этого фильтра").foregroundStyle(.secondary)
                         }
                     }
                 }
@@ -1843,7 +1911,7 @@ struct RiderTopsView: View {
 
     private func rankedRiderLabel(_ entry: RiderTopEntry) -> some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text(entry.name).font(.headline)
+            RiderName(entry.name, premium: entry.premium).font(.headline)
             if let tag = entry.username, !tag.isEmpty {
                 Text("@" + tag).font(.caption).foregroundStyle(.secondary)
             }

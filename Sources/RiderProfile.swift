@@ -13,6 +13,7 @@ private struct RiderPublication: Codable {
     let avatar: Data?
     var publicProfile: Bool? = nil
     var statsPublic: Bool? = nil
+    var premium: Bool? = nil
     var secrets: [RiderMission]? = nil
 }
 
@@ -30,6 +31,7 @@ private struct RiderPublicPage: Decodable {
     let points: Int?
     let distance: Double?
     let year: Int?
+    let sessionRecords: [RiderPublicRide]?
     let rides: [RiderPublicRide]?
     let mine: Bool
 }
@@ -151,7 +153,12 @@ enum RiderCommunity {
     }
 
     static func statisticsCredit() async throws -> SeasonCredit {
-        try await decode("statistics")
+        do {
+            return try await decode("statistics")
+        } catch Rejection.forbidden {
+            _ = try await requestData("membership", method: "PUT", body: nil)
+            return try await decode("statistics")
+        }
     }
 
     static func syncStatistics(_ update: RiderStatisticsUpdate) async throws -> SeasonCredit {
@@ -211,9 +218,9 @@ enum RiderCommunity {
         return try JSONDecoder().decode([RiderFeedEntry].self, from: data)
     }
 
-    static func tops(_ filter: RiderTopFilter) async throws -> [RiderTopEntry] {
+    static func tops(_ filter: RiderTopFilter) async throws -> RiderTopPage {
         let data = try await requestData("tops", method: "POST", body: JSONEncoder().encode(filter))
-        return try JSONDecoder().decode([RiderTopEntry].self, from: data)
+        return try JSONDecoder().decode(RiderTopPage.self, from: data)
     }
 
     static func comments(for post: UUID) async throws -> [RiderComment] {
@@ -221,8 +228,10 @@ enum RiderCommunity {
         return try JSONDecoder().decode([RiderComment].self, from: data)
     }
 
-    static func submitComment(_ text: String, id: UUID, for post: UUID) async throws -> [RiderComment] {
-        let data = try await requestData(commentPath(post, id), method: "PUT", body: JSONEncoder().encode(["text": text]))
+    static func submitComment(_ text: String, id: UUID, for post: UUID, replyTo: UUID?) async throws -> [RiderComment] {
+        var body = ["text": text]
+        body["replyTo"] = replyTo?.uuidString
+        let data = try await requestData(commentPath(post, id), method: "PUT", body: JSONEncoder().encode(body))
         return try JSONDecoder().decode([RiderComment].self, from: data)
     }
 
@@ -379,10 +388,13 @@ struct RiderProfileView: View {
                     .buttonStyle(.plain)
                     .accessibilityHint("Открыть шкалу рангов")
                 }
-                NavigationLink(value: RiderDestination.statistics) {
-                    RiderProfileShortcut(title: "Личная статистика", subtitle: "Сессии, маршруты и комплекты")
+                NavigationLink { RiderAnalytics(title: "Личная статистика", rides: RiderPublicRide.summaries(in: recorder.history)) } label: {
+                    RiderProfileShortcut(title: "Личная статистика", subtitle: "Комплекты, споты и ветер")
                 }
                 .buttonStyle(.plain)
+                NavigationLink(value: RiderDestination.statistics) {
+                    Label("Рекорды по каталкам", systemImage: "clock.arrow.circlepath")
+                }
                 RiderProfileRecords(totals: totals)
                 RiderProfileSummary(timeOnWater: totals.timeOnWater, unlocked: badges.filter(\.unlocked).count,
                                     total: badges.count) { showingAchievements = true }
@@ -550,7 +562,7 @@ struct RiderProfileView: View {
                 .disabled(savingProfile)
                 VStack(alignment: .leading, spacing: 4) {
                     let title = name.trimmingCharacters(in: .whitespacesAndNewlines)
-                    Text(title.isEmpty ? "Райдер" : title).font(.title2.bold())
+                    RiderName(title.isEmpty ? "Райдер" : title, premium: mine?.profile.premium).font(.title2.bold())
                     if !username.isEmpty {
                         Text("@" + username).font(.subheadline).foregroundStyle(RiderTheme.foam)
                     }
@@ -599,6 +611,8 @@ struct RiderProfileView: View {
         return Section("Видимость") {
             Toggle("Публичный профиль", isOn: Binding(get: { visible }, set: { updateVisibility(profile: $0) }))
             Toggle("Публичная статистика", isOn: Binding(get: { statsVisible }, set: { updateVisibility(stats: $0) }))
+            Text("Ранг, ПТС, рекорды, часы на воде и ачивки видны всем райдерам. Переключатель статистики открывает графики по ветру, спотам и комплектам.")
+                .font(.footnote).foregroundStyle(.secondary)
             if statsVisible && !visible {
                 Text("Статистика появится, когда откроешь профиль.").font(.footnote).foregroundStyle(.secondary)
             }
@@ -618,6 +632,7 @@ struct RiderProfileView: View {
             let account = try await RiderCommunity.request("me").mine
             guard !Task.isCancelled, !savingProfile else { return }
             mine = account
+            social.myPremium = account?.profile.premium
             if let handle = account?.profile.username { username = handle }
             profileError = nil
             loadingProfile = false
@@ -1028,7 +1043,7 @@ private struct RiderFollowList: View {
                     NavigationLink {
                         RiderPublicProfileView(id: person.id)
                     } label: {
-                        RiderPostHeader(author: person.name, username: person.username, avatar: person.avatar)
+                        RiderPostHeader(author: person.name, username: person.username, avatar: person.avatar, premium: person.premium)
                             .padding(.vertical, 4)
                     }
                 }
@@ -1127,7 +1142,7 @@ struct RiderPublicProfileView: View {
                 RiderAvatar(photo: user.avatar ?? Data(), size: 68)
                     .overlay { Circle().strokeBorder(RiderTheme.foam.opacity(0.8), lineWidth: 2) }
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(user.name).font(.title2.bold())
+                    RiderName(user.name, premium: user.premium).font(.title2.bold())
                     if let tag = user.username { Text("@" + tag).font(.subheadline).foregroundStyle(RiderTheme.foam) }
                 }
                 Spacer(minLength: 0)
@@ -1138,7 +1153,7 @@ struct RiderPublicProfileView: View {
             }
             .font(.subheadline.monospacedDigit()).foregroundStyle(RiderTheme.foam)
             if let bio = user.bio { Text(bio).font(.subheadline).fixedSize(horizontal: false, vertical: true) }
-            if !isMine {
+            if !isMine && user.publicProfile != false {
                 HStack {
                     Button(following ? "Отписаться" : "Подписаться") {
                         busy = true
@@ -1152,10 +1167,10 @@ struct RiderPublicProfileView: View {
                             } catch { actionError = true }
                         }
                     }
-                    .buttonStyle(.borderedProminent).disabled(busy)
+                    .buttonStyle(RiderFollowStyle(following: following)).disabled(busy)
                     NavigationLink {
                         RiderThreadView(peer: RiderPerson(id: rider.id, name: user.name, username: user.username,
-                                                         avatar: user.avatar))
+                                                         avatar: user.avatar, premium: user.premium))
                     } label: {
                         Label("Написать", systemImage: "paperplane")
                     }.buttonStyle(.bordered)
@@ -1186,12 +1201,18 @@ struct RiderPublicProfileView: View {
         if let year = page.year {
             RiderRankCard(points: points, year: year)
         }
-        NavigationLink {
-            RiderPublicHistory(title: title, totals: totals, distance: page.distance, rides: page.rides ?? [])
-        } label: {
-            RiderProfileShortcut(title: title, subtitle: "Сессии, время на воде и рекорды")
+        if let rides = page.rides {
+            NavigationLink { RiderAnalytics(title: title, rides: rides) } label: {
+                RiderProfileShortcut(title: title, subtitle: "Комплекты, споты и ветер")
+            }.buttonStyle(.plain)
+        } else {
+            Label(title + " · закрыта", systemImage: "lock.fill").font(.subheadline).lagoonCard()
         }
-        .buttonStyle(.plain)
+        NavigationLink {
+            RiderPublicHistory(title: "Рекорды по каталкам", totals: totals, distance: page.distance, rides: page.sessionRecords ?? [])
+        } label: {
+            Label("Рекорды по каталкам", systemImage: "clock.arrow.circlepath")
+        }
         RiderProfileRecords(totals: totals, distance: page.distance)
         RiderProfileSummary(timeOnWater: totals.timeOnWater, unlocked: awards.filter(\.unlocked).count,
                             total: awards.count) { showingAchievements = true }

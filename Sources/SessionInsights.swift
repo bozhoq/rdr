@@ -49,6 +49,12 @@ struct RiderPublicRide: Codable, Equatable, Identifiable {
     let airtime: Double?
     let distance: Double?
 
+    var spot: String? = nil
+    var kite: String? = nil
+    var board: String? = nil
+    var windMS: Double? = nil
+    var heightSum: Double? = nil
+
     var date: Date { Date(timeIntervalSince1970: startedAt) }
 
     static func summaries(in history: [SessionSummary]) -> [Self] {
@@ -56,13 +62,19 @@ struct RiderPublicRide: Codable, Equatable, Identifiable {
         return history.sorted { $0.startedAt > $1.startedAt }
             .filter {
                 $0.status == .finished && RiderTotals.isRide($0) && seen.insert($0.id).inserted
-            }.prefix(300).map { session in
-                let jumps = RiderTotals.measuredJumps(in: session)
+            }.map { session in
+                let jumps = RiderTotals.measuredJumps(in: session).filter { (0...100).contains($0.heightMeters ?? -1) }.prefix(10000)
+                let setup = session.setup?.cleaned
+                let heights = jumps.compactMap(\.heightMeters)
+                let wind = session.wind.map { $0.knots * SessionWind.metersPerSecondPerKnot }
                 return Self(id: session.id, startedAt: session.startedAt.timeIntervalSince1970,
                             seconds: min(86400, max(1, session.durationSeconds)), jumps: min(10000, jumps.count),
-                            height: jumps.compactMap(\.heightMeters).filter { (0...100).contains($0) }.max(),
+                            height: heights.max(),
                             airtime: jumps.compactMap(\.reportedAirtime).filter { (0...120).contains($0) }.max(),
-                            distance: jumps.compactMap(\.distanceMeters).filter { (0...100000).contains($0) }.max())
+                            distance: jumps.compactMap(\.distanceMeters).filter { (0...100000).contains($0) }.max(),
+                            spot: setup?.spot, kite: setup?.kiteTitle, board: setup?.boardTitle,
+                            windMS: wind.flatMap { (0...150).contains($0) ? $0 : nil },
+                            heightSum: heights.reduce(0, +))
             }
     }
 }
