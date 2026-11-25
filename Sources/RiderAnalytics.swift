@@ -79,6 +79,11 @@ private struct RideGroup: Identifiable {
     }
 }
 
+private struct FilterBounds: PreferenceKey {
+    static var defaultValue: CGRect { .null }
+    static func reduce(value: inout CGRect, nextValue: () -> CGRect) { value = nextValue() }
+}
+
 struct RiderAnalytics: View {
     let title: String
     let rides: [RiderPublicRide]
@@ -87,6 +92,7 @@ struct RiderAnalytics: View {
     @State private var days = 0
     @State private var selections: [RideDimension: String] = [:]
     @State private var filtersOpen = false
+    @State private var filterBounds = CGRect.null
 
     private var filtered: [RiderPublicRide] {
         let cutoff = days > 0 ? Calendar.current.date(byAdding: .day, value: -days, to: Date()) : nil
@@ -121,6 +127,11 @@ struct RiderAnalytics: View {
                 } label: {
                     Label(selections.isEmpty && days == 0 ? "Всё время · фильтры" : "Фильтры включены", systemImage: "line.3.horizontal.decrease")
                 }.pickerStyle(.menu).lagoonCard()
+                .background {
+                    GeometryReader { geometry in
+                        Color.clear.preference(key: FilterBounds.self, value: geometry.frame(in: .named("analytics")))
+                    }
+                }
                 if sample.isEmpty {
                     ContentUnavailableView("Нет каталок", systemImage: "chart.bar", description: Text("Здесь появятся завершённые каталки, подходящие под фильтры."))
                 } else {
@@ -147,6 +158,13 @@ struct RiderAnalytics: View {
             }.padding(16)
         }
         .background(RiderTheme.canvas.ignoresSafeArea())
+        .coordinateSpace(name: "analytics")
+        .onPreferenceChange(FilterBounds.self) { filterBounds = $0 }
+        .simultaneousGesture(SpatialTapGesture(coordinateSpace: .named("analytics")).onEnded { tap in
+            if filtersOpen, !filterBounds.isNull, !filterBounds.contains(tap.location) {
+                withAnimation(.easeOut(duration: 0.16)) { filtersOpen = false }
+            }
+        })
         .navigationTitle(title).navigationBarTitleDisplayMode(.inline)
     }
     private var axisPicker: some View {

@@ -13,6 +13,8 @@ private struct RiderPublication: Codable {
     let avatar: Data?
     var publicProfile: Bool? = nil
     var statsPublic: Bool? = nil
+    var birthday: String? = nil
+    var showBirthday: Bool? = nil
     var premium: Bool? = nil
     var secrets: [RiderMission]? = nil
 }
@@ -355,6 +357,23 @@ struct RiderProfileView: View {
     @State private var picked: PhotosPickerItem?
     @State private var editing = false
     @State private var draftUsername = ""
+    @State private var draftName = ""
+    @State private var draftBio = ""
+    @State private var draftPhoto = Data()
+    @State private var editorPicker: PhotosPickerItem?
+    @AppStorage("rider.birthDay") private var birthDay = ""
+    @AppStorage("rider.birthVisible") private var birthVisible = false
+    @State private var draftBirth = Date()
+    @State private var hasBirth = false
+    @State private var visibleBirth = false
+    private static let birthFormat: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.calendar = Calendar(identifier: .gregorian)
+        f.defaultDate = Date(timeIntervalSince1970: 951825600)
+        f.dateFormat = "MM-dd"
+        return f
+    }()
     @State private var showingAchievements = false
     @State private var composing = false
     @State private var mine: RemoteRider?
@@ -379,7 +398,7 @@ struct RiderProfileView: View {
         let badges = RiderAchievement.milestones(totals, followers: mine?.followers ?? 0)
         let secrets = RiderMission.firstCompletions(in: recorder.history)
         return ScrollView {
-            VStack(spacing: 18) {
+            VStack(spacing: 9) {
                 profile
                 TimelineView(.everyMinute) { context in
                     Button { showingRanks = true } label: {
@@ -392,15 +411,12 @@ struct RiderProfileView: View {
                     RiderProfileShortcut(title: "Личная статистика", subtitle: "Комплекты, споты и ветер")
                 }
                 .buttonStyle(.plain)
-                NavigationLink(value: RiderDestination.statistics) {
-                    Label("Рекорды по каталкам", systemImage: "clock.arrow.circlepath")
-                }
                 RiderProfileRecords(totals: totals)
                 RiderProfileSummary(timeOnWater: totals.timeOnWater, unlocked: badges.filter(\.unlocked).count,
                                     total: badges.count) { showingAchievements = true }
                 posts
             }
-            .padding(20)
+            .padding(12)
         }
         .background(RiderTheme.canvas.ignoresSafeArea())
         .navigationTitle("")
@@ -507,46 +523,87 @@ struct RiderProfileView: View {
     private var profileEditor: some View {
         NavigationStack {
             Form {
-                TextField("Имя", text: $name)
-                    .onChange(of: name) { _, value in if value.count > 50 { name = String(value.prefix(50)) } }
                 Section {
-                    TextField("@юзернейм", text: $draftUsername)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                } footer: {
-                    Text("3–24 строчные латинские буквы, цифры или _.")
+                    PhotosPicker(selection: $editorPicker, matching: .images) {
+                        VStack(spacing: 8) {
+                            RiderAvatar(photo: draftPhoto, size: 82)
+                            Text("Изменить фотографию").font(.subheadline.weight(.semibold))
+                        }.frame(maxWidth: .infinity)
+                    }.listRowBackground(Color.clear)
                 }
-                TextField("О себе", text: $bio, axis: .vertical)
-                    .lineLimit(3...5)
-                    .onChange(of: bio) { _, value in if value.count > 160 { bio = String(value.prefix(160)) } }
-                if RiderCommunity.endpoint != nil {
-                    privacyControls
-                } else if let profileError {
-                    Text(profileError).foregroundStyle(.secondary)
+                Section {
+                    VStack(alignment: .leading) {
+                        Text("Никнейм").font(.caption).foregroundStyle(.secondary)
+                        TextField("Как тебя называть", text: $draftName)
+                            .onChange(of: draftName) { _, v in if v.count > 50 { draftName = String(v.prefix(50)) } }
+                    }
+                    VStack(alignment: .leading) {
+                        Text("Уникальный юзернейм").font(.caption).foregroundStyle(.secondary)
+                        TextField("@username", text: $draftUsername).textInputAutocapitalization(.never).autocorrectionDisabled()
+                    }
+                    VStack(alignment: .leading) {
+                        Text("Описание профиля").font(.caption).foregroundStyle(.secondary)
+                        TextField("О себе", text: $draftBio, axis: .vertical).lineLimit(2...4)
+                            .onChange(of: draftBio) { _, v in if v.count > 160 { draftBio = String(v.prefix(160)) } }
+                    }
+                } footer: { Text("Юзернейм: 3–24 латинские буквы, цифры или _.") }
+                Section {
+                    DisclosureGroup {
+                        Toggle("Указать день рождения", isOn: $hasBirth)
+                        if hasBirth {
+                            DatePicker("Дата", selection: $draftBirth, in: ...Date(), displayedComponents: .date)
+                            Toggle("Показывать день и месяц", isOn: $visibleBirth)
+                        }
+                    } label: { Label("День рождения", systemImage: "birthday.cake") }
+                    NavigationLink { RiderPhoneSettings() } label: { Label("Номер телефона", systemImage: "phone.fill") }
                 }
+                Section {
+                    NavigationLink { RiderAlertSettings() } label: { Label("Уведомления и звуки", systemImage: "bell.badge.fill") }
+                    NavigationLink { RiderAppearanceSettings() } label: { Label("Оформление", systemImage: "circle.lefthalf.filled") }
+                    if RiderCommunity.endpoint != nil {
+                        NavigationLink { Form { privacyControls }.navigationTitle("Конфиденциальность") } label: {
+                            Label("Конфиденциальность", systemImage: "lock.fill")
+                        }
+                    }
+                }
+                if let profileError { Text(profileError).font(.footnote).foregroundStyle(.red) }
                 if RiderCommunity.usesLANTrust {
                     Section("Домашний сервер") { lanServerCheck }
                 }
             }
             .navigationTitle("Профиль")
             .navigationBarTitleDisplayMode(.inline)
+            .task(id: editorPicker) {
+                guard let pick = editorPicker, let data = try? await pick.loadTransferable(type: Data.self),
+                      let src = CGImageSourceCreateWithData(data as CFData, nil),
+                      let thumb = CGImageSourceCreateThumbnailAtIndex(src, 0, [
+                        kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceCreateThumbnailWithTransform: true,
+                        kCGImageSourceThumbnailMaxPixelSize: 320] as CFDictionary),
+                      let jpg = UIImage(cgImage: thumb).jpegData(compressionQuality: 0.65),
+                      jpg.count <= 96000, !Task.isCancelled else { return }
+                draftPhoto = jpg
+            }
             .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button { editing = false } label: { Image(systemName: "xmark") }.accessibilityLabel("Отмена").disabled(savingProfile)
+                }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Готово") {
-                        if let mine {
-                            Task {
-                                let saved = await saveProfile(publicProfile: mine.profile.publicProfile ?? true,
-                                                              statsPublic: mine.profile.statsPublic ?? true,
-                                                              handle: cleanedUsername)
-                                if saved { editing = false }
-                            }
-                        } else {
-                            username = cleanedUsername
+                    Button {
+                        Task {
+                            if RiderCommunity.endpoint != nil {
+                                guard await saveProfile(publicProfile: mine?.profile.publicProfile ?? false,
+                                    statsPublic: mine?.profile.statsPublic ?? false,
+                                    handle: cleanedUsername, fromEditor: true) else { return }
+                            } else { username = cleanedUsername }
+                            name = draftName; bio = draftBio; photo = draftPhoto
+                            birthDay = hasBirth ? Self.birthFormat.string(from: draftBirth) : ""
+                            birthVisible = hasBirth && visibleBirth
                             editing = false
                         }
-                    }.disabled(!usernameValid || savingProfile)
+                    } label: { Image(systemName: "checkmark.circle.fill").font(.title2) }
+                    .accessibilityLabel("Сохранить профиль").disabled(!usernameValid || savingProfile || draftName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
-            }
+            }.interactiveDismissDisabled(savingProfile)
         }
     }
 
@@ -554,7 +611,7 @@ struct RiderProfileView: View {
         VStack(alignment: .leading, spacing: 13) {
             HStack(spacing: 15) {
                 PhotosPicker(selection: $picked, matching: .images) {
-                    RiderAvatar(photo: photo, size: 68)
+                    RiderAvatar(photo: photo, size: 54)
                         .overlay { Circle().strokeBorder(RiderTheme.foam.opacity(0.8), lineWidth: 2) }
                 }
                 .buttonStyle(.plain)
@@ -569,6 +626,10 @@ struct RiderProfileView: View {
                 }
                 Spacer(minLength: 0)
                 Button {
+                    draftName = name; draftBio = bio; draftPhoto = photo; editorPicker = nil
+                    let saved = mine?.profile.birthday ?? birthDay
+                    hasBirth = !saved.isEmpty; draftBirth = Self.birthFormat.date(from: saved) ?? Date()
+                    visibleBirth = mine?.profile.showBirthday ?? birthVisible
                     draftUsername = username
                     profileError = nil
                     editing = true
@@ -590,7 +651,7 @@ struct RiderProfileView: View {
             }
         }
         .foregroundStyle(.white)
-        .padding(17)
+        .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RiderTheme.lagoon, in: RoundedRectangle(cornerRadius: 24))
     }
@@ -669,16 +730,21 @@ struct RiderProfileView: View {
     }
 
     @discardableResult
-    @MainActor private func saveProfile(publicProfile: Bool, statsPublic: Bool, handle: String? = nil) async -> Bool {
+    @MainActor private func saveProfile(publicProfile: Bool, statsPublic: Bool, handle: String? = nil, fromEditor: Bool = false) async -> Bool {
         guard !savingProfile else { return false }
         savingProfile = true
         profileError = nil
         defer { savingProfile = false }
-        let title = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let title = (fromEditor ? draftName : name).trimmingCharacters(in: .whitespacesAndNewlines)
+        let image = fromEditor ? draftPhoto : photo
         let tag = handle ?? username
-        let payload = RiderPublication(name: title.isEmpty ? "Райдер" : title, username: tag.isEmpty ? nil : tag,
-                                       bio: bio, totals: RiderTotals([]), avatar: photo.isEmpty ? nil : photo,
+        var payload = RiderPublication(name: title.isEmpty ? "Райдер" : title, username: tag.isEmpty ? nil : tag,
+                                       bio: fromEditor ? draftBio : bio, totals: RiderTotals([]), avatar: image.isEmpty ? nil : image,
                                        publicProfile: publicProfile, statsPublic: statsPublic)
+        if fromEditor {
+            payload.birthday = hasBirth ? Self.birthFormat.string(from: draftBirth) : ""
+            payload.showBirthday = hasBirth && visibleBirth
+        }
         do {
             let result = try await RiderCommunity.request("me", method: "PUT", payload: payload)
             mine = result.mine
@@ -742,7 +808,7 @@ private struct RiderProfileShortcut: View {
     var body: some View {
         HStack(spacing: 12) {
             Image(systemName: icon).font(.title3.weight(.semibold)).foregroundStyle(RiderTheme.accent)
-                .frame(width: 38, height: 38)
+                .frame(width: 28, height: 28)
                 .background(RiderTheme.canvas, in: RoundedRectangle(cornerRadius: 11))
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 3) {
@@ -753,7 +819,7 @@ private struct RiderProfileShortcut: View {
             Image(systemName: "chevron.right").font(.caption.bold()).foregroundStyle(.secondary)
                 .accessibilityHidden(true)
         }
-        .lagoonCard()
+        .padding(9).background(RiderTheme.surface, in: RoundedRectangle(cornerRadius: 14))
         .contentShape(Rectangle())
     }
 
@@ -764,9 +830,9 @@ private struct RiderProfileRecords: View {
     var distance: Double?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 5) {
             Text("Рекорды").font(.title3.bold()).accessibilityAddTraits(.isHeader)
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 140), spacing: 10, alignment: .leading)], spacing: 10) {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 92), spacing: 5, alignment: .leading)], spacing: 5) {
                 record("Топ прыжок", value: metric(totals.height, unit: "м"), icon: "arrow.up.right")
                 record("Топ завис", value: metric(totals.airtime, unit: "с"), icon: "timer")
                 if let distance { record("Топ дистанция", value: metric(distance, unit: "м"), icon: "arrow.left.and.right") }
@@ -775,12 +841,12 @@ private struct RiderProfileRecords: View {
     }
 
     private func record(_ title: String, value: String, icon: String) -> some View {
-        VStack(alignment: .leading, spacing: 7) {
+        VStack(alignment: .leading, spacing: 3) {
             Image(systemName: icon).font(.subheadline.bold()).foregroundStyle(RiderTheme.accent).accessibilityHidden(true)
-            Text(value).font(.title2.bold().monospacedDigit())
+            Text(value).font(.headline.monospacedDigit())
             Text(title).font(.footnote.weight(.medium)).foregroundStyle(.secondary)
         }
-        .lagoonCard()
+        .padding(9).background(RiderTheme.surface, in: RoundedRectangle(cornerRadius: 14))
         .accessibilityElement(children: .combine)
     }
 
@@ -793,19 +859,19 @@ private struct RiderProfileSummary: View {
     let onAchievements: () -> Void
 
     var body: some View {
-        VStack(spacing: 0) {
+        ViewThatFits(in: .horizontal) { HStack(spacing: 12) { items }; VStack(spacing: 2) { items } }
+            .padding(.horizontal, 9).background(RiderTheme.surface, in: RoundedRectangle(cornerRadius: 14))
+    }
+    @ViewBuilder private var items: some View {
             summaryRow("Часы на воде", value: timeOnWater, icon: "water.waves")
                 .accessibilityElement(children: .combine)
-            Divider()
+
             Button(action: onAchievements) {
                 summaryRow("Ачивки", value: "\(unlocked) из \(total)", icon: "medal", opensDetails: true)
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Ачивки")
             .accessibilityValue("\(unlocked) из \(total)")
-        }
-        .padding(.horizontal, 12)
-        .background(RiderTheme.surface, in: RoundedRectangle(cornerRadius: 14))
     }
 
     private func summaryRow(_ title: String, value: String, icon: String, opensDetails: Bool = false) -> some View {
@@ -1038,8 +1104,9 @@ private struct RiderFollowList: View {
                     ContentUnavailableView(kind == .followers ? "Пока нет подписчиков" : "Пока нет подписок",
                                            systemImage: "person.2")
                 }
-                ForEach(people.filter { search.isEmpty || $0.name.localizedCaseInsensitiveContains(search)
-                    || $0.handle.localizedCaseInsensitiveContains(search) }) { person in
+                let matches = people.filter { search.isEmpty || $0.name.localizedCaseInsensitiveContains(search) || $0.handle.localizedCaseInsensitiveContains(search) }
+                if !search.isEmpty && matches.isEmpty { Text("Никого не найдено").foregroundStyle(.secondary) }
+                ForEach(matches) { person in
                     NavigationLink {
                         RiderPublicProfileView(id: person.id)
                     } label: {
@@ -1055,7 +1122,7 @@ private struct RiderFollowList: View {
         }
         .navigationTitle(kind.title)
         .navigationBarTitleDisplayMode(.inline)
-        .searchable(text: $search, prompt: "Имя или @юзернейм")
+        .searchable(text: $search, placement: .navigationBarDrawer(displayMode: .always), prompt: "Ник или @юзернейм")
         .scrollContentBackground(.hidden)
         .background(RiderTheme.canvas)
         .task { await load() }
@@ -1083,7 +1150,7 @@ struct RiderPublicProfileView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 9) {
                 if let page {
                     profile(page.rider, isMine: page.mine)
                     if let points = page.points {
@@ -1101,7 +1168,7 @@ struct RiderPublicProfileView: View {
                 } else {
                     ProgressView().frame(maxWidth: .infinity)
                 }
-            }.padding(20)
+            }.padding(12)
         }
         .background(RiderTheme.canvas.ignoresSafeArea())
         .toolbar(.visible, for: .navigationBar)
@@ -1139,7 +1206,7 @@ struct RiderPublicProfileView: View {
         let following = social.follows[rider.id] ?? rider.following
         return VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 15) {
-                RiderAvatar(photo: user.avatar ?? Data(), size: 68)
+                RiderAvatar(photo: user.avatar ?? Data(), size: 54)
                     .overlay { Circle().strokeBorder(RiderTheme.foam.opacity(0.8), lineWidth: 2) }
                 VStack(alignment: .leading, spacing: 4) {
                     RiderName(user.name, premium: user.premium).font(.title2.bold())
@@ -1152,6 +1219,10 @@ struct RiderPublicProfileView: View {
                 VStack(alignment: .leading, spacing: 0) { followCounts(rider) }
             }
             .font(.subheadline.monospacedDigit()).foregroundStyle(RiderTheme.foam)
+            if let birth = user.birthday, birth.count == 5 {
+                let parts = birth.split(separator: "-")
+                if parts.count == 2 { Label("\(parts[1]).\(parts[0])", systemImage: "birthday.cake").font(.caption) }
+            }
             if let bio = user.bio { Text(bio).font(.subheadline).fixedSize(horizontal: false, vertical: true) }
             if !isMine && user.publicProfile != false {
                 HStack {
@@ -1179,7 +1250,7 @@ struct RiderPublicProfileView: View {
             }
         }
         .foregroundStyle(.white)
-        .padding(17)
+        .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RiderTheme.lagoon, in: RoundedRectangle(cornerRadius: 24))
         .tint(RiderTheme.foam)
@@ -1207,11 +1278,6 @@ struct RiderPublicProfileView: View {
             }.buttonStyle(.plain)
         } else {
             Label(title + " · закрыта", systemImage: "lock.fill").font(.subheadline).lagoonCard()
-        }
-        NavigationLink {
-            RiderPublicHistory(title: "Рекорды по каталкам", totals: totals, distance: page.distance, rides: page.sessionRecords ?? [])
-        } label: {
-            Label("Рекорды по каталкам", systemImage: "clock.arrow.circlepath")
         }
         RiderProfileRecords(totals: totals, distance: page.distance)
         RiderProfileSummary(timeOnWater: totals.timeOnWater, unlocked: awards.filter(\.unlocked).count,
@@ -1262,64 +1328,9 @@ struct RiderRideCard<Content: View>: View {
             content
         }
         .foregroundStyle(.white)
-        .padding(17)
+        .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RiderTheme.lagoon, in: RoundedRectangle(cornerRadius: 18))
     }
 }
 
-private struct RiderPublicHistory: View {
-    let title: String
-    let totals: RiderTotals
-    let distance: Double?
-    let rides: [RiderPublicRide]
-
-    var body: some View {
-        List {
-            Section {
-                LabeledContent("Часы на воде", value: totals.timeOnWater)
-                LabeledContent("Сессии", value: totals.sessions.formatted())
-                LabeledContent("Прыжки", value: totals.jumps.formatted())
-            }
-            Section {
-                RiderProfileRecords(totals: totals, distance: distance)
-                    .listRowInsets(EdgeInsets()).listRowBackground(Color.clear)
-            }
-            Section("Сессии") {
-                if rides.isEmpty {
-                    Text("Пока нет доступных сессий").foregroundStyle(.secondary)
-                }
-                ForEach(rides) { ride in
-                    NavigationLink {
-                        List {
-                            LabeledContent("Время на воде", value: durationText(ride.seconds))
-                            LabeledContent("Прыжки", value: ride.jumps.formatted())
-                            LabeledContent("Топ прыжок", value: metric(ride.height, unit: "м"))
-                            LabeledContent("Топ завис", value: metric(ride.airtime, unit: "с"))
-                            LabeledContent("Топ дистанция", value: metric(ride.distance, unit: "м"))
-                        }
-                        .navigationTitle("Каталка")
-                        .navigationBarTitleDisplayMode(.inline)
-                        .scrollContentBackground(.hidden)
-                        .background(RiderTheme.canvas.ignoresSafeArea())
-                    } label: {
-                        RiderRideCard(date: ride.date) {
-                            HStack(spacing: 16) {
-                                Text(durationText(ride.seconds)).monospacedDigit()
-                                Text("Прыжки · \(ride.jumps)")
-                                if let height = ride.height { Text(metric(height, unit: "м")) }
-                            }.font(.subheadline.weight(.semibold)).foregroundStyle(RiderTheme.foam)
-                        }
-                    }
-                    .listRowInsets(EdgeInsets(top: 6, leading: 10, bottom: 6, trailing: 10))
-                    .listRowSeparator(.hidden).listRowBackground(Color.clear)
-                }
-            }
-        }
-        .listStyle(.insetGrouped)
-        .scrollContentBackground(.hidden)
-        .background(RiderTheme.canvas.ignoresSafeArea())
-        .navigationTitle(title)
-        .navigationBarTitleDisplayMode(.inline)
-    }
-}

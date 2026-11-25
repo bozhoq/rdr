@@ -1,3 +1,4 @@
+import QuickLook
 import ImageIO
 import PhotosUI
 import SwiftUI
@@ -42,6 +43,40 @@ struct RiderPerson: Decodable, Identifiable, Hashable {
 private func riderHandle(_ username: String?, or name: String) -> String {
     guard let username, !username.isEmpty else { return name }
     return "@" + username
+}
+
+/// Inline author handles and mentions wrap with the caption and navigate inside Rider.
+private struct RiderLinkedText: View {
+    let text: String
+    var author: String? = nil
+    var authorID: String? = nil
+    @State private var destination: String?
+    private static let handles = try! NSRegularExpression(pattern: #"(?<![A-Za-z0-9_.+@])@([A-Za-z0-9_]{3,24})(?![A-Za-z0-9_])"#)
+
+    private var content: AttributedString {
+        let line = (author.map { $0 + " " } ?? "") + text
+        let value = NSMutableAttributedString(string: line)
+        let full = NSRange(location: 0, length: value.length)
+        for match in Self.handles.matches(in: line, range: full) {
+            let tag = (line as NSString).substring(with: match.range(at: 1)).lowercased()
+            if let url = URL(string: "rider://profile/" + tag) {
+                value.addAttribute(.link, value: url, range: match.range)
+            }
+        }
+        if let author, let authorID, let url = URL(string: "rider://profile/" + authorID) {
+            value.addAttribute(.link, value: url, range: NSRange(location: 0, length: (author as NSString).length))
+        }
+        return (try? AttributedString(value, including: \.uiKit)) ?? AttributedString(line)
+    }
+    var body: some View {
+        Text(content).tint(RiderTheme.accent)
+            .environment(\.openURL, OpenURLAction { url in
+                guard url.scheme == "rider", url.host == "profile" else { return .systemAction }
+                destination = url.lastPathComponent
+                return .handled
+            })
+            .navigationDestination(item: $destination) { RiderPublicProfileView(id: $0) }
+    }
 }
 
 struct RiderReaction: Decodable {
@@ -359,6 +394,7 @@ struct RiderPostDetail: View {
                 }
                 .padding(16)
             }
+            .scrollDismissesKeyboard(.interactively)
             .task {
                 guard openComments else { return }
                 await Task.yield()
@@ -450,7 +486,7 @@ struct RiderName: View {
         HStack(spacing: 4) {
             Text(name)
             if premium == true {
-                Image(systemName: "star.fill").font(.caption).foregroundStyle(.yellow)
+                Image(systemName: "star").font(.caption.weight(.bold)).foregroundStyle(LinearGradient(colors: [.teal, Color(red: 0.24, green: 0.83, blue: 0.77)], startPoint: .topLeading, endPoint: .bottomTrailing))
                     .accessibilityLabel("Премиум")
             }
         }.accessibilityElement(children: .combine)
@@ -509,7 +545,7 @@ private struct RiderCommentsView: View {
             if let error { Text(error).font(.footnote).foregroundStyle(.secondary) }
             if let replying {
                 HStack {
-                    Text("Ответ для " + riderHandle(replying.username, or: replying.author)).font(.caption)
+                    RiderLinkedText(text: "Ответ для " + riderHandle(replying.username, or: replying.author)).font(.caption)
                     Spacer()
                     Button("Отмена") { self.replying = nil; draftID = UUID() }
                 }.disabled(sending)
@@ -545,8 +581,11 @@ private struct RiderCommentsView: View {
             }
             VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .top) {
-                    Button { beginReply(comment) } label: { commentName(comment) }
-                        .buttonStyle(.plain).disabled(sending)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Button { beginReply(comment) } label: { RiderName(comment.author, premium: comment.premium).font(.subheadline.bold()) }
+                            .buttonStyle(.plain).disabled(sending)
+                        if let handle = comment.username { RiderLinkedText(text: "@" + handle).font(.caption) }
+                    }
                     Spacer(minLength: 5)
                     if comment.mine {
                         Menu {
@@ -561,9 +600,9 @@ private struct RiderCommentsView: View {
                     }
                 }
                 if let recipient = comment.replyName {
-                    Text("В ответ @" + recipient).font(.caption2).foregroundStyle(.secondary)
+                    RiderLinkedText(text: "В ответ @" + recipient).font(.caption2).foregroundStyle(.secondary)
                 }
-                Text(comment.text).font(.subheadline).textSelection(.enabled)
+                RiderLinkedText(text: comment.text).font(.subheadline)
                 HStack(spacing: 10) {
                     RiderPostDate(date: comment.date)
                     Button("Ответить") { beginReply(comment) }.font(.caption).disabled(sending)
@@ -582,15 +621,6 @@ private struct RiderCommentsView: View {
         RiderAvatar(photo: comment.avatar ?? Data(), size: 33)
     }
 
-    private func commentName(_ comment: RiderComment) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            RiderName(comment.author, premium: comment.premium).font(.subheadline.weight(.semibold))
-            if let username = comment.username, !username.isEmpty {
-                Text("@" + username).font(.caption).foregroundStyle(.secondary)
-            }
-        }
-    }
-
     @MainActor private func load() async {
         guard !loading, !sending else { return }
         loading = true
@@ -607,7 +637,9 @@ private struct RiderCommentsView: View {
 
     private func submit() {
         let text = trimmed
-        guard !text.isEmpty else { return }
+        guard !text.isEmpty, !sending, !loading else { return }
+        composing = false
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
         let id = draftID
         let parent = replying?.id
         change {
@@ -713,17 +745,17 @@ struct RiderPostComposer: View {
         loading = false
     }
 
-    fileprivate static func postJPEG(_ data: Data) -> Data? {
+    fileprivate static func postJPEG(_ data: Data, forChat: Bool = false) -> Data? {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil),
               let thumb = CGImageSourceCreateThumbnailAtIndex(source, 0, [
                 kCGImageSourceCreateThumbnailFromImageAlways: true,
                 kCGImageSourceCreateThumbnailWithTransform: true,
-                kCGImageSourceThumbnailMaxPixelSize: 1080
+                kCGImageSourceThumbnailMaxPixelSize: forChat ? 3200 : 1080
               ] as CFDictionary) else { return nil }
         let image = UIImage(cgImage: thumb)
-        let qualities: [CGFloat] = [0.76, 0.62, 0.48, 0.32]
+        let qualities: [CGFloat] = forChat ? [0.93, 0.84, 0.72, 0.58] : [0.76, 0.62, 0.48, 0.32]
         for quality in qualities {
-            if let jpeg = image.jpegData(compressionQuality: quality), jpeg.count <= 390_000 { return jpeg }
+            if let jpeg = image.jpegData(compressionQuality: quality), jpeg.count <= (forChat ? RiderChatUpload.maxBytes : 390_000) { return jpeg }
         }
         return nil
     }
@@ -771,6 +803,7 @@ private struct RiderPostLocationChoice: View {
 }
 
 struct RiderFeedView: View {
+    @ObservedObject var recorder: SessionRecorder
     @EnvironmentObject private var social: RiderSocialStore
     @AppStorage("rider.profileName") private var name = "Райдер"
     @AppStorage("rider.username") private var username = ""
@@ -778,6 +811,7 @@ struct RiderFeedView: View {
     @State private var selection = Feed.following
     @State private var conversation: RiderPerson?
     @State private var entries: [RiderFeedEntry]?
+    @State private var loadedFeed: Feed?
     @State private var failed = false
 
     private enum Feed: String, CaseIterable, Identifiable {
@@ -788,34 +822,37 @@ struct RiderFeedView: View {
 
     var body: some View {
         let feed = selection
-        return List {
-            Picker("Лента", selection: $selection) {
-                ForEach(Feed.allCases) { Text($0.title).tag($0) }
-            }
-            .pickerStyle(.segmented)
-            if RiderCommunity.endpoint == nil {
-                Text("Общая лента появится после подключения сервера Rider.").foregroundStyle(.secondary)
-                if !social.posts.isEmpty {
-                    Section("Мои посты на iPhone") {
-                        ForEach(social.posts) { post in
-                            RiderFeedCard(post: post, author: name, username: username, avatar: avatar, editable: true)
+        return ScrollView {
+            VStack(alignment: .leading, spacing: 10) {
+                if RiderCommunity.endpoint != nil { RiderPeopleEntry(recorder: recorder).buttonStyle(.plain) }
+                Picker("Лента", selection: $selection) {
+                    ForEach(Feed.allCases) { Text($0.title).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                if RiderCommunity.endpoint == nil {
+                    Text("Общая лента появится после подключения сервера Rider.").foregroundStyle(.secondary)
+                    if !social.posts.isEmpty {
+                        Section("Мои посты на iPhone") {
+                            ForEach(social.posts) { post in
+                                RiderFeedCard(post: post, author: name, username: username, avatar: avatar, editable: true)
+                            }
                         }
                     }
+                } else if let entries {
+                    if entries.isEmpty {
+                        Text(feed == .following ? "Здесь появятся посты райдеров, на которых ты подписан." : "Пока нет новых публикаций.")
+                            .foregroundStyle(.secondary)
+                    }
+                    ForEach(entries) { entry in
+                        RiderFeedCard(post: entry.post, author: entry.author, username: entry.username, avatar: entry.avatar,
+                                      entry: entry, onConversation: { conversation = $0 })
+                    }
+                } else if failed {
+                    Button("Повторить загрузку") { Task { await load(feed) } }
+                } else {
+                    ProgressView("Загружаем ленту")
                 }
-            } else if let entries {
-                if entries.isEmpty {
-                    Text(feed == .following ? "Здесь появятся посты райдеров, на которых ты подписан." : "Пока нет новых публикаций.")
-                        .foregroundStyle(.secondary)
-                }
-                ForEach(entries) { entry in
-                    RiderFeedCard(post: entry.post, author: entry.author, username: entry.username, avatar: entry.avatar,
-                                  entry: entry, onConversation: { conversation = $0 })
-                }
-            } else if failed {
-                Button("Повторить загрузку") { Task { await load(feed) } }
-            } else {
-                ProgressView("Загружаем ленту")
-            }
+            }.padding(.horizontal, 12).padding(.vertical, 8)
         }
         .toolbar(.hidden, for: .navigationBar)
         .scrollContentBackground(.hidden).background(RiderTheme.canvas)
@@ -826,11 +863,12 @@ struct RiderFeedView: View {
 
     @MainActor private func load(_ feed: Feed) async {
         guard RiderCommunity.endpoint != nil, feed == selection else { return }
-        entries = nil
+        if loadedFeed != feed { entries = nil }
         failed = false
         do {
             let result = try await RiderCommunity.feed(recommended: feed == .recommended)
             guard !Task.isCancelled, feed == selection else { return }
+            loadedFeed = feed
             entries = result
         } catch {
             if !Task.isCancelled, feed == selection { failed = true }
@@ -894,7 +932,7 @@ struct RiderFeedCard: View {
         VStack(alignment: .leading, spacing: 11) {
             header
             if let source = post.sourceAuthor {
-                Label("Репост · " + riderHandle(post.sourceUsername, or: source), systemImage: "arrow.2.squarepath")
+                RiderLinkedText(text: "Репост · " + riderHandle(post.sourceUsername, or: source))
                     .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
             }
             if onComments != nil {
@@ -912,9 +950,9 @@ struct RiderFeedCard: View {
             }
             if reaction.total > 0 { reactionSummary }
             if !post.caption.isEmpty {
-                (Text(riderHandle(post.sourceUsername ?? (post.sourceID == nil ? username : nil),
-                                  or: post.sourceAuthor ?? author)).fontWeight(.bold)
-                    + Text(" ") + Text(post.caption))
+                RiderLinkedText(text: post.caption,
+                    author: riderHandle(post.sourceUsername ?? (post.sourceID == nil ? username : nil), or: post.sourceAuthor ?? author),
+                    authorID: post.sourceID == nil ? (entry?.authorID ?? username) : post.sourceUsername)
                     .font(.subheadline)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.top, 2)
@@ -923,7 +961,7 @@ struct RiderFeedCard: View {
                 Label(location.name, systemImage: "mappin").font(.caption).foregroundStyle(.secondary)
             }
             if onComments == nil, let preview = commentSummary?.preview {
-                (Text(riderHandle(preview.username, or: preview.author)).fontWeight(.semibold) + Text(" ") + Text(preview.text))
+                RiderLinkedText(text: preview.text, author: riderHandle(preview.username, or: preview.author), authorID: preview.username)
                     .font(.caption).lineLimit(2)
             }
             RiderPostDate(date: post.date)
@@ -1016,25 +1054,21 @@ struct RiderFeedCard: View {
     }
 
     private var reactionSummary: some View {
-        Button { showingReactions = true } label: {
-            HStack(spacing: 7) {
+        HStack(spacing: 5) {
+            Button { showingReactions = true } label: {
                 HStack(spacing: -6) {
                     ForEach(reaction.people) { rider in
                         RiderAvatar(photo: rider.avatar ?? Data(), size: 22)
-                            .overlay { Circle().strokeBorder(RiderTheme.surface, lineWidth: 1.5) }
                     }
-                }.accessibilityHidden(true)
-                if let first = reaction.people.first {
-                    let others = reaction.total - 1
-                    Text(others > 0 ? "Шака от \(first.handle) и ещё \(others)" : "Шака от \(first.handle)")
-                        .lineLimit(1)
-                } else {
-                    Text("Шака · \(reaction.total)")
                 }
+            }.accessibilityLabel("Кто поставил шаку")
+            if let first = reaction.people.first {
+                RiderLinkedText(text: "Шака от " + first.handle)
             }
-            .font(.caption.weight(.medium)).foregroundStyle(.secondary)
-        }
-        .buttonStyle(.borderless)
+            Button { showingReactions = true } label: {
+                Text(reaction.total > 1 ? "и ещё \(reaction.total - 1)" : "Все")
+            }
+        }.font(.caption).buttonStyle(.borderless)
     }
 
     private var reactionsSheet: some View {
@@ -1303,10 +1337,14 @@ struct RiderNotificationsView: View {
                                            description: Text("Здесь появятся реакции, комментарии, репосты и подписки."))
                 }
                 ForEach(Array(items.enumerated()), id: \.offset) { _, item in
-                    if let post = item.postID {
-                        NavigationLink { RiderSharedPostView(id: post, openComments: item.kind == "reply" || item.kind == "comment") } label: { activityRow(item) }
-                    } else {
+                    VStack(alignment: .leading, spacing: 6) {
                         NavigationLink { RiderPublicProfileView(id: item.person.id) } label: { activityRow(item) }
+                            .buttonStyle(.borderless)
+                        if let post = item.postID {
+                            NavigationLink {
+                                RiderSharedPostView(id: post, openComments: item.kind == "reply" || item.kind == "comment")
+                            } label: { Text("К публикации").font(.caption) }.buttonStyle(.borderless)
+                        }
                     }
                 }
             } else if failed {
@@ -1556,7 +1594,7 @@ struct RiderThreadView: View {
             if let attachment = message.attachment {
                 RiderChatAttachmentView(attachment: attachment, message: message.id, peer: peer.id)
             }
-            if !message.text.isEmpty { Text(message.text).textSelection(.enabled) }
+            if !message.text.isEmpty { RiderLinkedText(text: message.text) }
             RiderPostDate(date: Date(timeIntervalSince1970: message.createdAt))
         }
         .padding(10)
@@ -1605,7 +1643,7 @@ struct RiderThreadView: View {
         defer { preparingAttachment = false; self.photo = nil }
         do {
             guard let source = try await photo.loadTransferable(type: Data.self),
-                  let bytes = RiderPostComposer.postJPEG(source) else { throw CocoaError(.fileReadCorruptFile) }
+                  let bytes = RiderPostComposer.postJPEG(source, forChat: true) else { throw CocoaError(.fileReadCorruptFile) }
             guard !Task.isCancelled else { return }
             attachment = try RiderChatUpload(filename: "Фото Rider.jpg", contentType: "image/jpeg", data: bytes)
             draftID = UUID()
@@ -1641,6 +1679,7 @@ private struct RiderChatAttachmentView: View {
     let attachment: RiderChatAttachment
     let message: UUID
     let peer: String
+    @State private var fullScreenPhoto: URL?
     @State private var shareFile: RiderChatFile?
     @State private var preview: UIImage?
     @State private var loading = false
@@ -1648,20 +1687,23 @@ private struct RiderChatAttachmentView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
-            if let preview {
-                Image(uiImage: preview).resizable().scaledToFit()
-                    .frame(maxWidth: 250, maxHeight: 260)
-                    .clipShape(RoundedRectangle(cornerRadius: 9))
-                    .accessibilityLabel("Фото во вложении")
-            }
-            if let shareFile {
+            if attachment.showsPhoto, let preview, let shareFile {
+                Button { fullScreenPhoto = shareFile.url } label: {
+                    Image(uiImage: preview).resizable().scaledToFit()
+                        .frame(maxWidth: 250, maxHeight: 260)
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                }.buttonStyle(.plain).accessibilityLabel("Открыть фото во весь экран")
+            } else if let shareFile {
                 ShareLink(item: shareFile, preview: SharePreview(attachment.filename)) { label("square.and.arrow.up") }
+            } else if attachment.showsPhoto && !failed {
+                ProgressView("Загрузка фото").font(.caption)
             } else {
                 Button { Task { await prepare() } } label: { label("arrow.down.circle") }
                     .disabled(loading).buttonStyle(.plain)
             }
             if failed { Text("Не удалось загрузить вложение.").font(.caption2).foregroundStyle(.secondary) }
         }
+        .quickLookPreview($fullScreenPhoto)
         .task(id: message) { if attachment.showsPhoto { await prepare() } }
     }
 

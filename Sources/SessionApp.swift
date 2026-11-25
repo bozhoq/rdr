@@ -10,11 +10,20 @@ struct SessionApp: App {
     @ObservedObject private var sos = RiderSOSService.shared
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var recorder = SessionRecorder()
+    @AppStorage("rider.appearance") private var theme = RiderAppearance.lagoon
+    @AppStorage("rider.textSize") private var textSize = 0
+    @Environment(\.dynamicTypeSize) private var systemSize
+    private var chosenSize: DynamicTypeSize {
+        if systemSize.isAccessibilitySize { return systemSize }
+        switch textSize { case 1: return .medium; case 2: return .large; case 3: return .xLarge; case 4: return .xxLarge; default: return systemSize }
+    }
 
     var body: some Scene {
         WindowGroup {
             Tabs(recorder: recorder)
                 .environment(\.locale, Locale(identifier: "ru_RU"))
+                .preferredColorScheme(theme.scheme)
+                .environment(\.dynamicTypeSize, chosenSize)
                 .onChange(of: scenePhase) { _, phase in recorder.sceneChanged(phase) }
                 .task(id: scenePhase) {
                     guard scenePhase == .active, RiderCommunity.endpoint != nil else { return }
@@ -140,7 +149,7 @@ private struct Tabs: View {
 
     var body: some View {
         TabView(selection: $selectedTab) {
-            NavigationStack { RiderFeedView() }
+            NavigationStack { RiderFeedView(recorder: recorder) }
                 .tabItem { Label("Лента", systemImage: "rectangle.stack") }
                 .tag(Tab.feed)
 
@@ -155,7 +164,7 @@ private struct Tabs: View {
                     guard let id = recorder.live?.id else { return }
                     recorder.stop()
                     guard recorder.history.contains(where: { $0.id == id && $0.status == .finished }) else { return }
-                    riderPath = [.statistics, .session(id)]
+                    riderPath = [.session(id)]
                     selectedTab = .rider
                 }
             }
@@ -198,6 +207,7 @@ private struct Tabs: View {
                 RiderRankPromotion(previous: promotion.previous, current: promotion.current) { self.promotion = nil }
             }
         }
+        .modifier(RiderSocialAlerts())
         .environmentObject(social)
         .tint(RiderTheme.accent)
         .alert("Rider", isPresented: Binding(
@@ -1512,8 +1522,11 @@ private struct NotesEditor: View {
 
 
 enum RiderTheme {
-    static let canvas = adaptive(light: 0xD6F6F2, dark: 0x052D32)
-    static let surface = adaptive(light: 0xF6FFFD, dark: 0x0B4043)
+    private static var branded: Bool {
+        (UserDefaults.standard.string(forKey: "rider.appearance") ?? "lagoon") == "lagoon"
+    }
+    static var canvas: Color { branded ? adaptive(light: 0xD6F6F2, dark: 0x052D32) : Color(uiColor: .systemGroupedBackground) }
+    static var surface: Color { branded ? adaptive(light: 0xF6FFFD, dark: 0x0B4043) : Color(uiColor: .secondarySystemGroupedBackground) }
     static let border = adaptive(light: 0xB5E4DE, dark: 0x285554)
     static let accent = adaptive(light: 0x00797C, dark: 0x64EDDD)
     static let action = Color(uiColor: rgb(0x00797C))

@@ -46,11 +46,20 @@ final class RiderSOSAppDelegate: NSObject, UIApplicationDelegate, UNUserNotifica
     func userNotificationCenter(_ center: UNUserNotificationCenter,
                                 willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
         let info = notification.request.content.userInfo
-        return info["riderSOS"] != nil || info["riderSOSReply"] != nil ? [.banner, .sound] : []
+        if let kind = info["riderSocial"] as? String {
+            guard RiderAlertKind(rawValue: kind)?.enabled == true else { return [] }
+            return RiderAlertKind.sound.enabled ? [.banner, .sound] : [.banner]
+        }
+        guard info["riderSOSReply"] != nil || (info["riderSOS"] != nil && RiderAlertKind.sos.enabled) else { return [] }
+        return RiderAlertKind.sound.enabled ? [.banner, .sound] : [.banner]
     }
 
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
         let info = response.notification.request.content.userInfo
+        if let kind = info["riderSocial"] as? String {
+            await MainActor.run { NotificationCenter.default.post(name: Notification.Name("rider.social.open"), object: kind) }
+            return
+        }
         if let id = (info["riderSOSReply"] as? String).flatMap(UUID.init(uuidString:)) {
             await MainActor.run { RiderSOSService.shared.openReceipt(id) }
             return
@@ -213,8 +222,19 @@ final class RiderSOSAppDelegate: NSObject, UIApplicationDelegate, UNUserNotifica
         uploadLocationIfNeeded()
     }
 
+    func updateReceiving(_ enabled: Bool) async {
+        if enabled { lastUpdate = .distantPast; await refreshAuthorization(prompt: true); return }
+        receiverTask?.cancel()
+        await receiverTask?.value
+        guard !RiderAlertKind.sos.enabled else { return }
+        if RiderCommunity.endpoint != nil {
+            let _: ReceiverStatus? = try? await RiderCommunity.decode("sos/receiver", method: "DELETE")
+        }
+        receiverStatus = "Входящие SOS рядом выключены."
+    }
+
     private func uploadLocationIfNeeded() {
-        guard available, RiderCommunity.endpoint != nil, let token, let latestFix,
+        guard RiderAlertKind.sos.enabled, available, RiderCommunity.endpoint != nil, let token, let latestFix,
               dateIsFresh(latestFix), Date().timeIntervalSince(lastUpdate) >= 50, receiverTask == nil else { return }
         lastUpdate = Date()
         receiverTask = Task {
