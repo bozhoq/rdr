@@ -573,6 +573,7 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
         locating = false
         if let fix = locations.last(where: { (0...65).contains($0.horizontalAccuracy) && abs($0.timestamp.timeIntervalSinceNow) <= 45 }) {
             previewFix = fix
+            Task { @MainActor in RiderSOSService.shared.observeLocation(fix) }
         } else { previewFix = nil }
         guard summary?.gpsEnabledAtStart == true, locationAuthorized else { return }
         for point in locations {

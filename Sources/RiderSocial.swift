@@ -1096,10 +1096,14 @@ struct RiderSharedPostView: View {
 
 struct RiderNotificationsView: View {
     @State private var items: [RiderActivity]?
+    @ObservedObject private var sos = RiderSOSService.shared
     @State private var failed = false
 
     var body: some View {
         List {
+            Button { sos.open() } label: {
+                Label("SOS рядом", systemImage: "dot.radiowaves.left.and.right")
+            }
             if RiderCommunity.endpoint == nil {
                 ContentUnavailableView("Уведомления", systemImage: "bell",
                                        description: Text("Уведомления появятся после подключения сервера Rider."))

@@ -68,6 +68,13 @@ enum RiderMission: String, Codable, CaseIterable, Identifiable {
     case jumps1, jumps3, jumps5, jumps8, jumps12, jumps20
     case height2, height3, height4, height5, height6
     case air1, air15, air2, air25, air3
+    case height7, height8, height9, height10, height11, height12, height13, height14
+    case height15, height16, height17, height18, height19, height20, height21, height22
+    case height23, height24, height25, height26, height27, height28, height29, height30
+    case height31, height32, height33, height34, height35, water75, water105, water120
+    case water150, water180, route15, route20, route25, route30, jumps25, jumps30
+    case jumps40, jumps50, air35, air4, air5, air6, air7, air8
+    case air10
 
     static let minimumRideSeconds = 15 * 60
     var id: Self { self }
@@ -150,6 +157,55 @@ enum RiderMission: String, Codable, CaseIterable, Identifiable {
         case .air2: return .init(category: .air, target: 2, points: 10, title: "Две секунды тишины")
         case .air25: return .init(category: .air, target: 2.5, points: 13, title: "Поймать паузу")
         case .air3: return .init(category: .air, target: 3, points: 16, title: "Три секунды полёта")
+        case .height7: return .init(category: .height, target: 7, points: 21, title: "Прыжок на 7 м")
+        case .height8: return .init(category: .height, target: 8, points: 24, title: "Прыжок на 8 м")
+        case .height9: return .init(category: .height, target: 9, points: 27, title: "Прыжок на 9 м")
+        case .height10: return .init(category: .height, target: 10, points: 30, title: "Прыжок на 10 м")
+        case .height11: return .init(category: .height, target: 11, points: 33, title: "Прыжок на 11 м")
+        case .height12: return .init(category: .height, target: 12, points: 36, title: "Прыжок на 12 м")
+        case .height13: return .init(category: .height, target: 13, points: 39, title: "Прыжок на 13 м")
+        case .height14: return .init(category: .height, target: 14, points: 42, title: "Прыжок на 14 м")
+        case .height15: return .init(category: .height, target: 15, points: 45, title: "Прыжок на 15 м")
+        case .height16: return .init(category: .height, target: 16, points: 48, title: "Прыжок на 16 м")
+        case .height17: return .init(category: .height, target: 17, points: 51, title: "Прыжок на 17 м")
+        case .height18: return .init(category: .height, target: 18, points: 54, title: "Прыжок на 18 м")
+        case .height19: return .init(category: .height, target: 19, points: 57, title: "Прыжок на 19 м")
+        case .height20: return .init(category: .height, target: 20, points: 60, title: "Прыжок на 20 м")
+        case .height21: return .init(category: .height, target: 21, points: 63, title: "Прыжок на 21 м")
+        case .height22: return .init(category: .height, target: 22, points: 66, title: "Прыжок на 22 м")
+        case .height23: return .init(category: .height, target: 23, points: 69, title: "Прыжок на 23 м")
+        case .height24: return .init(category: .height, target: 24, points: 72, title: "Прыжок на 24 м")
+        case .height25: return .init(category: .height, target: 25, points: 75, title: "Прыжок на 25 м")
+        case .height26: return .init(category: .height, target: 26, points: 78, title: "Прыжок на 26 м")
+        case .height27: return .init(category: .height, target: 27, points: 81, title: "Прыжок на 27 м")
+        case .height28: return .init(category: .height, target: 28, points: 84, title: "Прыжок на 28 м")
+        case .height29: return .init(category: .height, target: 29, points: 87, title: "Прыжок на 29 м")
+        case .height30: return .init(category: .height, target: 30, points: 90, title: "Прыжок на 30 м")
+        case .height31: return .init(category: .height, target: 31, points: 93, title: "Прыжок на 31 м")
+        case .height32: return .init(category: .height, target: 32, points: 96, title: "Прыжок на 32 м")
+        case .height33: return .init(category: .height, target: 33, points: 99, title: "Прыжок на 33 м")
+        case .height34: return .init(category: .height, target: 34, points: 100, title: "Прыжок на 34 м")
+        case .height35: return .init(category: .height, target: 35, points: 100, title: "Прыжок на 35 м")
+        case .water75: return .init(category: .water, target: 75, points: 18, title: "Держать ритм")
+        case .water105: return .init(category: .water, target: 105, points: 24, title: "Ещё один галс")
+        case .water120: return .init(category: .water, target: 120, points: 28, title: "Два часа на воде")
+        case .water150: return .init(category: .water, target: 150, points: 34, title: "Долгая прогулка")
+        case .water180: return .init(category: .water, target: 180, points: 40, title: "Три часа на воде")
+        case .route15: return .init(category: .route, target: 15000, points: 25, title: "Пятнадцать по воде")
+        case .route20: return .init(category: .route, target: 20000, points: 31, title: "Двадцать километров")
+        case .route25: return .init(category: .route, target: 25000, points: 36, title: "Дальний галс")
+        case .route30: return .init(category: .route, target: 30000, points: 42, title: "Тридцать по воде")
+        case .jumps25: return .init(category: .jumps, target: 25, points: 29, title: "Четверть сотни")
+        case .jumps30: return .init(category: .jumps, target: 30, points: 34, title: "Тридцать взлётов")
+        case .jumps40: return .init(category: .jumps, target: 40, points: 43, title: "Сорок взлётов")
+        case .jumps50: return .init(category: .jumps, target: 50, points: 52, title: "Полсотни взлётов")
+        case .air35: return .init(category: .air, target: 3.5, points: 19, title: "Время замедлилось")
+        case .air4: return .init(category: .air, target: 4, points: 22, title: "Четыре секунды")
+        case .air5: return .init(category: .air, target: 5, points: 27, title: "Пять секунд над водой")
+        case .air6: return .init(category: .air, target: 6, points: 33, title: "Долгий полёт")
+        case .air7: return .init(category: .air, target: 7, points: 39, title: "Семь секунд")
+        case .air8: return .init(category: .air, target: 8, points: 45, title: "Восемь секунд")
+        case .air10: return .init(category: .air, target: 10, points: 55, title: "Десять секунд")
         }
     }
 
@@ -198,12 +254,26 @@ enum RiderMission: String, Codable, CaseIterable, Identifiable {
         metrics.seconds >= Self.minimumRideSeconds && (value(metrics) ?? 0) >= rule.target
     }
 
+    static func firstCompletions(in history: [SessionSummary]) -> [SessionSummary] {
+        var seen = Set<Self>()
+        return history.filter { $0.mission != nil }
+            .sorted { ($0.startedAt, $0.id.uuidString) < ($1.startedAt, $1.id.uuidString) }
+            .filter { session in
+                guard session.status == .finished, RiderTotals.isRide(session), let mission = session.mission,
+                      !seen.contains(mission), mission.completed(Metrics(session)) else { return false }
+                seen.insert(mission)
+                return true
+            }
+    }
+
     static func earned(in history: [SessionSummary]) -> Set<Self> {
-        Set(history.compactMap { session in
-            guard session.status == .finished, RiderTotals.isRide(session),
-                  let mission = session.mission, mission.completed(Metrics(session)) else { return nil }
-            return mission
-        })
+        Set(firstCompletions(in: history).compactMap(\.mission))
+    }
+
+    static func draw(excluding earned: Set<Self>) -> Self? {
+        let remaining = allCases.filter { !earned.contains($0) }
+        let groups = Dictionary(grouping: remaining) { $0.rule.category }
+        return Category.allCases.filter { groups[$0] != nil }.randomElement().flatMap { groups[$0]?.randomElement() }
     }
 }
 
@@ -303,6 +373,7 @@ struct RiderSeasonProgress {
         let season = calendar.dateInterval(of: .year, for: now)
         year = calendar.component(.year, from: now)
         var seen = Set<UUID>()
+        let rewardIDs = Set(RiderMission.firstCompletions(in: history).map(\.id))
         rides = history.compactMap { session in
             guard let season, session.startedAt >= season.start, session.startedAt < season.end,
                   session.startedAt <= now, session.status == .finished, RiderTotals.isRide(session),
@@ -311,10 +382,11 @@ struct RiderSeasonProgress {
                 (ApproachJumpDetector.minimumHeight...100).contains($0.heightMeters ?? 0)
             }
             let metrics = RiderMission.Metrics(session, measured: measured)
+            let mission = rewardIDs.contains(session.id) ? session.mission : nil
             return Ride(id: session.id, startedAt: session.startedAt.timeIntervalSince1970,
                         seconds: metrics.seconds, jumps: min(measured.count, 100),
                         scoringJumps: metrics.scoringJumps, height: metrics.height, airtime: metrics.airtime,
-                        mission: session.mission, missionDistance: session.mission?.rule.category == .route ? metrics.distance : nil)
+                        mission: mission, missionDistance: mission?.rule.category == .route ? metrics.distance : nil)
         }.sorted { $0.id.uuidString < $1.id.uuidString }
     }
 }

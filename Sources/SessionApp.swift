@@ -6,6 +6,8 @@ import UniformTypeIdentifiers
 
 @main
 struct SessionApp: App {
+    @UIApplicationDelegateAdaptor(RiderSOSAppDelegate.self) private var sosDelegate
+    @ObservedObject private var sos = RiderSOSService.shared
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var recorder = SessionRecorder()
 
@@ -14,6 +16,8 @@ struct SessionApp: App {
             Tabs(recorder: recorder)
                 .environment(\.locale, Locale(identifier: "ru_RU"))
                 .onChange(of: scenePhase) { _, phase in recorder.sceneChanged(phase) }
+                .task(id: scenePhase) { if scenePhase == .active { await sos.refreshAuthorization() } }
+                .sheet(item: $sos.inbox) { inbox in RiderSOSInbox(selected: inbox.selected) }
         }
     }
 }
@@ -293,8 +297,8 @@ private struct RecordingView: View {
     @State private var confirmingStop = false
     @State private var showingSensorCheck = false
     @State private var markerKind = MarkerKind.walking
-    @State private var mission: RiderMission?
-    @State private var choosingMission = false
+    @AppStorage("rider.nextSecretMission") private var missionOffer = ""
+    @State private var skipMission = false
 
     private enum RecordingDevice: Hashable { case phone, watch }
     var body: some View {
@@ -318,9 +322,6 @@ private struct RecordingView: View {
         }
         .sheet(isPresented: $showingPresets) {
             GearPresetsView(recorder: recorder)
-        }
-        .sheet(isPresented: $choosingMission) {
-            RiderMissionPicker(selected: $mission, earned: RiderMission.earned(in: recorder.history))
         }
         .sheet(isPresented: $newGPSPoint) {
             SpotEditor(original: nil, suggested: recorder.usableFix?.coordinate) { spot in
@@ -404,25 +405,7 @@ private struct RecordingView: View {
                     }
                 }.lagoonCard()
 
-                Button { choosingMission = true } label: {
-                    HStack(spacing: 12) {
-                        Image(systemName: mission?.rule.category.icon ?? "flag.checkered")
-                            .font(.title3.weight(.semibold)).foregroundStyle(RiderTheme.accent)
-                            .frame(width: 34)
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Задание на каталку").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                            Text(mission?.rule.title ?? "Выбрать цель").font(.headline).foregroundStyle(.primary)
-                            if let rule = mission?.rule {
-                                Text("\(rule.goal) · +\(rule.points) ПТС").font(.caption).foregroundStyle(RiderTheme.accent)
-                            }
-                        }
-                        Spacer()
-                        Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                    }
-                    .lagoonCard()
-                }
-                .buttonStyle(.plain)
-                .accessibilityHint("Можно начать каталку без задания")
+                secretGoal
 
                 Button(action: startRide) {
                     Text("Начать каталку").font(.headline)
@@ -440,20 +423,53 @@ private struct RecordingView: View {
                     Label("Калибровать датчики", systemImage: "scope").frame(maxWidth: .infinity)
                 }.buttonStyle(.bordered).disabled(device == .watch)
 
+                RiderSOSSettings(recorder: recorder).lagoonCard()
+
                 if !recorder.hasRecordingSensors { Text("Датчики записи пока недоступны.").foregroundStyle(.secondary) }
                 if recorder.analyzingSessionID != nil { ProgressView("Разбираем сохранённую сессию…") }
             }.padding(20)
         }
         .background(RiderTheme.canvas.ignoresSafeArea())
+        .task { prepareSecretGoal() }
+        .onChange(of: recorder.history.count) { _, _ in prepareSecretGoal() }
         .onChange(of: recorder.automaticConditions) { _, _ in recorder.automaticSpotOverride = nil }
         .task(id: recorder.automaticConditions) {
             if recorder.automaticConditions && recorder.locationAuthorized { recorder.locateSpot() }
         }
     }
 
+    @ViewBuilder private var secretGoal: some View {
+        if let mission = RiderMission(rawValue: missionOffer) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 12) {
+                    RiderMissionSticker(mission: mission, size: 42)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Случайная цель").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                        Text(mission.rule.title).font(.headline)
+                        Text("\(mission.rule.goal) · +\(mission.rule.points) ПТС").font(.caption)
+                            .foregroundStyle(RiderTheme.accent)
+                    }
+                }
+                Toggle("Взять задание на каталку", isOn: Binding(get: { !skipMission }, set: { skipMission = !$0 }))
+                    .font(.subheadline)
+            }
+            .lagoonCard()
+        }
+    }
+
+    private func prepareSecretGoal() {
+        guard recorder.live == nil else { return }
+        let earned = RiderMission.earned(in: recorder.history)
+        if let offered = RiderMission(rawValue: missionOffer), !earned.contains(offered) { return }
+        missionOffer = RiderMission.draw(excluding: earned)?.rawValue ?? ""
+    }
+
     private func startRide() {
-        recorder.start(mission: mission)
-        if recorder.live != nil { mission = nil }
+        recorder.start(mission: skipMission ? nil : RiderMission(rawValue: missionOffer))
+        if recorder.live != nil {
+            missionOffer = ""
+            skipMission = false
+        }
     }
 
     private var sensorCheck: some View {
@@ -554,6 +570,8 @@ private struct RecordingView: View {
             .tint(.white)
             .padding(.bottom, 16)
             StopRecordingSlider(onStop: onStop, accessibleStop: { confirmingStop = true })
+            RiderSOSControl(recorder: recorder, session: session)
+                .padding(.top, 8)
             HStack(spacing: 7) {
                 Circle().fill(.red).frame(width: 8, height: 8)
                 Text("REC").font(.caption.weight(.bold)).tracking(2)
@@ -995,7 +1013,8 @@ struct SessionDetail: View {
     var body: some View {
         List {
             if let highlight = RiderSessionHighlight.best(for: session, history: recorder.history) {
-                RiderSessionFinish(session: session, highlight: highlight, spots: recorder.spots, presets: recorder.gearPresets)
+                RiderSessionFinish(session: session, highlight: highlight, spots: recorder.spots, presets: recorder.gearPresets,
+                                   unlocked: RiderMission.firstCompletions(in: recorder.history).contains { $0.id == session.id })
                     .listRowBackground(Color.clear)
                     .listRowInsets(EdgeInsets())
             }
@@ -1191,78 +1210,35 @@ private struct AltitudeRows: View {
     }
 }
 
-struct RiderMissionPicker: View {
-    @Environment(\.dismiss) private var dismiss
-    var selected: Binding<RiderMission?>?
-    let earned: Set<RiderMission>
+struct RiderSecretAchievements: View {
+    let completed: [SessionSummary]
 
     var body: some View {
-        NavigationStack {
-            List {
-                if let selected {
-                    Section {
-                        Button { choose(nil, in: selected) } label: {
-                            Label("Катать без задания", systemImage: "water.waves")
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Секретные").font(.title3.bold()).accessibilityAddTraits(.isHeader)
+            if completed.isEmpty {
+                Label("Здесь появятся секретные ачивки с каталок.", systemImage: "sparkles")
+                    .font(.subheadline).foregroundStyle(.secondary)
+                    .lagoonCard()
+            }
+            ForEach(completed) { session in
+                if let mission = session.mission {
+                    HStack(spacing: 12) {
+                        RiderMissionSticker(mission: mission, size: 41)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(mission.rule.title).font(.subheadline.bold())
+                            Text(session.startedAt, format: .dateTime.day().month().year())
+                                .font(.caption).foregroundStyle(.secondary)
                         }
-                    } footer: {
-                        Text("Можно выбрать одно задание на эту каталку. За выполнение после 15 минут записи начисляются ПТС, а новая наклейка остаётся в коллекции.")
+                        Spacer(minLength: 5)
+                        Text("+\(mission.rule.points) ПТС").font(.caption.bold().monospacedDigit())
+                            .foregroundStyle(RiderTheme.accent)
                     }
-                } else {
-                    Section {
-                        LabeledContent("Собрано", value: "\(earned.count) из \(RiderMission.allCases.count)")
-                            .font(.headline)
-                    }
-                }
-                ForEach(RiderMission.Category.allCases) { category in
-                    Section(category.title) {
-                        ForEach(RiderMission.allCases.filter { $0.rule.category == category }) { mission in
-                            if let selected {
-                                Button { choose(mission, in: selected) } label: {
-                                    row(mission, selected: selected.wrappedValue == mission)
-                                }.buttonStyle(.plain)
-                            } else {
-                                row(mission, selected: false)
-                            }
-                        }
-                    }
+                    .lagoonCard()
                 }
             }
-            .scrollContentBackground(.hidden)
-            .background(RiderTheme.canvas.ignoresSafeArea())
-            .navigationTitle(selected == nil ? "Наклейки" : "Задание на каталку")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Закрыть") { dismiss() } }
-            }
         }
-        .tint(RiderTheme.accent)
-    }
-
-    private func choose(_ mission: RiderMission?, in selection: Binding<RiderMission?>) {
-        selection.wrappedValue = mission
-        dismiss()
-    }
-
-    private func row(_ mission: RiderMission, selected: Bool) -> some View {
-        let collected = earned.contains(mission)
-        return HStack(spacing: 12) {
-            RiderMissionSticker(mission: mission, size: 41, earned: collected || self.selected != nil)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(mission.rule.title).font(.subheadline.bold()).foregroundStyle(.primary)
-                Text(mission.rule.goal).font(.caption).foregroundStyle(.secondary)
-            }
-            Spacer(minLength: 5)
-            Text("+\(mission.rule.points) ПТС")
-                .font(.caption.bold().monospacedDigit()).foregroundStyle(RiderTheme.accent)
-            if selected || collected {
-                Image(systemName: selected ? "checkmark.circle.fill" : "seal.fill")
-                    .foregroundStyle(RiderTheme.accent)
-                    .accessibilityLabel(selected ? "Выбрано" : "Наклейка получена")
-            }
-        }
-        .padding(.vertical, 3)
-        .contentShape(Rectangle())
-        .accessibilityElement(children: .combine)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -1332,6 +1308,7 @@ private struct RiderSessionFinish: View {
     let highlight: RiderSessionHighlight
     let spots: [RiderSpot]
     let presets: [GearPreset]
+    let unlocked: Bool
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var revealed = false
@@ -1350,7 +1327,7 @@ private struct RiderSessionFinish: View {
 
     private var shareText: String {
         let parts = [highlight.title, highlight.detail,
-                     success.map { "\($0.rule.title) · +\($0.rule.points) ПТС" }]
+                     success.map { unlocked ? "\($0.rule.title) · +\($0.rule.points) ПТС" : $0.rule.title }]
         return parts.compactMap { $0 }.joined(separator: " · ") + " · Rider"
     }
 
@@ -1392,12 +1369,14 @@ private struct RiderSessionFinish: View {
                         .rotationEffect(.degrees(reduceMotion || revealed ? -8 : -28))
                     VStack(alignment: .leading, spacing: 3) {
                         Text(mission.rule.title).font(.subheadline.bold())
-                        Text("Задание выполнено").font(.caption).foregroundStyle(RiderTheme.foam)
+                        Text(unlocked ? "Секретная ачивка открыта" : "Задание выполнено").font(.caption).foregroundStyle(RiderTheme.foam)
                     }
                     Spacer(minLength: 4)
-                    Text("+\(mission.rule.points) ПТС")
-                        .font(.subheadline.bold().monospacedDigit())
-                        .foregroundStyle(Color(red: 1, green: 0.87, blue: 0.55))
+                    if unlocked {
+                        Text("+\(mission.rule.points) ПТС")
+                            .font(.subheadline.bold().monospacedDigit())
+                            .foregroundStyle(Color(red: 1, green: 0.87, blue: 0.55))
+                    }
                 }
                 .padding(9)
                 .background(.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 13))
