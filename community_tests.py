@@ -122,15 +122,52 @@ class CommunityTests(unittest.TestCase):
         self.call("GET", path, self.audience, expect=404)
 
         delivered = []
-        def push(token, identifier, expiration, name, equipment):
-            delivered.append((token, identifier, name, equipment))
+        def push(token, identifier, expiration, name, equipment, reply):
+            delivered.append((token, identifier, name, equipment, reply))
             return "accepted"
         rider_sos.worker_batch(db, push)
-        self.assertEqual(delivered, [("a1" * 32, uid, "Rider", "Core · Jaime")])
+        self.assertEqual(delivered, [("a1" * 32, uid, "Rider", "Core · Jaime", False)])
         self.assertEqual(self.call("GET", path, self.me)["acceptedByAPNs"], 1)
         self.now += rider_sos.VISIBLE_SECONDS + 1
         rider_sos.worker_batch(db, None)
         self.assertEqual(self.call("GET", "/sos/inbox", self.audience), [])
+
+    def test_sos_accept_skip_and_sender_notification(self):
+        coords = dict(latitude=45, longitude=33, accuracy=10, capturedAt=self.now)
+        uid = str(UUID(int=322))
+        person_a = self.audience
+        person_b = "c" * 72
+        sender_token = "b1" * 32
+        self.call("PUT", "/sos/device", self.me, {"token": sender_token})
+        for account, token in [(person_a, "b2" * 32), (person_b, "b3" * 32)]:
+            self.call("PUT", "/sos/receiver", account, dict(token=token, location=coords))
+        db = sqlite3.connect(os.environ["RIDER_DB"])
+        self.addCleanup(db.close)
+        db.execute("PRAGMA foreign_keys=ON")
+        rider_sos.worker_batch(db, None)
+        self.call("POST", "/sos", self.me, dict(id=uid, name="Sender", location=coords))
+
+        endpoint = "/sos/" + uid
+        self.call("PUT", endpoint + "/decision", "e" * 72, {"action": "accept"}, expect=404)
+        decision = {"action": "accept", "name": "Nearby Rider"}
+        for _ in range(2):
+            result = self.call("PUT", endpoint + "/decision", person_a, decision)
+            self.assertEqual(result["action"], "accept")
+        self.call("PUT", endpoint + "/decision", person_b, {"action": "skip"})
+        self.assertEqual(self.call("GET", "/sos/inbox", person_b), [])
+        self.assertEqual(self.call("GET", "/sos/inbox", person_a)[0]["decision"], "accept")
+        receipt = self.call("GET", endpoint + "/receipt", self.me)
+        self.assertEqual([r["name"] for r in receipt["responders"]], ["Nearby Rider"])
+        self.assertEqual(receipt["location"]["latitude"], coords["latitude"])
+        self.call("GET", endpoint + "/receipt", person_a, expect=404)
+
+        delivered = []
+        def push(token, identifier, expiration, name, equipment, reply):
+            delivered.append((token, identifier, name, reply))
+            return "accepted"
+        rider_sos.worker_batch(db, push)
+        rider_sos.worker_batch(db, push)
+        self.assertEqual(delivered, [(sender_token, uid, "Nearby Rider", True)])
 
     def test_post_interaction_endpoints(self):
         rider = self.publish(self.me, "rider")["mine"]
