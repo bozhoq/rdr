@@ -8,7 +8,7 @@ struct RiderTotals: Codable, Equatable {
     let seconds: Double
 
     init(_ history: [SessionSummary]) {
-        let rides = history.filter(Self.isRide)
+        let rides = history.filter { Self.isRide($0) }
         let events = rides.flatMap { Self.measuredJumps(in: $0) }
         sessions = rides.count
         jumps = events.count
@@ -17,14 +17,14 @@ struct RiderTotals: Codable, Equatable {
         seconds = rides.reduce(0) { $0 + $1.durationSeconds }
     }
 
-    fileprivate static func isRide(_ session: SessionSummary) -> Bool {
-        session.status != .recording && session.setup?.sport.isRiding == true &&
+    fileprivate static func isRide(_ session: SessionSummary, includeRecording: Bool = false) -> Bool {
+        (session.status != .recording || includeRecording) && session.setup?.sport.isRiding == true &&
             session.durationSeconds.isFinite && session.durationSeconds > 0 &&
             session.handSimulationTest != true && session.phoneTossTest != true && session.recordingMode != .test
     }
 
-    fileprivate static func measuredJumps(in session: SessionSummary) -> [LiveJumpEstimate] {
-        guard isRide(session), let analysis = session.jumpAnalysis else { return [] }
+    fileprivate static func measuredJumps(in session: SessionSummary, includeRecording: Bool = false) -> [LiveJumpEstimate] {
+        guard isRide(session, includeRecording: includeRecording), let analysis = session.jumpAnalysis else { return [] }
         return analysis.candidates.compactMap { candidate in
             guard let estimate = session.liveEstimate(for: candidate),
                   estimate.isPhoneToss != true, estimate.isHandLift != true,
@@ -62,6 +62,195 @@ enum RiderRank: String, CaseIterable, Identifiable {
     var next: Self? { Self.allCases.first { $0.threshold > threshold } }
 }
 
+enum RiderMission: String, Codable, CaseIterable, Identifiable {
+    case water15, water25, water35, water45, water60, water90
+    case route1, route2, route3, route5, route8, route12
+    case jumps1, jumps3, jumps5, jumps8, jumps12, jumps20
+    case height2, height3, height4, height5, height6
+    case air1, air15, air2, air25, air3
+
+    static let minimumRideSeconds = 15 * 60
+    var id: Self { self }
+
+    enum Category: String, CaseIterable, Identifiable {
+        case water, route, jumps, height, air
+
+        var id: Self { self }
+        var title: String {
+            switch self {
+            case .water: return "Время на воде"
+            case .route: return "Маршрут"
+            case .jumps: return "Количество прыжков"
+            case .height: return "Высота"
+            case .air: return "Время в воздухе"
+            }
+        }
+        var icon: String {
+            switch self {
+            case .water: return "water.waves"
+            case .route: return "map"
+            case .jumps: return "bolt.fill"
+            case .height: return "arrow.up"
+            case .air: return "timer"
+            }
+        }
+
+        func text(_ value: Double) -> String {
+            let quantity = self == .route ? value / 1000 : value
+            let rounded = (quantity * 10).rounded(.down) / 10
+            let number = rounded.formatted(.number.precision(.fractionLength(0...1)))
+            switch self {
+            case .water: return number + " мин"
+            case .route: return number + " км"
+            case .jumps: return number
+            case .height: return number + " м"
+            case .air: return number + " с"
+            }
+        }
+    }
+
+    struct Rule {
+        let category: Category
+        let target: Double
+        let points: Int
+        let title: String
+
+        var goal: String {
+            category == .jumps ? category.text(target) + " прыжков от 2 м" : category.text(target)
+        }
+    }
+
+    var rule: Rule {
+        switch self {
+        case .water15: return .init(category: .water, target: 15, points: 5, title: "Поймать ритм")
+        case .water25: return .init(category: .water, target: 25, points: 8, title: "Разогреться")
+        case .water35: return .init(category: .water, target: 35, points: 10, title: "Войти в поток")
+        case .water45: return .init(category: .water, target: 45, points: 12, title: "Три четверти часа")
+        case .water60: return .init(category: .water, target: 60, points: 15, title: "Мой час на воде")
+        case .water90: return .init(category: .water, target: 90, points: 20, title: "Длинная каталка")
+        case .route1: return .init(category: .route, target: 1000, points: 6, title: "Первый километр")
+        case .route2: return .init(category: .route, target: 2000, points: 8, title: "Пара километров")
+        case .route3: return .init(category: .route, target: 3000, points: 10, title: "Три по воде")
+        case .route5: return .init(category: .route, target: 5000, points: 14, title: "Пятёрка по воде")
+        case .route8: return .init(category: .route, target: 8000, points: 18, title: "Дальше по ветру")
+        case .route12: return .init(category: .route, target: 12000, points: 22, title: "Длинный маршрут")
+        case .jumps1: return .init(category: .jumps, target: 1, points: 6, title: "Первый полёт")
+        case .jumps3: return .init(category: .jumps, target: 3, points: 9, title: "Три взлёта")
+        case .jumps5: return .init(category: .jumps, target: 5, points: 12, title: "Воздушная пятёрка")
+        case .jumps8: return .init(category: .jumps, target: 8, points: 15, title: "Восемь взлётов")
+        case .jumps12: return .init(category: .jumps, target: 12, points: 20, title: "Дюжина в воздухе")
+        case .jumps20: return .init(category: .jumps, target: 20, points: 25, title: "Двадцать взлётов")
+        case .height2: return .init(category: .height, target: 2, points: 6, title: "Оторваться")
+        case .height3: return .init(category: .height, target: 3, points: 8, title: "Три метра вверх")
+        case .height4: return .init(category: .height, target: 4, points: 11, title: "Выше брызг")
+        case .height5: return .init(category: .height, target: 5, points: 14, title: "Уровень окон")
+        case .height6: return .init(category: .height, target: 6, points: 18, title: "Шесть над водой")
+        case .air1: return .init(category: .air, target: 1, points: 6, title: "Секунда в воздухе")
+        case .air15: return .init(category: .air, target: 1.5, points: 8, title: "Полторы в воздухе")
+        case .air2: return .init(category: .air, target: 2, points: 10, title: "Две секунды тишины")
+        case .air25: return .init(category: .air, target: 2.5, points: 13, title: "Поймать паузу")
+        case .air3: return .init(category: .air, target: 3, points: 16, title: "Три секунды полёта")
+        }
+    }
+
+    struct Metrics {
+        let seconds: Int
+        let scoringJumps: Int
+        let height: Double?
+        let airtime: Double?
+        let distance: Double?
+
+        init(seconds: Int, scoringJumps: Int, height: Double?, airtime: Double?, distance: Double?) {
+            self.seconds = seconds
+            self.scoringJumps = scoringJumps
+            self.height = height
+            self.airtime = airtime
+            self.distance = distance
+        }
+
+        init(_ session: SessionSummary, measured: [LiveJumpEstimate]? = nil) {
+            let seconds = session.durationSeconds.isFinite ? Int(max(0, min(session.durationSeconds, 28_800))) : 0
+            let measured = measured ?? RiderTotals.measuredJumps(in: session, includeRecording: true).filter {
+                (ApproachJumpDetector.minimumHeight...100).contains($0.heightMeters ?? 0)
+            }
+            let qualifying = measured.filter { ($0.heightMeters ?? 0) >= RiderSeasonProgress.minimumScoringHeight }
+            let distance = session.gpsMetrics.flatMap { gps in
+                gps.accepted >= 5 && (0...500_000).contains(gps.distanceMeters) ? gps.distanceMeters : nil
+            }
+            self.init(seconds: seconds, scoringJumps: min(qualifying.count, 100),
+                      height: measured.compactMap(\.heightMeters).max(),
+                      airtime: measured.compactMap(\.reportedAirtime).filter { (0.01...120).contains($0) }.max(),
+                      distance: distance)
+        }
+    }
+
+    func value(_ metrics: Metrics) -> Double? {
+        switch rule.category {
+        case .water: return Double(metrics.seconds) / 60
+        case .route: return metrics.distance
+        case .jumps: return Double(metrics.scoringJumps)
+        case .height: return metrics.height
+        case .air: return metrics.airtime
+        }
+    }
+
+    func completed(_ metrics: Metrics) -> Bool {
+        metrics.seconds >= Self.minimumRideSeconds && (value(metrics) ?? 0) >= rule.target
+    }
+
+    static func earned(in history: [SessionSummary]) -> Set<Self> {
+        Set(history.compactMap { session in
+            guard session.status == .finished, RiderTotals.isRide(session),
+                  let mission = session.mission, mission.completed(Metrics(session)) else { return nil }
+            return mission
+        })
+    }
+}
+
+struct RiderSessionHighlight {
+    let title: String
+    let detail: String
+    let icon: String
+
+    static func best(for session: SessionSummary, history: [SessionSummary]) -> Self? {
+        guard session.status == .finished, RiderTotals.isRide(session) else { return nil }
+        let earlier = history.filter { $0.id != session.id && $0.startedAt < session.startedAt &&
+                                       $0.status == .finished && RiderTotals.isRide($0) }
+        let minutes = RiderMission.Category.water.text(min(session.durationSeconds, Double(Int32.max)) / 60)
+        if earlier.isEmpty {
+            return .init(title: "Первая каталка в Rider", detail: minutes + " на воде", icon: "hand.wave.fill")
+        }
+        let previous = RiderTotals(earlier)
+        if let best = RiderTotals.measuredJumps(in: session).compactMap(\.heightMeters).max(),
+           best > (previous.height ?? 0) {
+            let value = RiderMission.Category.height.text(best)
+            return .init(title: previous.height == nil ? "Первый замеренный прыжок" : "Личный рекорд высоты",
+                         detail: value, icon: "arrow.up.right")
+        }
+        if let milestone = [10, 25, 50, 100].last(where: { hours in
+            let threshold = Double(hours * 3600)
+            return previous.seconds < threshold && previous.seconds + session.durationSeconds >= threshold
+        }) {
+            return .init(title: "Уже \(milestone) ч на воде", detail: "За все каталки", icon: "hourglass")
+        }
+        if let setup = session.setup, !setup.spot.isEmpty,
+           !earlier.contains(where: { old in
+               guard let other = old.setup else { return false }
+               if let a = setup.spotID, let b = other.spotID { return a == b }
+               return setup.spot.localizedCaseInsensitiveCompare(other.spot) == .orderedSame
+           }) {
+            return .init(title: "Первая каталка на этом споте", detail: minutes + " на воде", icon: "mappin.circle.fill")
+        }
+        let inMonth = earlier.filter {
+            Calendar.current.isDate($0.startedAt, equalTo: session.startedAt, toGranularity: .month)
+        }
+        if let longest = inMonth.map(\.durationSeconds).max(), session.durationSeconds > longest {
+            return .init(title: "Самая длинная каталка месяца", detail: minutes + " на воде", icon: "clock.fill")
+        }
+        return .init(title: "Ещё одна каталка в копилку", detail: minutes + " на воде", icon: "water.waves")
+    }
+}
+
 struct RiderSeasonProgress {
     static let minimumScoringHeight = 2.0
 
@@ -73,6 +262,15 @@ struct RiderSeasonProgress {
         let scoringJumps: Int
         let height: Double?
         let airtime: Double?
+        let mission: RiderMission?
+        let missionDistance: Double?
+
+        var missionPoints: Int {
+            guard let mission else { return 0 }
+            let metrics = RiderMission.Metrics(seconds: seconds, scoringJumps: scoringJumps, height: height,
+                                               airtime: airtime, distance: missionDistance)
+            return mission.completed(metrics) ? mission.rule.points : 0
+        }
     }
 
     let year: Int
@@ -90,7 +288,7 @@ struct RiderSeasonProgress {
     var achievementPoints: Int { achievements.filter(\.unlocked).reduce(0) { $0 + $1.seasonBonus } }
     var points: Int {
         let qualifying = rides.reduce(0) { $0 + $1.scoringJumps }
-        return seconds / 60 + qualifying * 5 + achievementPoints
+        return seconds / 60 + qualifying * 5 + achievementPoints + rides.reduce(0) { $0 + $1.missionPoints }
     }
     var rank: RiderRank { .forPoints(points) }
     var fraction: Double {
@@ -112,12 +310,11 @@ struct RiderSeasonProgress {
             let measured = RiderTotals.measuredJumps(in: session).filter {
                 (ApproachJumpDetector.minimumHeight...100).contains($0.heightMeters ?? 0)
             }
+            let metrics = RiderMission.Metrics(session, measured: measured)
             return Ride(id: session.id, startedAt: session.startedAt.timeIntervalSince1970,
-                        seconds: Int(min(session.durationSeconds, 28_800)),
-                        jumps: min(measured.count, 100),
-                        scoringJumps: min(measured.filter { ($0.heightMeters ?? 0) >= Self.minimumScoringHeight }.count, 100),
-                        height: measured.compactMap(\.heightMeters).max(),
-                        airtime: measured.compactMap(\.reportedAirtime).filter { (0.01...120).contains($0) }.max())
+                        seconds: metrics.seconds, jumps: min(measured.count, 100),
+                        scoringJumps: metrics.scoringJumps, height: metrics.height, airtime: metrics.airtime,
+                        mission: session.mission, missionDistance: session.mission?.rule.category == .route ? metrics.distance : nil)
         }.sorted { $0.id.uuidString < $1.id.uuidString }
     }
 }

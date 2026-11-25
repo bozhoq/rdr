@@ -513,6 +513,13 @@ struct RiderPostComposer: View {
     @State private var error: String?
     @State private var loading = false
 
+    init(spots: [RiderSpot], presets: [GearPreset], artwork: Data? = nil, caption: String = "") {
+        self.spots = spots
+        self.presets = presets
+        _photo = State(initialValue: artwork)
+        _caption = State(initialValue: caption)
+    }
+
     var body: some View {
         NavigationStack {
             Form {

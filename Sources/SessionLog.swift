@@ -93,6 +93,7 @@ struct SessionSummary: Codable, Identifiable {
     var sensors: RecordingSensors?
     var automaticConditions: Bool?
     var wind: SessionWind?
+    var mission: RiderMission?
 
     var canReplayGroundEvents: Bool {
         handSimulationTest != true && (jumpAnalysis?.detectorVersion ?? JumpDetector.version) == JumpDetector.version

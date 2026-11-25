@@ -247,6 +247,7 @@ struct RiderProfileView: View {
     @State private var composing = false
     @State private var mine: RemoteRider?
     @State private var showingRanks = false
+    @State private var showingStickers = false
 
     private var cleanedUsername: String {
         draftUsername.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -260,6 +261,7 @@ struct RiderProfileView: View {
     var body: some View {
         let totals = RiderTotals(recorder.history)
         let badges = RiderAchievement.milestones(totals, followers: mine?.followers ?? 0)
+        let stickers = RiderMission.earned(in: recorder.history)
         return ScrollView {
             VStack(spacing: 18) {
                 profile
@@ -275,7 +277,8 @@ struct RiderProfileView: View {
                 }
                 .buttonStyle(.plain)
                 records(totals)
-                compactStats(timeOnWater: totals.timeOnWater, unlocked: badges.filter(\.unlocked).count, total: badges.count)
+                compactStats(timeOnWater: totals.timeOnWater, unlocked: badges.filter(\.unlocked).count,
+                             total: badges.count, stickers: stickers.count)
                 posts
             }
             .padding(20)
@@ -297,6 +300,7 @@ struct RiderProfileView: View {
         .sheet(isPresented: $composing) {
             RiderPostComposer(spots: recorder.spots, presets: recorder.gearPresets)
         }
+        .sheet(isPresented: $showingStickers) { RiderMissionPicker(earned: stickers) }
         .sheet(isPresented: $showingRanks) {
             NavigationStack {
                 List {
@@ -512,7 +516,7 @@ struct RiderProfileView: View {
         }.frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func compactStats(timeOnWater: String, unlocked: Int, total: Int) -> some View {
+    private func compactStats(timeOnWater: String, unlocked: Int, total: Int, stickers: Int) -> some View {
         VStack(spacing: 0) {
             summaryRow("Часы на воде", value: timeOnWater, icon: "water.waves")
                 .accessibilityElement(children: .combine)
@@ -523,6 +527,11 @@ struct RiderProfileView: View {
             .buttonStyle(.plain)
             .accessibilityLabel("Ачивки")
             .accessibilityValue("\(unlocked) из \(total)")
+            Divider()
+            Button { showingStickers = true } label: {
+                summaryRow("Наклейки", value: "\(stickers) из \(RiderMission.allCases.count)", icon: "seal", opensDetails: true)
+            }
+            .buttonStyle(.plain)
         }
         .padding(.horizontal, 12)
         .background(RiderTheme.surface, in: RoundedRectangle(cornerRadius: 14))

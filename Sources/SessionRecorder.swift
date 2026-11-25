@@ -317,7 +317,7 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
         sensorCheckMessage = nil
     }
 
-    func start() {
+    func start(mission: RiderMission? = nil) {
         guard summary == nil, analyzingSessionID == nil, hasRecordingSensors, automaticConditions || manualWindValid else { return }
         stopSensorCheck()
         UIDevice.current.isBatteryMonitoringEnabled = true
@@ -356,6 +356,7 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
             recordingMode: .battle,
             sensors: sensors
         )
+        session.mission = sessionSetup.sport.isRiding ? mission : nil
         session.automaticConditions = automaticConditions
         if !automaticConditions, let range = manualWind {
             session.wind = SessionWind(knots: range.midpoint / SessionWind.metersPerSecondPerKnot,

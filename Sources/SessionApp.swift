@@ -293,6 +293,8 @@ private struct RecordingView: View {
     @State private var confirmingStop = false
     @State private var showingSensorCheck = false
     @State private var markerKind = MarkerKind.walking
+    @State private var mission: RiderMission?
+    @State private var choosingMission = false
 
     private enum RecordingDevice: Hashable { case phone, watch }
     var body: some View {
@@ -316,6 +318,9 @@ private struct RecordingView: View {
         }
         .sheet(isPresented: $showingPresets) {
             GearPresetsView(recorder: recorder)
+        }
+        .sheet(isPresented: $choosingMission) {
+            RiderMissionPicker(selected: $mission, earned: RiderMission.earned(in: recorder.history))
         }
         .sheet(isPresented: $newGPSPoint) {
             SpotEditor(original: nil, suggested: recorder.usableFix?.coordinate) { spot in
@@ -399,7 +404,27 @@ private struct RecordingView: View {
                     }
                 }.lagoonCard()
 
-                Button(action: recorder.start) {
+                Button { choosingMission = true } label: {
+                    HStack(spacing: 12) {
+                        Image(systemName: mission?.rule.category.icon ?? "flag.checkered")
+                            .font(.title3.weight(.semibold)).foregroundStyle(RiderTheme.accent)
+                            .frame(width: 34)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Задание на каталку").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                            Text(mission?.rule.title ?? "Выбрать цель").font(.headline).foregroundStyle(.primary)
+                            if let rule = mission?.rule {
+                                Text("\(rule.goal) · +\(rule.points) ПТС").font(.caption).foregroundStyle(RiderTheme.accent)
+                            }
+                        }
+                        Spacer()
+                        Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    }
+                    .lagoonCard()
+                }
+                .buttonStyle(.plain)
+                .accessibilityHint("Можно начать каталку без задания")
+
+                Button(action: startRide) {
                     Text("Начать каталку").font(.headline)
                         .frame(maxWidth: .infinity).padding(.vertical, 10)
                 }
@@ -424,6 +449,11 @@ private struct RecordingView: View {
         .task(id: recorder.automaticConditions) {
             if recorder.automaticConditions && recorder.locationAuthorized { recorder.locateSpot() }
         }
+    }
+
+    private func startRide() {
+        recorder.start(mission: mission)
+        if recorder.live != nil { mission = nil }
     }
 
     private var sensorCheck: some View {
@@ -452,7 +482,7 @@ private struct RecordingView: View {
                         Button("Проверить снова", action: recorder.checkSensors).buttonStyle(.bordered)
                     }
                     Button {
-                        recorder.start()
+                        startRide()
                         if recorder.live != nil { showingSensorCheck = false }
                     } label: {
                         Text("Начать каталку").font(.headline).frame(maxWidth: .infinity)
@@ -507,7 +537,11 @@ private struct RecordingView: View {
                 .accessibilityAddTraits(.updatesFrequently)
             Spacer(minLength: 22)
             recordingMetrics(session)
-            Spacer(minLength: 24)
+            if let mission = session.mission {
+                RiderMissionProgress(mission: mission, metrics: RiderMission.Metrics(session))
+                    .padding(.top, 14)
+            }
+            Spacer(minLength: 18)
             HStack(spacing: 12) {
                 Button(recorder.voiceEnabled ? "Голос" : "Тишина", action: recorder.toggleVoice)
                     .font(.body.weight(.semibold))
@@ -960,6 +994,11 @@ struct SessionDetail: View {
 
     var body: some View {
         List {
+            if let highlight = RiderSessionHighlight.best(for: session, history: recorder.history) {
+                RiderSessionFinish(session: session, highlight: highlight, spots: recorder.spots, presets: recorder.gearPresets)
+                    .listRowBackground(Color.clear)
+                    .listRowInsets(EdgeInsets())
+            }
             Section {
                 let jumps = session.jumpAnalysis?.candidates.compactMap { session.liveEstimate(for: $0) } ?? []
                 HStack(alignment: .top, spacing: 4) {
@@ -1149,6 +1188,268 @@ private struct AltitudeRows: View {
                 }
             }
         }
+    }
+}
+
+struct RiderMissionPicker: View {
+    @Environment(\.dismiss) private var dismiss
+    var selected: Binding<RiderMission?>?
+    let earned: Set<RiderMission>
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if let selected {
+                    Section {
+                        Button { choose(nil, in: selected) } label: {
+                            Label("Катать без задания", systemImage: "water.waves")
+                        }
+                    } footer: {
+                        Text("Можно выбрать одно задание на эту каталку. За выполнение после 15 минут записи начисляются ПТС, а новая наклейка остаётся в коллекции.")
+                    }
+                } else {
+                    Section {
+                        LabeledContent("Собрано", value: "\(earned.count) из \(RiderMission.allCases.count)")
+                            .font(.headline)
+                    }
+                }
+                ForEach(RiderMission.Category.allCases) { category in
+                    Section(category.title) {
+                        ForEach(RiderMission.allCases.filter { $0.rule.category == category }) { mission in
+                            if let selected {
+                                Button { choose(mission, in: selected) } label: {
+                                    row(mission, selected: selected.wrappedValue == mission)
+                                }.buttonStyle(.plain)
+                            } else {
+                                row(mission, selected: false)
+                            }
+                        }
+                    }
+                }
+            }
+            .scrollContentBackground(.hidden)
+            .background(RiderTheme.canvas.ignoresSafeArea())
+            .navigationTitle(selected == nil ? "Наклейки" : "Задание на каталку")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Закрыть") { dismiss() } }
+            }
+        }
+        .tint(RiderTheme.accent)
+    }
+
+    private func choose(_ mission: RiderMission?, in selection: Binding<RiderMission?>) {
+        selection.wrappedValue = mission
+        dismiss()
+    }
+
+    private func row(_ mission: RiderMission, selected: Bool) -> some View {
+        let collected = earned.contains(mission)
+        return HStack(spacing: 12) {
+            RiderMissionSticker(mission: mission, size: 41, earned: collected || self.selected != nil)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(mission.rule.title).font(.subheadline.bold()).foregroundStyle(.primary)
+                Text(mission.rule.goal).font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 5)
+            Text("+\(mission.rule.points) ПТС")
+                .font(.caption.bold().monospacedDigit()).foregroundStyle(RiderTheme.accent)
+            if selected || collected {
+                Image(systemName: selected ? "checkmark.circle.fill" : "seal.fill")
+                    .foregroundStyle(RiderTheme.accent)
+                    .accessibilityLabel(selected ? "Выбрано" : "Наклейка получена")
+            }
+        }
+        .padding(.vertical, 3)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+    }
+}
+
+private struct RiderMissionSticker: View {
+    let mission: RiderMission
+    let size: CGFloat
+    var earned = true
+
+    private var tint: Color {
+        switch mission.rule.category {
+        case .water: return Color(red: 0.39, green: 0.94, blue: 0.82)
+        case .route: return Color(red: 0.60, green: 0.87, blue: 1)
+        case .jumps: return Color(red: 1, green: 0.81, blue: 0.38)
+        case .height: return Color(red: 0.91, green: 0.72, blue: 1)
+        case .air: return Color(red: 1, green: 0.65, blue: 0.54)
+        }
+    }
+
+    var body: some View {
+        ZStack {
+            Image(systemName: "seal.fill").font(.system(size: size, weight: .medium))
+                .foregroundStyle(earned ? tint : Color.secondary.opacity(0.22))
+            Image(systemName: earned ? mission.rule.category.icon : "lock")
+                .font(.system(size: size * 0.31, weight: .bold))
+                .foregroundStyle(earned ? Color(red: 0.04, green: 0.20, blue: 0.23) : Color.secondary)
+        }
+        .frame(width: size, height: size)
+        .accessibilityHidden(true)
+    }
+}
+
+private struct RiderMissionProgress: View {
+    let mission: RiderMission
+    let metrics: RiderMission.Metrics
+
+    var body: some View {
+        let value = mission.value(metrics)
+        let targetMet = (value ?? 0) >= mission.rule.target
+        let confirmed = mission.completed(metrics)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Label(mission.rule.title, systemImage: confirmed ? "checkmark.seal.fill" : mission.rule.category.icon)
+                    .font(.caption.weight(.semibold))
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                if confirmed {
+                    Text("+\(mission.rule.points) ПТС")
+                } else if targetMet {
+                    Text("После 15 мин записи")
+                } else if let value {
+                    Text("\(mission.rule.category.text(value)) / \(mission.rule.category.text(mission.rule.target))")
+                } else {
+                    Text(mission.rule.category == .route ? "Ждём GPS" : mission.rule.goal)
+                }
+            }
+            .font(.caption2.monospacedDigit())
+            ProgressView(value: min(1, (value ?? 0) / mission.rule.target)).tint(RiderTheme.foam)
+        }
+        .padding(10)
+        .background(.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 11))
+        .accessibilityElement(children: .combine)
+    }
+}
+
+private struct RiderSessionFinish: View {
+    let session: SessionSummary
+    let highlight: RiderSessionHighlight
+    let spots: [RiderSpot]
+    let presets: [GearPreset]
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var revealed = false
+    @State private var draft: Draft?
+    @State private var renderFailed = false
+
+    private struct Draft: Identifiable {
+        let id = UUID()
+        let image: Data
+    }
+
+    private var success: RiderMission? {
+        guard let mission = session.mission, mission.completed(RiderMission.Metrics(session)) else { return nil }
+        return mission
+    }
+
+    private var shareText: String {
+        let parts = [highlight.title, highlight.detail,
+                     success.map { "\($0.rule.title) · +\($0.rule.points) ПТС" }]
+        return parts.compactMap { $0 }.joined(separator: " · ") + " · Rider"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            artwork
+            if let mission = session.mission, success == nil {
+                failedMission(mission)
+                    .padding(.horizontal, 5)
+            }
+            ViewThatFits {
+                HStack { actions }
+                VStack(alignment: .leading, spacing: 8) { actions }
+            }
+            .padding(.horizontal, 5)
+            if renderFailed { Text("Не удалось подготовить картинку для поста.").font(.footnote).foregroundStyle(.secondary) }
+        }
+        .task {
+            withAnimation(reduceMotion ? nil : .spring(response: 0.55, dampingFraction: 0.58)) { revealed = true }
+        }
+        .sheet(item: $draft) { draft in
+            RiderPostComposer(spots: spots, presets: presets, artwork: draft.image, caption: shareText)
+        }
+    }
+
+    private var artwork: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("RIDER").font(.caption.bold().monospaced()).tracking(3).foregroundStyle(RiderTheme.foam)
+                Spacer()
+                Image(systemName: highlight.icon).font(.title3.weight(.semibold)).foregroundStyle(RiderTheme.foam)
+            }
+            Text(highlight.title).font(.title2.bold()).fixedSize(horizontal: false, vertical: true)
+            Text(highlight.detail).font(.subheadline.weight(.medium)).foregroundStyle(RiderTheme.foam)
+            if let mission = success {
+                HStack(spacing: 11) {
+                    RiderMissionSticker(mission: mission, size: 47)
+                        .scaleEffect(reduceMotion || revealed ? 1 : 0.68)
+                        .rotationEffect(.degrees(reduceMotion || revealed ? -8 : -28))
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(mission.rule.title).font(.subheadline.bold())
+                        Text("Задание выполнено").font(.caption).foregroundStyle(RiderTheme.foam)
+                    }
+                    Spacer(minLength: 4)
+                    Text("+\(mission.rule.points) ПТС")
+                        .font(.subheadline.bold().monospacedDigit())
+                        .foregroundStyle(Color(red: 1, green: 0.87, blue: 0.55))
+                }
+                .padding(9)
+                .background(.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 13))
+            }
+        }
+        .padding(16)
+        .foregroundStyle(.white)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RiderTheme.lagoon, in: RoundedRectangle(cornerRadius: 20))
+        .accessibilityElement(children: .combine)
+    }
+
+    @ViewBuilder private var actions: some View {
+        Button(action: compose) { Label("Создать пост", systemImage: "square.and.pencil") }
+            .buttonStyle(.borderless)
+        ShareLink(item: shareText) { Label("Поделиться", systemImage: "square.and.arrow.up") }
+            .buttonStyle(.borderless)
+    }
+
+    private func failedMission(_ mission: RiderMission) -> some View {
+        let metrics = RiderMission.Metrics(session)
+        let actual = mission.value(metrics)
+        let message: String
+        if let actual {
+            if actual >= mission.rule.target {
+                message = "Цель выполнена за \(RiderMission.Category.water.text(Double(metrics.seconds) / 60)). Для бонуса нужно 15 мин."
+            } else {
+                message = "\(mission.rule.category.text(actual)) из \(mission.rule.goal)"
+            }
+        } else {
+            message = mission.rule.category == .route ? "Не хватило данных GPS" : "Пока без замера"
+        }
+        return VStack(alignment: .leading, spacing: 4) {
+            Label(mission.rule.title, systemImage: "flag").font(.subheadline.weight(.semibold))
+            Text(message).font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    @MainActor private func compose() {
+        let renderer = ImageRenderer(content: artwork
+            .environment(\.dynamicTypeSize, .large)
+            .padding(14)
+            .frame(width: 360, height: 360)
+            .background(Color(red: 0.02, green: 0.20, blue: 0.26)))
+        renderer.scale = 3
+        guard let image = renderer.uiImage,
+              let data = image.jpegData(compressionQuality: 0.76), data.count <= 390_000 else {
+            renderFailed = true
+            return
+        }
+        renderFailed = false
+        draft = Draft(image: data)
     }
 }
 
