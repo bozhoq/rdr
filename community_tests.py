@@ -246,6 +246,120 @@ class CommunityTests(unittest.TestCase):
         events = self.call("GET", "/people/alerts", self.me)
         self.assertEqual([e["kind"] for e in events], ["message","message"])
 
+    def test_registration_and_delivery_receipts(self):
+        self.assertTrue(self.call("GET", "/registration", self.me)["required"])
+        self.call("PUT", "/membership", self.me)
+        self.assertTrue(self.call("GET", "/registration", self.me)["required"])
+        a = self.call("PUT", "/registration", self.me,
+                      dict(name="First Rider", username="first_rider", totals=self.totals))["mine"]
+        self.assertTrue(a["profile"]["publicProfile"])
+        self.assertTrue(a["profile"]["statsPublic"])
+        self.assertFalse(self.call("GET", "/registration", self.me)["required"])
+        b = self.publish(self.audience, "second_rider")["mine"]
+        self.call("PUT", "/follow/" + b["id"], self.me)
+        row = self.call("GET", "/activity/read", self.audience)
+        self.assertEqual(row["items"][0]["kind"], "follow")
+        self.assertEqual(self.call("GET", "/unread", self.audience)["activity"], 1)
+        self.assertEqual(self.call("PUT", "/activity/read", self.audience, {"sequence": row["sequence"]})["activity"], 0)
+        first = str(UUID(int=812))
+        outgoing = "/messages/" + b["id"]
+        incoming = "/messages/" + a["id"]
+        sent = self.call("PUT", outgoing + "/" + first, self.me, {"text":"Hello!"})[0]
+        self.assertFalse(sent["delivered"])
+        self.assertFalse(sent["read"])
+        self.assertEqual(self.call("GET", "/unread", self.audience)["threads"], {a["id"]:1})
+        sent = self.call("GET", outgoing, self.me)[0]
+        self.assertTrue(sent["delivered"])
+        self.assertFalse(sent["read"])
+        self.call("PUT", outgoing + "/read", self.me, {"messages":[first]})
+        self.assertFalse(self.call("GET", outgoing, self.me)[0]["read"])
+        self.assertEqual(self.call("PUT", incoming + "/read", self.audience, {"messages":[first]})["threads"], {})
+        self.assertTrue(self.call("GET", outgoing, self.me)[0]["read"])
+        self.call("PATCH", "/me", self.me, {"statsPublic":False})
+        replay = self.call("PUT", "/registration", self.me, dict(name="Replay", username="first_rider",
+                           totals=self.totals))["mine"]["profile"]
+        self.assertFalse(replay["statsPublic"])
+
+    def test_stories_expire_and_voice_attachments_are_private(self):
+        rider = self.publish(self.me, "author")["mine"]
+        viewer = self.publish(self.audience, "viewer")["mine"]
+        third = "c"*72
+        self.publish(third, "third")
+        story = str(UUID(int=813))
+        path = "/stories/" + story
+        post = dict(id=story, caption="Rider", photo="/9j/2Q==")
+        self.call("PUT", path, self.me, post)
+        self.call("PUT", path, self.me, post)
+        items = self.call("GET", "/stories", self.audience)
+        self.assertEqual(len(items),1)
+        self.assertFalse(items[0]["seen"])
+        self.assertEqual(self.call("GET", path + "/media", self.audience, raw=True), base64.b64decode(post["photo"]))
+        self.call("PUT", path + "/seen", self.audience)
+        self.assertTrue(self.call("GET", "/stories", self.audience)[0]["seen"])
+        self.call("DELETE", path, third)
+        self.assertEqual(len(self.call("GET", "/stories", self.audience)),1)
+        self.now += 86400
+        self.assertEqual(self.call("GET", "/stories", self.audience), [])
+        self.call("GET", path + "/media", self.audience, expect=404)
+        message = str(UUID(int=814))
+        clip = bytes.fromhex("000000186674797069736f6d30303030")
+        attachment = dict(filename="voice.m4a", contentType="audio/mp4", data=base64.b64encode(clip).decode())
+        self.call("PUT", "/messages/" + viewer["id"] + "/" + message, self.me, {"text":"", "attachment":attachment})
+        suffix = "/" + message + "/attachment"
+        self.assertEqual(self.call("GET", "/messages/" + rider["id"] + suffix, self.audience, raw=True), clip)
+        self.call("GET", "/messages/" + rider["id"] + suffix, third, expect=404)
+
+    def test_private_registered_rider_follows_and_activity_can_be_cleared(self):
+        rider = self.call("PUT", "/me", self.me, dict(name="Private", username="private_rider",
+                          totals=self.totals, publicProfile=False))["mine"]
+        target = self.publish(self.audience, "public_rider")["mine"]
+        unused = "c" * 72
+        self.call("PUT", "/membership", unused)
+        path = "/follow/" + target["id"]
+        self.call("PUT", path, unused, expect=403)
+        self.assertTrue(self.call("PUT", path, self.me)["following"])
+        self.assertTrue(self.call("GET", "/riders/" + target["id"], self.me)["rider"]["following"])
+        self.assertFalse(self.call("DELETE", path, self.me)["following"])
+        self.call("PATCH", "/me", self.me, {"publicProfile":True})
+        self.call("PUT", path, self.me)
+        item = self.call("GET", "/activity/read", self.audience)["items"][0]
+        self.call("PUT", "/activity/hide", self.audience, {"id":item["id"]})
+        self.assertEqual(self.call("GET", "/activity", self.audience), [])
+        self.call("DELETE", path, self.me)
+        self.now += 1
+        self.call("PUT", path, self.me)
+        self.assertEqual(len(self.call("GET", "/activity", self.audience)),1)
+        self.call("DELETE", "/activity", self.audience)
+        self.assertEqual(self.call("GET", "/activity", self.audience), [])
+        self.assertEqual(self.call("GET", "/unread", self.audience)["activity"],0)
+        self.call("DELETE", path, self.me)
+        self.now += 1
+        self.call("PUT", path, self.me)
+        self.assertEqual(len(self.call("GET", "/activity", self.audience)),1)
+
+    def test_sos_can_be_closed_and_started_again_and_demo_is_isolated(self):
+        self.publish(self.me, "local_tester")
+        self.publish(self.audience, "rider_nearby")
+        coords = dict(latitude=45, longitude=33, accuracy=10, capturedAt=self.now)
+        self.call("PUT", "/sos/receiver", self.audience, dict(token="a1"*32, location=coords))
+        with closing(sqlite3.connect(os.environ["RIDER_DB"])) as db:
+            rider_sos.worker_batch(db,None)
+        first = str(UUID(int=952))
+        second = str(UUID(int=953))
+        self.call("POST", "/sos", self.me, dict(id=first, name="Rider", location=coords))
+        close = "/sos/" + first + "/close"
+        self.call("PUT", close, self.audience, expect=404)
+        self.assertTrue(self.call("PUT", close, self.me)["closed"])
+        self.assertEqual(self.call("GET", "/sos/inbox", self.audience), [])
+        self.call("PUT", "/sos/"+first+"/decision", self.audience, {"action":"accept"}, expect=404)
+        self.assertFalse(self.call("POST", "/sos", self.me, dict(id=second, name="Rider", location=coords))["closed"])
+        with patch.dict(os.environ, {"RIDER_DEMO_RECIPIENT":"local_tester,legacy_tester"}):
+            self.assertTrue(self.call("GET", "/people/demo/status", self.me)["enabled"])
+            self.call("POST", "/people/demo/sos", self.audience, {}, expect=403)
+            self.assertTrue(self.call("POST", "/people/demo/sos", self.me, {})["drill"])
+        with closing(sqlite3.connect(os.environ["RIDER_DB"])) as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM sos_incidents").fetchone()[0],2)
+
     def test_journal_video_privacy_and_idempotent_publish(self):
         rider = self.publish(self.me, "author")["mine"]
         self.publish(self.audience, "viewer")

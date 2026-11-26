@@ -90,12 +90,16 @@ CREATE TABLE IF NOT EXISTS demo_sequence(
  owner TEXT PRIMARY KEY REFERENCES profiles(id) ON DELETE CASCADE, started REAL NOT NULL, step INTEGER NOT NULL);
 """
 
+def demo_member(db, owner):
+    configured = {x.strip() for x in os.environ.get("RIDER_DEMO_RECIPIENT", "").split(",") if x.strip()}
+    entry = db.execute("SELECT username FROM handles WHERE owner=?", (owner,)).fetchone()
+    return bool(entry and entry[0] in configured)
+
+
 def demo_tick(db, owner, restart=False):
     # Explicit configuration exists only on the home test server.
-    me = os.environ.get("RIDER_DEMO_RECIPIENT")
     handles = [x for x in os.environ.get("RIDER_DEMO_SENDERS","").split(",") if x]
-    target = db.execute("SELECT owner FROM handles WHERE username=?", (me,)).fetchone()
-    if target != (owner,) or len(handles)<2: return {"enabled":False}
+    if not demo_member(db, owner) or len(handles)<2: return {"enabled":False}
     db.execute("BEGIN IMMEDIATE")
     now=time.time()
     db.execute("INSERT OR IGNORE INTO demo_sequence VALUES(?,?,0)",(owner,now))
@@ -204,6 +208,12 @@ def deliver(phone, otp):
 
 def handle(db, owner, path, method, raw, ip, card):
     if not isinstance(raw,dict): raise ValueError()
+    if (path,method)==("/people/demo/status","GET"):
+        return "200 OK",{"enabled":demo_member(db,owner)}
+    if (path,method)==("/people/demo/sos","POST"):
+        if not demo_member(db,owner):
+            return "403 Forbidden",{"error":"home test is disabled for this account"}
+        return "200 OK",{"drill":True}
     if (path,method)==("/people/demo","POST"):
         return "200 OK",demo_tick(db,owner,raw.get("restart") is True)
     if (path,method)==("/people/search","POST"):

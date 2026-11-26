@@ -26,6 +26,9 @@ CREATE TABLE IF NOT EXISTS sos_incidents (
     name TEXT NOT NULL, equipment TEXT, latitude REAL NOT NULL, longitude REAL NOT NULL, accuracy REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS sos_sender_time ON sos_incidents(owner, created);
+CREATE TABLE IF NOT EXISTS sos_closed (
+    incident TEXT PRIMARY KEY REFERENCES sos_incidents(id) ON DELETE CASCADE
+);
 CREATE TABLE IF NOT EXISTS sos_outbox (
     incident TEXT NOT NULL REFERENCES sos_incidents(id) ON DELETE CASCADE, receiver TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending', attempt_at REAL NOT NULL DEFAULT 0,
@@ -100,7 +103,8 @@ def receipt(db, identifier):
     return dict(id=identifier, recipients=sum(states.values()), acceptedByAPNs=states.get("accepted", 0),
                 pending=states.get("pending", 0) + states.get("sending", 0),
                 location=dict(latitude=latitude, longitude=longitude, accuracy=accuracy, capturedAt=created),
-                createdAt=created, responders=[dict(id=owner, name=name, decidedAt=decided) for owner, name, decided in responses])
+                createdAt=created, closed=bool(db.execute("SELECT 1 FROM sos_closed WHERE incident=?", (identifier,)).fetchone()),
+                responders=[dict(id=owner, name=name, decidedAt=decided) for owner, name, decided in responses])
 
 
 def handle(db, owner, path, method, body):
@@ -139,7 +143,8 @@ def handle(db, owner, path, method, body):
         rows = db.execute("""SELECT i.id,i.created,i.name,i.equipment,i.latitude,i.longitude,i.accuracy,s.action
             FROM sos_incidents i JOIN sos_outbox o ON o.incident=i.id
             LEFT JOIN sos_responses s ON s.incident=o.incident AND s.receiver=o.receiver
-            WHERE o.receiver=? AND i.created>=? AND (s.action IS NULL OR s.action='accept')
+            WHERE o.receiver=? AND i.created>=? AND NOT EXISTS(SELECT 1 FROM sos_closed WHERE incident=i.id)
+                AND (s.action IS NULL OR s.action='accept')
             ORDER BY i.created DESC""", (owner, now - VISIBLE_SECONDS))
         return "200 OK", [incident(row) for row in rows]
     if method == "GET" and re.fullmatch(r"/sos/[0-9a-f-]{36}/receipt", path):
@@ -147,6 +152,15 @@ def handle(db, owner, path, method, body):
         found = db.execute("SELECT 1 FROM sos_incidents WHERE id=? AND owner=? AND created>=?",
                            (identifier, owner, now - VISIBLE_SECONDS)).fetchone()
         return ("200 OK", receipt(db, identifier)) if found else ("404 Not Found", {"error": "unknown SOS"})
+    if method == "PUT" and re.fullmatch(r"/sos/[0-9a-f-]{36}/close", path):
+        identifier = str(UUID(path.split("/")[2]))
+        db.execute("BEGIN IMMEDIATE")
+        if not db.execute("SELECT 1 FROM sos_incidents WHERE id=? AND owner=?", (identifier,owner)).fetchone():
+            return "404 Not Found", {"error":"unknown SOS"}
+        db.execute("INSERT OR IGNORE INTO sos_closed VALUES (?)", (identifier,))
+        db.execute("UPDATE sos_outbox SET status='failed' WHERE incident=? AND status IN ('pending','sending')", (identifier,))
+        db.execute("UPDATE sos_responses SET status='failed' WHERE incident=? AND status IN ('pending','sending')", (identifier,))
+        return "200 OK", receipt(db,identifier)
     if method == "PUT" and re.fullmatch(r"/sos/[0-9a-f-]{36}/decision", path):
         identifier = str(UUID(path.split("/")[2]))
         raw = body()
@@ -155,7 +169,8 @@ def handle(db, owner, path, method, body):
             raise ValueError("invalid decision")
         db.execute("BEGIN IMMEDIATE")
         assigned = db.execute("""SELECT 1 FROM sos_outbox o JOIN sos_incidents i ON i.id=o.incident
-            WHERE o.incident=? AND o.receiver=? AND i.created>=?""", (identifier, owner, now - VISIBLE_SECONDS)).fetchone()
+            WHERE o.incident=? AND o.receiver=? AND i.created>=?
+                AND NOT EXISTS(SELECT 1 FROM sos_closed WHERE incident=i.id)""", (identifier, owner, now - VISIBLE_SECONDS)).fetchone()
         if not assigned:
             return "404 Not Found", {"error": "unknown SOS"}
         name = rider_name(db, owner, raw.get("name", ""))
@@ -178,7 +193,7 @@ def handle(db, owner, path, method, body):
         return ("200 OK", receipt(db, identifier)) if exists[0] == owner else ("409 Conflict", {"error": "ID taken"})
     if not recent_heartbeat(db, now):
         return "503 Service Unavailable", {"error": "SOS dispatcher unavailable"}
-    if db.execute("SELECT 1 FROM sos_incidents WHERE owner=? AND created>=?", (owner, now - 60)).fetchone():
+    if db.execute("SELECT 1 FROM sos_incidents WHERE owner=? AND created>=? AND id NOT IN (SELECT incident FROM sos_closed)", (owner, now - 60)).fetchone():
         return "429 Too Many Requests", {"error": "recent SOS"}
     latitude, longitude, accuracy, _ = fix(raw.get("location"), now)
     name = rider_name(db, owner, raw.get("name", ""))

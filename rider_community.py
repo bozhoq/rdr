@@ -90,6 +90,14 @@ CREATE TABLE IF NOT EXISTS activity_reads(
     owner TEXT PRIMARY KEY REFERENCES profiles(id) ON DELETE CASCADE,
     sequence INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS activity_hidden(
+    owner TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+    id TEXT NOT NULL, PRIMARY KEY(owner,id)
+);
+CREATE TABLE IF NOT EXISTS activity_cleared(
+    owner TEXT PRIMARY KEY REFERENCES profiles(id) ON DELETE CASCADE,
+    through REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS stories(
     id TEXT PRIMARY KEY, owner TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
     created REAL NOT NULL, caption TEXT NOT NULL, photo BLOB NOT NULL, video BLOB
@@ -630,25 +638,31 @@ def feed(db, owner, mode, post_id=None):
 
 
 def activity(db, owner):
-    query = """SELECT kind,actor,post,date,p.document FROM (
-        SELECT 'shaka' AS kind,s.owner AS actor,s.post AS post,s.created_at AS date
+    query = """WITH events AS (
+        SELECT kind,actor,post,date,p.document,
+               kind||':'||source||':'||printf('%!.17g',date) AS item_id FROM (
+        SELECT 'shaka' AS kind,s.owner AS actor,s.post AS post,s.created_at AS date,s.post||s.owner AS source
         FROM shakas s JOIN posts r ON r.id=s.post WHERE r.owner=?
         UNION ALL
-        SELECT 'comment',c.author,c.post,c.created_at FROM post_comments c JOIN posts r ON r.id=c.post WHERE r.owner=?
+        SELECT 'comment',c.author,c.post,c.created_at,c.id FROM post_comments c JOIN posts r ON r.id=c.post WHERE r.owner=?
           AND NOT EXISTS (SELECT 1 FROM comment_replies x JOIN post_comments parent ON parent.id=x.parent
                           WHERE x.comment=c.id AND parent.author=r.owner)
         UNION ALL
-        SELECT 'reply',c.author,c.post,c.created_at FROM comment_replies x
+        SELECT 'reply',c.author,c.post,c.created_at,c.id FROM comment_replies x
           JOIN post_comments c ON c.id=x.comment JOIN post_comments parent ON parent.id=x.parent
           JOIN posts r ON r.id=c.post JOIN public_profiles visible ON visible.id=r.owner WHERE parent.author=?
         UNION ALL
-        SELECT 'follow',f.owner,NULL,f.created_at FROM follow_activity f WHERE f.target=?
+        SELECT 'follow',f.owner,NULL,f.created_at,f.owner FROM follow_activity f WHERE f.target=?
         UNION ALL
-        SELECT 'repost',s.owner,s.post,s.created_at FROM reposts s JOIN posts r ON r.id=s.post WHERE r.owner=?
+        SELECT 'repost',s.owner,s.post,s.created_at,s.id FROM reposts s JOIN posts r ON r.id=s.post WHERE r.owner=?
     ) AS a JOIN public_profiles p ON p.id=a.actor
-    WHERE a.actor<>? ORDER BY a.date DESC,a.actor LIMIT 60"""
-    return [{"kind": kind, "person": rider_card(actor, document), "postID": post, "createdAt": date}
-            for kind, actor, post, date, document in db.execute(query, (owner,) * 6)]
+    WHERE a.actor<>?)
+    SELECT kind,actor,post,date,document,item_id FROM events
+    WHERE date>coalesce((SELECT through FROM activity_cleared WHERE owner=?),0)
+      AND NOT EXISTS (SELECT 1 FROM activity_hidden WHERE owner=? AND id=item_id)
+    ORDER BY date DESC,actor,item_id LIMIT 60"""
+    return [{"kind": kind, "person": rider_card(actor, document), "postID": post, "createdAt": date, "id": key}
+            for kind, actor, post, date, document, key in db.execute(query, (owner,) * 8)]
 
 
 def inbox(db, owner):
@@ -1104,16 +1118,37 @@ def application(env, start_response):
                 ).fetchone():
                     return send("404 Not Found", {"error": "unknown rider"})
                 if method == "PUT":
-                    if not db.execute("SELECT 1 FROM public_profiles WHERE id=?", (owner,)).fetchone():
-                        return send("403 Forbidden", {"error": "publish a profile first"})
+                    if not db.execute("""SELECT 1 FROM profiles WHERE id=?
+                            AND coalesce(json_extract(document,'$.onboardingPending'),0)=0""", (owner,)).fetchone():
+                        return send("403 Forbidden", {"error": "complete registration first"})
                     changed = db.execute("INSERT OR IGNORE INTO follows VALUES (?,?)", (owner, target))
                     if changed.rowcount and db.execute("SELECT 1 FROM public_profiles WHERE id=?", (owner,)).fetchone():
                         db.execute("INSERT INTO follow_activity VALUES (?,?,?)", (owner, target, time.time()))
                 else:
                     db.execute("DELETE FROM follows WHERE owner=? AND target=?", (owner, target))
+                return send("200 OK", {"following": method == "PUT"})
             elif method == "GET" and path in ("/feed/following", "/feed/recommended", "/feed/my-reposts"):
                 return send("200 OK", feed(db, owner, path.split("/")[-1]))
             elif (path, method) == ("/unread", "GET"):
+                return send("200 OK", unread_summary(db, owner))
+            elif (path, method) == ("/activity", "DELETE"):
+                if db.execute("SELECT 1 FROM profiles WHERE id=?", (owner,)).fetchone():
+                    db.execute("""INSERT INTO activity_cleared VALUES(?,?)
+                        ON CONFLICT(owner) DO UPDATE SET through=max(through,excluded.through)""", (owner,time.time()))
+                    db.execute("DELETE FROM activity_hidden WHERE owner=?", (owner,))
+                    db.execute("""INSERT INTO activity_reads SELECT ?, coalesce(max(sequence),0)
+                        FROM rider_alert_events WHERE owner=? AND kind<>'message'
+                        ON CONFLICT(owner) DO UPDATE SET sequence=max(activity_reads.sequence,excluded.sequence)""", (owner,owner))
+                return send("200 OK", unread_summary(db, owner))
+            elif (path, method) == ("/activity/hide", "PUT"):
+                try:
+                    key = read_json(env, 1024)["id"]
+                    if not isinstance(key,str) or not 1<=len(key)<=220:
+                        raise ValueError()
+                except (ValueError, KeyError, TypeError):
+                    return send("400 Bad Request", {"error":"invalid notification"})
+                if any(item["id"] == key for item in activity(db, owner)):
+                    db.execute("INSERT OR IGNORE INTO activity_hidden VALUES (?,?)", (owner,key))
                 return send("200 OK", unread_summary(db, owner))
             elif (path, method) == ("/activity/read", "GET"):
                 sequence = db.execute("SELECT coalesce(max(sequence),0) FROM rider_alert_events WHERE owner=? AND kind<>'message'",
