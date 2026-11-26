@@ -249,10 +249,19 @@ class CommunityTests(unittest.TestCase):
         self.call("POST", "/people/phone/verify", self.me, {"code":sms.call_args.args[1]}, expect=403)
 
     def test_demo_alert_delivery_and_preferences(self):
-        self.publish(self.me, "recipient")
-        self.publish(self.audience, "alpha")
-        self.publish("c"*72, "beta")
-        self.enterContext(patch.dict(os.environ, {"RIDER_DEMO_RECIPIENT":"recipient", "RIDER_DEMO_SENDERS":"alpha,beta"}))
+        recipient = self.publish(self.me, "recipient")["mine"]["id"]
+        alpha = self.publish(self.audience, "alpha")["mine"]["id"]
+        beta = self.publish("c"*72, "beta")["mine"]["id"]
+        self.enterContext(patch.dict(os.environ, {"RIDER_DEMO_RECIPIENT_IDS":recipient,
+                                                  "RIDER_DEMO_SENDER_IDS":",".join((alpha,beta))}))
+        renamed = self.call("PUT", "/me", self.me,
+                            dict(name="New nickname", username="new_recipient", totals=self.totals))["mine"]
+        self.assertEqual(renamed["id"], recipient)
+        newcomer = "d"*72
+        self.publish(newcomer, "recipient")
+        self.assertFalse(self.call("GET", "/people/demo/status", newcomer)["enabled"])
+        self.assertTrue(self.call("GET", "/people/demo/status", self.me)["enabled"])
+        self.publish(self.audience, "new_alpha")
         def tick(who): return self.call("POST", "/people/demo", who, {})
         self.assertFalse(tick(self.audience)["enabled"])
         self.assertTrue(tick(self.me)["enabled"])
@@ -397,7 +406,7 @@ class CommunityTests(unittest.TestCase):
         self.assertEqual(len(self.call("GET", "/activity", self.audience)),1)
 
     def test_sos_can_be_closed_and_started_again_and_demo_is_isolated(self):
-        self.publish(self.me, "local_tester")
+        tester = self.publish(self.me, "local_tester")["mine"]["id"]
         self.publish(self.audience, "rider_nearby")
         coords = dict(latitude=45, longitude=33, accuracy=10, capturedAt=self.now)
         self.call("PUT", "/sos/receiver", self.audience, dict(token="a1"*32, location=coords))
@@ -412,7 +421,7 @@ class CommunityTests(unittest.TestCase):
         self.assertEqual(self.call("GET", "/sos/inbox", self.audience), [])
         self.call("PUT", "/sos/"+first+"/decision", self.audience, {"action":"accept"}, expect=404)
         self.assertFalse(self.call("POST", "/sos", self.me, dict(id=second, name="Rider", location=coords))["closed"])
-        with patch.dict(os.environ, {"RIDER_DEMO_RECIPIENT":"local_tester,legacy_tester"}):
+        with patch.dict(os.environ, {"RIDER_DEMO_RECIPIENT_IDS":tester}):
             self.assertTrue(self.call("GET", "/people/demo/status", self.me)["enabled"])
             self.call("POST", "/people/demo/sos", self.audience, {}, expect=403)
             self.assertTrue(self.call("POST", "/people/demo/sos", self.me, {})["drill"])

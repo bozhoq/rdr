@@ -90,16 +90,20 @@ CREATE TABLE IF NOT EXISTS demo_sequence(
  owner TEXT PRIMARY KEY REFERENCES profiles(id) ON DELETE CASCADE, started REAL NOT NULL, step INTEGER NOT NULL);
 """
 
+def demo_ids(variable):
+    return [value.strip() for value in os.environ.get(variable, "").split(",")
+            if re.fullmatch(r"[a-f0-9]{64}", value.strip())]
+
+
 def demo_member(db, owner):
-    configured = {x.strip() for x in os.environ.get("RIDER_DEMO_RECIPIENT", "").split(",") if x.strip()}
-    entry = db.execute("SELECT username FROM handles WHERE owner=?", (owner,)).fetchone()
-    return bool(entry and entry[0] in configured)
+    return owner in demo_ids("RIDER_DEMO_RECIPIENT_IDS") and db.execute(
+        "SELECT 1 FROM profiles WHERE id=?", (owner,)).fetchone() is not None
 
 
 def demo_tick(db, owner, restart=False):
     # Explicit configuration exists only on the home test server.
-    handles = [x for x in os.environ.get("RIDER_DEMO_SENDERS","").split(",") if x]
-    if not demo_member(db, owner) or len(handles)<2: return {"enabled":False}
+    senders = demo_ids("RIDER_DEMO_SENDER_IDS")
+    if not demo_member(db, owner) or len(senders)<2: return {"enabled":False}
     db.execute("BEGIN IMMEDIATE")
     now=time.time()
     db.execute("INSERT OR IGNORE INTO demo_sequence VALUES(?,?,0)",(owner,now))
@@ -110,8 +114,7 @@ def demo_tick(db, owner, restart=False):
     if step>=3 or now-started < (20,45,70)[step]: return result
     if step==2: result["drill"]=True
     else:
-        sender=db.execute("SELECT h.owner FROM handles h JOIN public_profiles p ON p.id=h.owner WHERE h.username=?",
-                          (handles[step%len(handles)],)).fetchone()
+        sender=db.execute("SELECT id FROM public_profiles WHERE id=?", (senders[step],)).fetchone()
         if not sender: return result
         options=(("Привет! Ты сегодня выходишь на воду?","Как прошла последняя каталка?"),
                  ("Шака! Какой кайт берёшь на следующий выезд?","Привет! Уже выбрал спот на выходные?"))
