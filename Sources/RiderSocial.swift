@@ -1886,15 +1886,7 @@ struct RiderInboxView: View {
                 }
                 if let sendError { Text(sendError).font(.footnote).foregroundStyle(.secondary) }
                 if sending { ProgressView("Отправляем пост") }
-                ForEach(people.filter { search.isEmpty || $0.name.localizedCaseInsensitiveContains(search)
-                    || $0.handle.localizedCaseInsensitiveContains(search) }) { rider in
-                    if let shared {
-                        Button { send(shared, to: rider) } label: { personRow(rider) }
-                            .buttonStyle(.plain).disabled(sending)
-                    } else {
-                        NavigationLink { RiderThreadView(peer: rider) } label: { personRow(rider) }
-                    }
-                }
+                recipientRows(people)
             } else if failed {
                 Button("Повторить загрузку") { Task { await load() } }
             } else {
@@ -1918,6 +1910,21 @@ struct RiderInboxView: View {
         .task(id: choosingRecipient) { await load() }
         .onChange(of: social.unread.threads) { _, _ in if !choosingRecipient { Task { await load() } } }
         .refreshable { await load() }
+    }
+
+    private func recipientRows(_ people: [RiderPerson]) -> some View {
+        let filtered = people.filter { rider in
+            search.isEmpty || rider.name.localizedCaseInsensitiveContains(search)
+                || rider.handle.localizedCaseInsensitiveContains(search)
+        }
+        return ForEach(filtered) { rider in
+            if let shared {
+                Button { send(shared, to: rider) } label: { personRow(rider) }
+                    .buttonStyle(.plain).disabled(sending)
+            } else {
+                NavigationLink { RiderThreadView(peer: rider) } label: { personRow(rider) }
+            }
+        }
     }
 
     private func personRow(_ rider: RiderPerson) -> some View {
@@ -1984,6 +1991,10 @@ struct RiderThreadView: View {
     @State private var attachment: RiderChatUpload?
     @State private var preparingAttachment = false
     @State private var error: String?
+
+    init(peer: RiderPerson) {
+        self.peer = peer
+    }
 
     private var text: String { draft.trimmingCharacters(in: .whitespacesAndNewlines) }
 

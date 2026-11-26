@@ -542,7 +542,7 @@ private struct RiderStorySlide: View {
             } catch RiderCommunity.Rejection.forbidden {
                 error = "Для отправки личного сообщения открой профиль во вкладке «Райдер»."
             } catch {
-                error = "Не удалось отправить ответ. Попробуй ещё раз."
+                self.error = "Не удалось отправить ответ. Попробуй ещё раз."
             }
         }
     }
@@ -558,7 +558,7 @@ private struct RiderStorySlide: View {
                 guard let liked = result["liked"] else { throw CocoaError(.fileReadCorruptFile) }
                 onLike(liked)
             } catch {
-                error = "Не удалось обновить лайк. Попробуй ещё раз."
+                self.error = "Не удалось обновить лайк. Попробуй ещё раз."
             }
         }
     }
@@ -568,7 +568,7 @@ private struct RiderStorySlide: View {
         Task {
             defer { deleting = false }
             do { onDelete(try await RiderCommunity.decode(story.path, method: "DELETE")) }
-            catch { error = "Не удалось удалить историю. Попробуй ещё раз." }
+            catch { self.error = "Не удалось удалить историю. Попробуй ещё раз." }
         }
     }
 }
