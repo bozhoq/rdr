@@ -32,8 +32,15 @@ struct SessionApp: App {
                     await sos.refreshAuthorization()
                     while !Task.isCancelled {
                         if sos.available { recorder.refreshSOSFix() }
-                        do { try await Task.sleep(for: .seconds(55)) }
+                        do { try await Task.sleep(for: .seconds(RiderCommunity.usesLANTrust ? 20 : 55)) }
                         catch { break }
+                    }
+                }
+                .task(id: scenePhase) {
+                    guard scenePhase == .active, RiderCommunity.usesLANTrust else { return }
+                    while !Task.isCancelled {
+                        await sos.pollForeground()
+                        do { try await Task.sleep(for: .seconds(3)) } catch { return }
                     }
                 }
                 .task(id: scenePhase) {

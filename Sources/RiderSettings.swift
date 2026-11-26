@@ -10,6 +10,9 @@ enum RiderAppearance: String, CaseIterable {
 struct RiderAppearanceSettings: View {
     @AppStorage("rider.appearance") private var theme = RiderAppearance.lagoon
     @AppStorage("rider.textSize") private var size = 0
+    @Environment(\.dynamicTypeSize) private var typeSize
+    private var chatStyle = RiderChatStyle()
+
     var body: some View {
         Form {
             Section("Тема приложения") {
@@ -23,6 +26,13 @@ struct RiderAppearanceSettings: View {
                         }
                     }.accessibilityAddTraits(theme == option ? .isSelected : [])
                 }
+            }
+            Section {
+                wallpapers
+            } header: {
+                Text("Фон чата")
+            } footer: {
+                Text("Выбор сохраняется отдельно для каждой темы.")
             }
             Picker("Размер текста", selection: $size) {
                 Text("Как на iPhone").tag(0)
@@ -43,6 +53,48 @@ struct RiderAppearanceSettings: View {
         .background(theme == .lagoon ? RiderTheme.canvas : Color(uiColor: .systemGroupedBackground))
         .navigationTitle("Оформление").navigationBarTitleDisplayMode(.inline)
     }
+    private var wallpapers: some View {
+        let selection = chatStyle.selection
+        return LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8, alignment: .top),
+                                          count: typeSize.isAccessibilitySize ? 1 : 3), spacing: 12) {
+            ForEach(chatStyle.options) { wallpaper in
+                let selected = selection.wrappedValue == wallpaper
+                Button {
+                    selection.wrappedValue = wallpaper
+                } label: {
+                    VStack(spacing: 6) {
+                        RiderChatBackdrop(wallpaper: wallpaper, dark: chatStyle.isDark)
+                            .frame(height: 72)
+                            .clipShape(RoundedRectangle(cornerRadius: 10))
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 10)
+                                    .strokeBorder(selected ? RiderTheme.accent : .primary.opacity(0.10),
+                                                  lineWidth: selected ? 2 : 1)
+                            }
+                            .overlay(alignment: .topTrailing) {
+                                if selected {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .font(.system(size: 16, weight: .semibold))
+                                        .foregroundStyle(.white, RiderTheme.action)
+                                        .padding(5)
+                                        .accessibilityHidden(true)
+                                }
+                            }
+                        Text(wallpaper.title)
+                            .font(.caption.weight(selected ? .semibold : .regular))
+                            .foregroundStyle(.primary)
+                            .multilineTextAlignment(.center)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(selected ? .isSelected : [])
+            }
+        }.padding(.vertical, 4)
+    }
+
     private func swatch(_ theme: RiderAppearance) -> Color {
         switch theme { case .lagoon: return .teal; case .system: return .gray; case .light: return .white; case .dark: return .black }
     }

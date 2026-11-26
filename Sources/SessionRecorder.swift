@@ -92,7 +92,7 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
         else if locationAuthorized { locating = true; location.requestLocation() }
     }
     func refreshSOSFix() {
-        guard summary == nil, locationAuthorized else { return }
+        guard summary?.gpsEnabledAtStart != true, locationAuthorized else { return }
         location.requestLocation()
     }
 

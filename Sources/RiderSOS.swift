@@ -1,3 +1,4 @@
+import AudioToolbox
 import CoreLocation
 import MapKit
 import SwiftUI
@@ -82,6 +83,8 @@ final class RiderSOSAppDelegate: NSObject, UIApplicationDelegate, UNUserNotifica
         let id: UUID
         let recipients: Int
         let acceptedByAPNs: Int
+        let inApp: Int?
+        let seenInApp: Int?
         let pending: Int
         let location: RiderSOSFix?
         let responders: [Responder]?
@@ -96,6 +99,7 @@ final class RiderSOSAppDelegate: NSObject, UIApplicationDelegate, UNUserNotifica
             if closed == true { return "Сигнал завершён" }
             if !active { return "Время оповещения истекло" }
             if recipients == 0 { return "Сигнал принят. Нет доступных райдеров поблизости." }
+            if let inApp, inApp > 0 { return "SOS в Rider · получено \(seenInApp ?? 0) из \(inApp)" }
             if pending > 0 { return "Сигнал принят сервером · адресатов \(recipients)" }
             return "Apple приняла \(acceptedByAPNs) из \(recipients) уведомлений"
         }
@@ -121,7 +125,7 @@ final class RiderSOSAppDelegate: NSObject, UIApplicationDelegate, UNUserNotifica
     }
 
     private struct Receiver: Codable {
-        let token: String
+        let token: String?
         let location: RiderSOSFix
     }
     private struct ReceiverStatus: Decodable { let enabled: Bool }
@@ -143,6 +147,7 @@ final class RiderSOSAppDelegate: NSObject, UIApplicationDelegate, UNUserNotifica
     private var lastUpdate = Date.distantPast
     private var receiverTask: Task<Void, Never>?
     private var requestingPermission = false
+    private var announcedForeground: Set<UUID> = []
     private let registeredKey = "rider.sos.registered"
 
     func open(_ selected: UUID? = nil) {
@@ -171,7 +176,12 @@ final class RiderSOSAppDelegate: NSObject, UIApplicationDelegate, UNUserNotifica
     }
 
     func refreshAuthorization(prompt: Bool = false) async {
-        guard RiderCommunity.endpoint != nil, !RiderCommunity.usesLANTrust, !requestingPermission else { return }
+        guard RiderCommunity.endpoint != nil, !requestingPermission else { return }
+        if RiderCommunity.usesLANTrust {
+            available = true
+            uploadLocationIfNeeded()
+            return
+        }
         requestingPermission = true
         defer { requestingPermission = false }
         let center = UNUserNotificationCenter.current()
@@ -236,15 +246,21 @@ final class RiderSOSAppDelegate: NSObject, UIApplicationDelegate, UNUserNotifica
     }
 
     private func uploadLocationIfNeeded() {
-        guard RiderAlertKind.sos.enabled, available, RiderCommunity.endpoint != nil, let token, let latestFix,
-              dateIsFresh(latestFix), Date().timeIntervalSince(lastUpdate) >= 50, receiverTask == nil else { return }
+        let lan = RiderCommunity.usesLANTrust
+        guard RiderAlertKind.sos.enabled, available, RiderCommunity.endpoint != nil, lan || token != nil, let latestFix,
+              dateIsFresh(latestFix), receiverTask == nil,
+              Date().timeIntervalSince(lastUpdate) >= (lan ? 14 : 50) else { return }
         lastUpdate = Date()
         receiverTask = Task {
             defer { receiverTask = nil }
             do {
                 let body = try JSONEncoder().encode(Receiver(token: token, location: latestFix))
-                let _: ReceiverStatus = try await RiderCommunity.decode("sos/receiver", method: "PUT", body: body)
-                if available && !Task.isCancelled { receiverStatus = "Геопозиция обновлена. Принимаешь SOS рядом." }
+                let result: ReceiverStatus = try await RiderCommunity.decode(lan ? "sos/foreground" : "sos/receiver",
+                                                                              method: "PUT", body: body)
+                if available && !Task.isCancelled {
+                    receiverStatus = result.enabled ? "Геопозиция обновлена. Принимаешь SOS рядом." : "Входящие SOS рядом выключены."
+                    if !result.enabled { lastUpdate = .distantPast }
+                }
             } catch {
                 if available && !Task.isCancelled {
                     receiverStatus = "Не удалось обновить позицию для SOS."
@@ -293,6 +309,20 @@ final class RiderSOSAppDelegate: NSObject, UIApplicationDelegate, UNUserNotifica
         return result.action
     }
 
+    func pollForeground() async {
+        guard RiderCommunity.usesLANTrust, RiderAlertKind.sos.enabled else { return }
+        uploadLocationIfNeeded()
+        await receiverTask?.value
+        guard !Task.isCancelled, let items = try? await alerts(), !Task.isCancelled, RiderAlertKind.sos.enabled else { return }
+        announcedForeground.formIntersection(items.map(\.id))
+        guard inbox == nil, !radarVisible,
+              let incoming = items.first(where: { $0.decision == nil && !announcedForeground.contains($0.id) }) else { return }
+        announcedForeground.insert(incoming.id)
+        open(incoming.id)
+        if RiderAlertKind.sound.enabled { AudioServicesPlaySystemSound(1007) }
+        if RiderAlertKind.vibrate.enabled { UINotificationFeedbackGenerator().notificationOccurred(.warning) }
+    }
+
     func alerts() async throws -> [Alert] {
         try await RiderCommunity.decode("sos/inbox")
     }
@@ -307,7 +337,12 @@ struct RiderSOSReadiness: View {
         VStack(alignment: .leading, spacing: 7) {
             Label("SOS рядом", systemImage: "dot.radiowaves.left.and.right").font(.headline)
             if RiderCommunity.usesLANTrust {
-                Text("Учебный сигнал можно отправить себе с аккаунта, включённого в домашний тест.")
+                if !recorder.locationAuthorized {
+                    Text("Для приёма SOS рядом включи точную геопозицию.")
+                    Button("Разрешить геопозицию") { recorder.locateSpot() }.buttonStyle(.borderless)
+                } else {
+                    Text(service.receiverStatus ?? "Получаешь SOS в радиусе 1,5 км, пока открыт Rider.")
+                }
             } else if RiderCommunity.endpoint == nil {
                 Text("Приём появится после подключения сервера Rider.")
             } else if !service.available {
@@ -404,7 +439,7 @@ struct RiderSOSControl: View {
         }) {
             RiderSOSRadarScreen(fix: receipt?.location ?? RiderSOSFix(recorder.usableFix),
                                 receipt: receipt, sending: sending, message: feedback,
-                                send: RiderCommunity.endpoint != nil && !RiderCommunity.usesLANTrust ? { Task { await send() } } : nil,
+                                send: RiderCommunity.endpoint != nil ? { Task { await send() } } : nil,
                                 drill: allowsDrill ? { Task { await sendDrill() } } : nil,
                                 closeSignal: receipt?.active == true ? { Task { await closeSignal() } } : nil,
                                 enableReplies: RiderCommunity.endpoint != nil && !RiderCommunity.usesLANTrust ? {
@@ -508,8 +543,10 @@ private struct RiderSOSRadarScreen: View {
                             Text(fix == nil ? "Ждём точную GPS-позицию" : "Готов к отправке").font(.title3.bold())
                             Text("Имя, комплект и точка GPS будут доступны райдерам в зоне оповещения.")
                                 .font(.subheadline).foregroundStyle(.secondary)
-                        } else if RiderCommunity.usesLANTrust {
-                            Text(drill == nil ? "Домашний режим · просмотр радара" : "Домашний режим · учебный SOS").font(.title3.bold())
+                            if RiderCommunity.usesLANTrust {
+                                Text("В домашней сборке сигналы видны на телефонах, где открыт Rider.")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
                         } else if RiderCommunity.endpoint == nil {
                             Text("Сервер Rider ещё не подключён.").font(.title3.bold())
                         } else if message == nil {
@@ -736,7 +773,13 @@ struct RiderSOSInbox: View {
             }
             .navigationTitle("SOS рядом")
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Закрыть") { dismiss() } } }
-            .task { await load() }
+            .task {
+                repeat {
+                    await load()
+                    guard RiderCommunity.usesLANTrust else { return }
+                    do { try await Task.sleep(for: .seconds(4)) } catch { return }
+                } while !Task.isCancelled
+            }
             .refreshable { await load() }
         }
     }

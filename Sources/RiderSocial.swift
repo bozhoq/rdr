@@ -57,6 +57,7 @@ private struct RiderLinkedText: View {
     let text: String
     var author: String? = nil
     var authorID: String? = nil
+    var linkTint = RiderTheme.accent
     @State private var destination: String?
     private static let handles = try! NSRegularExpression(pattern: #"(?<![A-Za-z0-9_.+@])@([A-Za-z0-9_]{3,24})(?![A-Za-z0-9_])"#)
 
@@ -76,7 +77,7 @@ private struct RiderLinkedText: View {
         return (try? AttributedString(value, including: \.uiKit)) ?? AttributedString(line)
     }
     var body: some View {
-        Text(content).tint(RiderTheme.accent)
+        Text(content).tint(linkTint)
             .environment(\.openURL, OpenURLAction { url in
                 guard url.scheme == "rider", url.host == "profile" else { return .systemAction }
                 destination = url.lastPathComponent
@@ -398,6 +399,53 @@ final class RiderSocialStore: ObservableObject {
     }
 }
 
+struct RiderSections<Option: Identifiable & Equatable, Label: View>: View {
+    let options: [Option]
+    @Binding var selection: Option
+    @ViewBuilder var label: (Option) -> Label
+
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach(options) { option in
+                let selected = option == selection
+                Button { selection = option } label: {
+                    label(option)
+                        .font(.subheadline.weight(.semibold))
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                        .background(selected ? RiderTheme.surface : .clear, in: RoundedRectangle(cornerRadius: 9))
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(selected ? .isSelected : [])
+            }
+        }
+        .padding(3)
+        .background(RiderTheme.border, in: RoundedRectangle(cornerRadius: 12))
+    }
+}
+
+struct RiderCompactAction: View {
+    let icon: String
+    var selected = false
+
+    var body: some View {
+        Image(systemName: icon)
+            .font(.system(size: 14, weight: .semibold))
+            .frame(width: 32, height: 32)
+            .background(Color.primary.opacity(selected ? 0.24 : 0.12), in: Circle())
+            .frame(width: 44, height: 44)
+            .contentShape(Rectangle())
+    }
+}
+
+struct RiderFollowIcon: View {
+    let following: Bool
+
+    var body: some View {
+        RiderCompactAction(icon: following ? "person.badge.minus" : "person.badge.plus", selected: following)
+    }
+}
+
 struct RiderPostSquare: View {
     let post: RiderPost
     @State private var localImage: UIImage?
@@ -422,10 +470,13 @@ struct RiderPostSquare: View {
         }
         .aspectRatio(1, contentMode: .fit)
         .background(RiderTheme.surface)
+        .clipped()
+        .contentShape(Rectangle())
         .overlay(alignment: .topTrailing) {
             if post.isVideo {
                 Image(systemName: "play.rectangle.fill").padding(8).foregroundStyle(.white)
-                    .background(.black.opacity(0.5), in: Capsule()).padding(8).accessibilityHidden(true)
+                    .background(.black.opacity(0.5), in: Capsule()).padding(8)
+                    .allowsHitTesting(false).accessibilityHidden(true)
             }
         }
         .accessibilityLabel(post.caption.isEmpty ? (post.isVideo ? "Видео публикации" : "Фото публикации") : post.caption)
@@ -1093,12 +1144,9 @@ struct RiderFeedView: View {
             VStack(alignment: .leading, spacing: 10) {
                 if RiderCommunity.endpoint != nil {
                     RiderStoriesStrip()
-                    RiderPeopleEntry(recorder: recorder).buttonStyle(.plain)
+                    RiderPeopleEntry(recorder: recorder)
                 }
-                Picker("Лента", selection: $selection) {
-                    ForEach(Feed.allCases) { Text($0.title).tag($0) }
-                }
-                .pickerStyle(.segmented)
+                RiderSections(options: Feed.allCases, selection: $selection) { Text($0.title) }
                 if RiderCommunity.endpoint == nil {
                     Text("Общая лента появится после подключения сервера Rider.").foregroundStyle(.secondary)
                     if !social.posts.isEmpty {
@@ -1108,7 +1156,7 @@ struct RiderFeedView: View {
                             }
                         }
                     }
-                } else if let entries {
+                } else if let entries, loadedFeed == feed {
                     if entries.isEmpty {
                         Text(feed == .following ? "Здесь появятся посты райдеров, на которых ты подписан." : "Пока нет новых публикаций.")
                             .foregroundStyle(.secondary)
@@ -1167,6 +1215,9 @@ struct RiderFeedCard: View {
     @State private var reactionListBusy = false
     @State private var reactionListError = false
     @State private var showingVideo = false
+    @State private var showingJournalComments = false
+    @State private var confirmingJournalDelete = false
+    @State private var updatingJournal = false
     @State private var error: String?
 
     private var reaction: RiderReaction {
@@ -1199,7 +1250,25 @@ struct RiderFeedCard: View {
         .listRowBackground(Color.clear)
         .sheet(isPresented: $sharing, onDismiss: openSentConversation) { shareMenu }
         .sheet(isPresented: $showingReactions) { reactionsSheet }
+        .sheet(isPresented: $showingJournalComments) {
+            NavigationStack {
+                ScrollView {
+                    RiderCommentsView(postID: post.contentID).padding()
+                }
+                .scrollDismissesKeyboard(.interactively)
+                .navigationTitle("Комментарии")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Готово") { showingJournalComments = false }
+                    }
+                }
+            }
+        }
         .fullScreenCover(isPresented: $showingVideo) { RiderClipPlayer(post: post) }
+        .confirmationDialog("Удалить заметку?", isPresented: $confirmingJournalDelete, titleVisibility: .visible) {
+            Button("Удалить", role: .destructive) { updateJournal(deleting: true) }
+        }
         .task(id: post.publicURL) { await loadInitialReaction() }
     }
 
@@ -1214,7 +1283,7 @@ struct RiderFeedCard: View {
                 if post.isVideo {
                     Button { showingVideo = true } label: { postPhoto }
                         .buttonStyle(.plain).accessibilityLabel("Смотреть видео")
-                } else if onComments != nil {
+                } else if onComments != nil || post.publicationSection == .journal {
                     postPhoto
                 } else {
                     NavigationLink { detail() } label: { postPhoto }
@@ -1283,11 +1352,39 @@ struct RiderFeedCard: View {
             }
             if let target = entry?.authorID, entry?.mine != true {
                 Button { toggleFollow(target) } label: {
-                    RiderFollowAppearance(following: following) { Text(following ? "Подписан" : "Подписаться") }
+                    RiderFollowIcon(following: following)
                 }
-                    .buttonStyle(.borderless)
-                    .disabled(changingFollow)
-                    .accessibilityAddTraits(following ? .isSelected : [])
+                .buttonStyle(.plain)
+                .disabled(changingFollow)
+                .accessibilityLabel(following ? "Отписаться" : "Подписаться")
+                .accessibilityAddTraits(following ? .isSelected : [])
+            }
+            if editable && !embedded && post.publicationSection == .journal {
+                Menu {
+                    if RiderCommunity.endpoint != nil && post.published != true {
+                        Button("Опубликовать", systemImage: "arrow.up.circle") { updateJournal(deleting: false) }
+                    }
+                    Button("Удалить", systemImage: "trash", role: .destructive) { confirmingJournalDelete = true }
+                } label: {
+                    RiderCompactAction(icon: "ellipsis")
+                }
+                .disabled(updatingJournal)
+                .accessibilityLabel("Действия с заметкой")
+            }
+        }
+    }
+
+    private func updateJournal(deleting: Bool) {
+        guard !updatingJournal else { return }
+        updatingJournal = true
+        error = nil
+        Task {
+            defer { updatingJournal = false }
+            do {
+                if deleting { try await social.delete(post) }
+                else { try await social.publish(post) }
+            } catch {
+                showActionError(error)
             }
         }
     }
@@ -1311,6 +1408,9 @@ struct RiderFeedCard: View {
             Group {
                 if let onComments {
                     Button(action: onComments) { commentIcon }
+                } else if post.publicationSection == .journal {
+                    Button { showingJournalComments = true } label: { commentIcon }
+                        .disabled(post.publicURL == nil)
                 } else {
                     NavigationLink { detail(comments: true) } label: { commentIcon }
                 }
@@ -1867,6 +1967,8 @@ struct RiderThreadView: View {
     @Environment(\.scenePhase) private var phase
     let peer: RiderPerson
     @StateObject private var playback = RiderChatPlayer()
+    @StateObject private var recorder = RiderChatRecorder()
+    private var chatStyle = RiderChatStyle()
     @State private var conversation: RiderPerson?
     @State private var messages: [RiderMessage] = []
     @State private var messageRevision = 0
@@ -1898,7 +2000,7 @@ struct RiderThreadView: View {
                             receipt(delivered: false, read: false)
                         }
                         .font(.caption).padding(10)
-                        .background(RiderTheme.accent.opacity(0.15), in: RoundedRectangle(cornerRadius: 14))
+                        .background { chatStyle.bubble(mine: true) }
                         .frame(maxWidth: .infinity, alignment: .trailing)
                     }
                 }
@@ -1913,15 +2015,22 @@ struct RiderThreadView: View {
             }
             .refreshable { await load() }
         }
+        .overlay {
+            if let preview = recorder.preview, recorder.beganAt != nil {
+                RiderCircleRecordingStage(session: preview, recorder: recorder)
+            }
+        }
         .safeAreaInset(edge: .top, spacing: 0) { RiderChatPlayerBar(playback: playback) }
-        .safeAreaInset(edge: .bottom) { composer }
+        .safeAreaInset(edge: .bottom, spacing: 0) { composer }
         .photosPicker(isPresented: $pickingPhoto, selection: $photo, matching: .images)
         .task(id: photo) { await attachPhoto() }
         .fullScreenCover(isPresented: $cameraPhoto) {
             RiderCameraPhoto(selected: attachCapturedPhoto)
                 .ignoresSafeArea()
         }
-        .background { RiderChatBackdrop() }
+        .background {
+            RiderChatBackdrop(wallpaper: chatStyle.wallpaper, dark: chatStyle.isDark)
+        }
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.visible, for: .navigationBar)
@@ -1937,7 +2046,18 @@ struct RiderThreadView: View {
         }
         .navigationDestination(item: $conversation) { RiderThreadView(peer: $0) }
         .onAppear { visible = true }
-        .onDisappear { visible = false; playback.close() }
+        .onDisappear {
+            visible = false
+            recorder.cancelPress()
+            recorder.discard()
+            playback.close()
+        }
+        .onChange(of: phase) { _, phase in
+            if phase == .background {
+                recorder.cancelPress()
+                recorder.discard()
+            }
+        }
         .task(id: visible && phase == .active) {
             guard visible, phase == .active else { return }
             while !Task.isCancelled {
@@ -1962,43 +2082,80 @@ struct RiderThreadView: View {
                     .disabled(sending)
                 }
             }
-            HStack(alignment: .bottom) {
-                Menu {
-                    Button { composingText = false; pickingPhoto = true } label: { Label("Медиатека", systemImage: "photo.on.rectangle") }
-                    Button {
-                        composingText = false
-                        if UIImagePickerController.isSourceTypeAvailable(.camera) { cameraPhoto = true }
-                        else { error = "Камера недоступна на этом устройстве." }
-                    } label: { Label("Сделать фото", systemImage: "camera") }
-                } label: {
-                    Image(systemName: "photo").font(.title3.weight(.medium)).frame(width: 38, height: 40)
+            HStack(alignment: .center, spacing: 8) {
+                if recorder.beganAt != nil {
+                    RiderRecordingStatus(recorder: recorder)
+                } else {
+                    messageInput
+                        .frame(maxWidth: .infinity)
                 }
-                .accessibilityLabel("Добавить изображение")
-                .disabled(sending || preparingAttachment)
-                TextField("Сообщение", text: $draft, axis: .vertical)
-                    .textFieldStyle(.roundedBorder).lineLimit(1...4)
-                    .focused($composingText)
-                    .onChange(of: draft) { _, value in
-                        if !sending { draftID = UUID() }
-                        if value.count > 1000 { draft = String(value.prefix(1000)) }
-                    }
-                    .disabled(sending)
                 if text.isEmpty && attachment == nil {
-                    RiderChatCapture(
-                        started: { composingText = false; error = nil },
-                        captured: { upload in attachment = upload; draftID = UUID(); send() },
-                        failed: { error = $0 }
-                    ).disabled(sending || preparingAttachment)
+                    RiderChatCapture(recorder: recorder, event: recordEvent)
+                        .disabled(sending || preparingAttachment)
                 } else {
                     Button(action: send) { Image(systemName: "arrow.up").font(.body.bold()).frame(minHeight: 27) }
                         .buttonStyle(.borderedProminent)
                         .accessibilityLabel("Отправить")
-                        .disabled(sending || preparingAttachment)
+                        .disabled(sending || preparingAttachment || recorder.busy)
                 }
             }
         }
         .padding(12)
         .background(.bar)
+        .overlay(alignment: .topTrailing) {
+            if recorder.beganAt != nil && !recorder.locked {
+                VStack(spacing: 5) {
+                    Image(systemName: "lock.open").font(.subheadline.weight(.semibold))
+                    Image(systemName: "chevron.up").font(.caption.weight(.bold))
+                }
+                .foregroundStyle(RiderChatCapture.blue)
+                .frame(width: 44, height: 52)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 15))
+                .offset(x: -16, y: -62)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+            }
+        }
+    }
+
+    private var messageInput: some View {
+        HStack(alignment: .bottom, spacing: 8) {
+            Menu {
+                Button { composingText = false; pickingPhoto = true } label: { Label("Медиатека", systemImage: "photo.on.rectangle") }
+                Button {
+                    composingText = false
+                    if UIImagePickerController.isSourceTypeAvailable(.camera) { cameraPhoto = true }
+                    else { error = "Камера недоступна на этом устройстве." }
+                } label: { Label("Сделать фото", systemImage: "camera") }
+            } label: {
+                Image(systemName: "photo").font(.title3.weight(.medium)).frame(width: 38, height: 40)
+            }
+            .accessibilityLabel("Добавить изображение")
+            .disabled(sending || preparingAttachment || recorder.busy)
+            TextField("Сообщение", text: $draft, axis: .vertical)
+                .textFieldStyle(.roundedBorder).lineLimit(1...4)
+                .focused($composingText)
+                .onChange(of: draft) { _, value in
+                    if !sending { draftID = UUID() }
+                    if value.count > 1000 { draft = String(value.prefix(1000)) }
+                }
+                .disabled(sending || recorder.busy)
+        }
+    }
+
+    private func recordEvent(_ event: RiderChatRecorder.Event) {
+        switch event {
+        case .began:
+            playback.close()
+            composingText = false
+            error = nil
+        case .captured(let upload):
+            attachment = upload
+            draftID = UUID()
+            send()
+        case .failed(let message):
+            error = message
+        }
     }
 
     private func bubble(_ message: RiderMessage) -> some View {
@@ -2015,14 +2172,14 @@ struct RiderThreadView: View {
                 RiderChatAttachmentView(attachment: attachment, message: message.id, peer: peer.id,
                                         author: message.mine ? "Ты" : peer.name, playback: playback)
             }
-            if !message.text.isEmpty { RiderLinkedText(text: message.text) }
+            if !message.text.isEmpty { RiderLinkedText(text: message.text, linkTint: chatStyle.linkColor) }
             HStack(spacing: 4) {
                 RiderPostDate(date: Date(timeIntervalSince1970: message.createdAt))
                 if message.mine { receipt(delivered: message.delivered == true, read: message.read == true) }
             }
         }
         .padding(10)
-        .background(message.mine ? RiderTheme.accent.opacity(0.15) : RiderTheme.surface, in: RoundedRectangle(cornerRadius: 14))
+        .background { chatStyle.bubble(mine: message.mine) }
         .frame(maxWidth: .infinity, alignment: message.mine ? .trailing : .leading)
     }
 
@@ -2032,7 +2189,7 @@ struct RiderThreadView: View {
             if delivered || read { Image(systemName: "checkmark") }
         }
         .font(.system(size: 9, weight: .bold))
-        .foregroundStyle(read ? RiderTheme.accent : Color.secondary)
+        .foregroundStyle(read ? chatStyle.linkColor : Color.secondary)
         .accessibilityLabel(read ? "Прочитано" : delivered ? "Доставлено" : "Ожидает доставки")
     }
 
@@ -2130,6 +2287,7 @@ private struct RiderChatAttachmentView: View {
                 }.buttonStyle(.plain).accessibilityLabel("Открыть фото во весь экран")
             } else if let shareFile, attachment.isVoice || attachment.isCircle {
                 RiderChatPlayback(url: shareFile.url, circle: attachment.isCircle, message: message, title: author, playback: playback)
+                if attachment.isVoice { RiderVoiceTranscript(url: shareFile.url) }
             } else if let shareFile {
                 ShareLink(item: shareFile, preview: SharePreview(attachment.filename)) { label("square.and.arrow.up") }
             } else if attachment.showsPhoto && !failed {

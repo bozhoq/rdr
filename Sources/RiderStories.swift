@@ -2,6 +2,17 @@ import AVKit
 import PhotosUI
 import SwiftUI
 
+private struct RiderStoryViewer: Decodable, Identifiable {
+    let person: RiderPerson
+    let liked: Bool
+    var id: String { person.id }
+}
+
+private struct RiderStoryViewerPage: Decodable {
+    let people: [RiderStoryViewer]
+    let nextOffset: Int?
+}
+
 struct RiderStory: Decodable, Identifiable {
     let id: UUID
     let author: RiderPerson
@@ -10,6 +21,9 @@ struct RiderStory: Decodable, Identifiable {
     let video: Bool
     let seen: Bool
     let mine: Bool
+    var liked: Bool?
+
+    var path: String { "stories/" + id.uuidString.lowercased() }
 }
 
 struct RiderStoriesStrip: View {
@@ -17,57 +31,86 @@ struct RiderStoriesStrip: View {
     @Environment(\.scenePhase) private var phase
     @State private var stories: [RiderStory] = []
     @State private var opened: Deck?
+    @State private var expanded = false
     @State private var composing = false
     @State private var failed = false
-    private struct Deck: Identifiable { let id = UUID(); let items: [RiderStory] }
+
+    private struct Deck: Identifiable {
+        let id = UUID()
+        let items: [RiderStory]
+        let start: Int
+    }
+
+    private var hasUnseen: Bool { stories.contains { !$0.seen } }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Label("Истории", systemImage: "sun.horizon").font(.subheadline.weight(.semibold))
-                Spacer()
-                if failed { Button("Обновить") { Task { await load() } }.font(.caption) }
-                else { Text("24 часа").font(.caption).foregroundStyle(.secondary) }
+        VStack(alignment: .leading, spacing: 6) {
+            Button {
+                expanded.toggle()
+            } label: {
+                HStack(spacing: 8) {
+                    let preview = stories.first { !$0.seen } ?? stories.first
+                    storyAvatar(photo: preview?.author.avatar ?? avatar, fresh: hasUnseen, size: 26)
+                    Text("Истории").font(.subheadline.weight(.semibold))
+                    Spacer()
+                    Image(systemName: expanded ? "chevron.up" : "chevron.down").font(.caption.weight(.semibold))
+                }
+                .frame(maxWidth: .infinity, minHeight: 44)
+                .contentShape(Rectangle())
             }
-            ScrollView(.horizontal) {
-                HStack(alignment: .top, spacing: 12) {
-                    Button { composing = true } label: {
-                        VStack(spacing: 4) {
-                            RiderAvatar(photo: avatar, size: 45)
-                                .overlay(alignment: .bottomTrailing) {
-                                    Image(systemName: "plus").font(.system(size: 12, weight: .bold))
-                                        .padding(4).foregroundStyle(.white).background(RiderTheme.action, in: Circle())
-                                }
-                            Text("Добавить").font(.caption2)
-                        }.frame(width: 65, height: 70)
-                    }.buttonStyle(.plain).accessibilityLabel("Добавить историю")
-                    ForEach(authors) { author in
-                        let items = stories.filter { $0.author.id == author.id }.reversed()
-                        let fresh = items.contains { !$0.seen }
-                        Button {
-                            let start = items.firstIndex { !$0.seen } ?? items.startIndex
-                            opened = Deck(items: Array(items[start...]))
-                        } label: {
+            .buttonStyle(.plain)
+            .accessibilityValue(hasUnseen ? "Есть новые истории" : "Нет новых историй")
+            .accessibilityHint(expanded ? "Свернуть истории" : "Показать истории")
+
+            if expanded {
+                if failed {
+                    Button("Обновить истории") { Task { await load() } }.font(.caption)
+                }
+                ScrollView(.horizontal) {
+                    HStack(alignment: .top, spacing: 8) {
+                        Button { composing = true } label: {
                             VStack(spacing: 4) {
-                                RiderAvatar(photo: author.avatar ?? Data(), size: 45)
-                                    .padding(3)
-                                    .overlay { RoundedRectangle(cornerRadius: 17)
-                                        .strokeBorder(fresh ? RiderTheme.accent : .secondary.opacity(0.46), lineWidth: 2) }
-                                Text(author.name).font(.caption2).lineLimit(1)
-                            }.frame(width: 65, height: 70)
-                        }.buttonStyle(.plain)
-                        .accessibilityLabel(author.name + (fresh ? ", новые истории" : ", истории"))
+                                RiderAvatar(photo: avatar, size: 44)
+                                    .overlay(alignment: .bottomTrailing) {
+                                        Image(systemName: "plus").font(.system(size: 12, weight: .bold))
+                                            .padding(4).foregroundStyle(.white).background(RiderTheme.action, in: Circle())
+                                    }
+                                Text("Добавить").font(.caption2)
+                            }
+                            .frame(width: 65, height: 66)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Добавить историю")
+
+                        ForEach(authors) { author in
+                            let fresh = stories.contains { $0.author.id == author.id && !$0.seen }
+                            let mine = stories.contains { $0.author.id == author.id && $0.mine }
+                            Button { open(author) } label: {
+                                VStack(spacing: 4) {
+                                    storyAvatar(photo: author.avatar ?? Data(), fresh: fresh, size: 44)
+                                    Text(mine ? "Твои истории" : author.name).font(.caption2).lineLimit(1)
+                                }
+                                .frame(width: 72, height: 66)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel(mine ? "Твои истории" : author.name + (fresh ? ", новые истории" : ", истории"))
+                        }
                     }
-                }.padding(.horizontal, 1)
-            }.scrollIndicators(.hidden)
+                    .padding(.horizontal, 2)
+                }
+                .scrollIndicators(.hidden)
+            }
         }
-        .padding(.horizontal, 10).padding(.top, 8).padding(.bottom, 3)
-        .background(RiderTheme.surface, in: RoundedRectangle(cornerRadius: 17))
+        .padding(.horizontal, 10)
+        .padding(.vertical, 4)
+        .background(RiderTheme.surface, in: RoundedRectangle(cornerRadius: 15))
         .sheet(isPresented: $composing) {
             RiderStoryComposer { stories = $0; composing = false }
         }
         .fullScreenCover(item: $opened, onDismiss: { Task { await load() } }) { deck in
-            RiderStoryPlayer(stories: deck.items) { updated in stories = updated }
+            RiderStoryPlayer(stories: deck.items, start: deck.start) { updated in stories = updated }
         }
         .task(id: phase) {
             guard phase == .active else { return }
@@ -81,6 +124,27 @@ struct RiderStoriesStrip: View {
     private var authors: [RiderPerson] {
         var ids = Set<String>()
         return stories.filter { ids.insert($0.author.id).inserted }.map(\.author)
+    }
+
+    private func storyAvatar(photo: Data, fresh: Bool, size: CGFloat) -> some View {
+        RiderAvatar(photo: photo, size: size)
+            .padding(3)
+            .overlay { Circle().strokeBorder(fresh ? RiderTheme.accent : .secondary.opacity(0.46), lineWidth: 2) }
+            .accessibilityHidden(true)
+    }
+
+    private func open(_ author: RiderPerson) {
+        let groups = Dictionary(grouping: stories, by: { $0.author.id })
+        guard let group = groups[author.id], let first = group.first else { return }
+        let people = first.mine ? [author] : authors.filter { groups[$0.id]?.first?.mine == false }
+        let items = people.flatMap { person in
+            (groups[person.id] ?? []).sorted {
+                $0.createdAt == $1.createdAt ? $0.id.uuidString < $1.id.uuidString : $0.createdAt < $1.createdAt
+            }
+        }
+        guard let start = items.firstIndex(where: { $0.author.id == author.id && !$0.seen })
+                ?? items.firstIndex(where: { $0.author.id == author.id }) else { return }
+        opened = Deck(items: items, start: start)
     }
 
     @MainActor private func load() async {
@@ -198,122 +262,371 @@ private struct RiderStoryPlayer: View {
     let stories: [RiderStory]
     let deleted: ([RiderStory]) -> Void
     @Environment(\.dismiss) private var dismiss
+    @State private var index: Int
+    @State private var likes: [UUID: Bool] = [:]
+
+    init(stories: [RiderStory], start: Int, deleted: @escaping ([RiderStory]) -> Void) {
+        self.stories = stories
+        self.deleted = deleted
+        _index = State(initialValue: start)
+    }
+
+    var body: some View {
+        let story = stories[index]
+        let first = stories.firstIndex { $0.author.id == story.author.id } ?? index
+        let count = stories.filter { $0.author.id == story.author.id }.count
+        RiderStorySlide(story: story, position: index - first, count: count, canGoBack: index > 0,
+                        initialLike: likes[story.id] ?? story.liked ?? false,
+                        previous: { if index > 0 { index -= 1 } },
+                        next: {
+                            if index + 1 < stories.count { index += 1 } else { dismiss() }
+                        },
+                        onLike: { likes[story.id] = $0 },
+                        onDelete: { deleted($0); dismiss() },
+                        close: { dismiss() })
+            .id(story.id)
+    }
+}
+
+private struct RiderStorySlide: View {
+    let story: RiderStory
+    let position: Int
+    let count: Int
+    let canGoBack: Bool
+    let initialLike: Bool
+    let previous: () -> Void
+    let next: () -> Void
+    let onLike: (Bool) -> Void
+    let onDelete: ([RiderStory]) -> Void
+    let close: () -> Void
+
     @Environment(\.scenePhase) private var phase
-    @State private var index = 0
+    @FocusState private var typing: Bool
     @State private var player: AVPlayer?
     @State private var source: URL?
     @State private var image: UIImage?
     @State private var duration = 6.0
     @State private var elapsed = 0.0
+    @State private var startedAt: TimeInterval?
     @State private var ready = false
     @State private var failed = false
     @State private var confirmDelete = false
+    @State private var deleting = false
+    @State private var showingViewers = false
+    @State private var changingLike = false
+    @State private var draft = ""
+    @State private var draftID = UUID()
+    @State private var sending = false
+    @State private var replySent = false
+    @State private var error: String?
 
-    private var current: RiderStory { stories[index] }
+    private var playing: Bool {
+        ready && phase == .active && !typing && !confirmDelete && !deleting &&
+        !showingViewers && !sending && !changingLike && error == nil
+    }
 
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
-            if let player { VideoPlayer(player: player).allowsHitTesting(false) }
-            else if let image { Image(uiImage: image).resizable().scaledToFit() }
+            if let player {
+                VideoPlayer(player: player).allowsHitTesting(false)
+            } else if let image {
+                Image(uiImage: image).resizable().scaledToFit().allowsHitTesting(false)
+            }
+            if !ready && !failed { ProgressView().tint(.white).allowsHitTesting(false) }
+            if failed { Text("История недоступна").allowsHitTesting(false) }
             HStack(spacing: 0) {
-                Button { if index > 0 { index -= 1 } } label: { Color.clear.contentShape(Rectangle()) }
-                    .accessibilityLabel("Предыдущая история")
-                Button(action: next) { Color.clear.contentShape(Rectangle()) }
-                    .accessibilityLabel("Следующая история")
-            }.buttonStyle(.plain)
-            if !ready && !failed { ProgressView().tint(.white) }
-            if failed { Text("История недоступна").foregroundStyle(.white) }
-        }
-        .safeAreaInset(edge: .top) {
-            VStack(spacing: 10) {
-                HStack(spacing: 4) {
-                    ForEach(stories.indices, id: \.self) { i in
-                        ProgressView(value: i < index ? 1.0 : i == index ? min(elapsed / duration, 1) : 0.0).tint(.white)
-                    }
-                }
-                HStack(spacing: 8) {
-                    RiderAvatar(photo: current.author.avatar ?? Data(), size: 32)
-                    Text(current.author.handle).font(.subheadline.bold())
-                    Spacer()
-                    if current.mine {
-                        Button { confirmDelete = true } label: { Image(systemName: "ellipsis.circle") }
-                            .accessibilityLabel("Действия с историей")
-                    }
-                    Button { dismiss() } label: { Image(systemName: "xmark.circle.fill").font(.title2) }
-                        .accessibilityLabel("Закрыть")
-                }.foregroundStyle(.white)
-            }.padding(.horizontal, 14).padding(.vertical, 8)
-        }
-        .safeAreaInset(edge: .bottom) {
-            if !current.caption.isEmpty {
-                Text(current.caption).font(.subheadline).foregroundStyle(.white).multilineTextAlignment(.center)
-                    .padding(12).background(.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 14)).padding()
+                Button {
+                    if typing { typing = false } else { previous() }
+                } label: { tapArea }
+                    .disabled(!canGoBack && !typing)
+                    .accessibilityLabel(typing ? "Скрыть клавиатуру" : "Предыдущая история")
+                Button {
+                    if typing { typing = false } else { next() }
+                } label: { tapArea }
+                    .accessibilityLabel(typing ? "Скрыть клавиатуру" : "Следующая история")
             }
+            .buttonStyle(.plain)
+            .disabled(changingLike || sending || deleting)
         }
-        .task(id: current.id) { await load(current) }
-        .task(id: ready && phase == .active && !confirmDelete) {
-            guard ready, phase == .active, !confirmDelete else { player?.pause(); return }
-            player?.play()
-            while !Task.isCancelled {
-                do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
-                elapsed += 0.1
-                if elapsed >= duration { next(); return }
-            }
+        .safeAreaInset(edge: .top, spacing: 0) { header }
+        .safeAreaInset(edge: .bottom, spacing: 0) { footer }
+        .foregroundStyle(.white)
+        .tint(.white)
+        .preferredColorScheme(.dark)
+        .task { await load() }
+        .onChange(of: playing, initial: true) { _, active in updatePlayback(active) }
+        .task(id: startedAt) {
+            guard let startedAt, playing else { return }
+            let remaining = max(0, duration - playbackTime(at: ProcessInfo.processInfo.systemUptime))
+            do { try await Task.sleep(for: .seconds(remaining)) } catch { return }
+            guard !Task.isCancelled, self.startedAt == startedAt, playing else { return }
+            next()
         }
-        .onDisappear { reset() }
+        .onDisappear {
+            player?.pause()
+            if let source { try? FileManager.default.removeItem(at: source) }
+        }
+        .sheet(isPresented: $showingViewers) { RiderStoryViewers(path: story.path) }
         .confirmationDialog("Удалить историю?", isPresented: $confirmDelete, titleVisibility: .visible) {
-            Button("Удалить", role: .destructive) {
-                let id = current.id
-                Task {
-                    if let latest: [RiderStory] = try? await RiderCommunity.decode("stories/" + id.uuidString.lowercased(), method: "DELETE") {
-                        deleted(latest)
-                        dismiss()
-                    }
-                }
-            }
+            Button("Удалить", role: .destructive, action: deleteStory)
+        }
+        .alert("Истории", isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(error ?? "")
         }
     }
 
-    private func next() {
-        if index + 1 < stories.count { index += 1 } else { dismiss() }
+    private var tapArea: some View {
+        Color.clear.frame(maxWidth: .infinity, maxHeight: .infinity).contentShape(Rectangle())
     }
 
-    @MainActor private func load(_ story: RiderStory) async {
-        reset()
+    private var header: some View {
+        VStack(spacing: 8) {
+            TimelineView(.animation(minimumInterval: 1.0 / 60, paused: startedAt == nil)) { _ in
+                let fraction = min(1, playbackTime(at: ProcessInfo.processInfo.systemUptime) / duration)
+                HStack(spacing: 4) {
+                    ForEach(0..<count, id: \.self) { segment in
+                        GeometryReader { bounds in
+                            let fill = segment < position ? 1.0 : segment == position ? fraction : 0.0
+                            Capsule().fill(.white.opacity(0.35))
+                                .overlay(alignment: .leading) {
+                                    Capsule().fill(.white).frame(width: CGFloat(fill) * bounds.size.width)
+                                }
+                        }
+                        .frame(height: 3)
+                    }
+                }
+            }
+            .accessibilityHidden(true)
+            HStack(spacing: 8) {
+                RiderAvatar(photo: story.author.avatar ?? Data(), size: 32)
+                    .accessibilityHidden(true)
+                Text(story.author.handle).font(.subheadline.bold())
+                Spacer()
+                if story.mine {
+                    Button { confirmDelete = true } label: { RiderCompactAction(icon: "ellipsis") }
+                        .disabled(deleting)
+                        .accessibilityLabel("Действия с историей")
+                }
+                Button(action: close) { RiderCompactAction(icon: "xmark") }
+                    .accessibilityLabel("Закрыть историю")
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 14)
+        .padding(.top, 8)
+        .background(.black)
+    }
+
+    private var footer: some View {
+        VStack(spacing: 8) {
+            if !story.caption.isEmpty {
+                Text(story.caption).font(.subheadline).multilineTextAlignment(.center)
+                    .lineLimit(4)
+                    .padding(10)
+                    .background(.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
+            }
+            if story.mine {
+                Button { showingViewers = true } label: {
+                    Label("Зрители", systemImage: "eye")
+                        .font(.subheadline.weight(.semibold))
+                        .padding(.horizontal, 12)
+                        .frame(minHeight: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            } else {
+                if replySent {
+                    Label("Ответ отправлен", systemImage: "checkmark")
+                        .font(.caption).foregroundStyle(.white.opacity(0.8))
+                }
+                HStack(spacing: 4) {
+                    TextField("Ответить автору…", text: $draft)
+                        .focused($typing)
+                        .submitLabel(.send)
+                        .onSubmit(sendReply)
+                        .onChange(of: draft) { _, value in
+                            if value.count > 1000 { draft = String(value.prefix(1000)) }
+                            if !sending && !value.isEmpty { draftID = UUID(); replySent = false }
+                        }
+                        .padding(.horizontal, 12)
+                        .frame(minHeight: 44)
+                        .background(.white.opacity(0.15), in: Capsule())
+                        .disabled(sending)
+                    if sending {
+                        ProgressView().frame(width: 44, height: 44)
+                    } else if !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Button(action: sendReply) { RiderCompactAction(icon: "paperplane.fill") }
+                            .accessibilityLabel("Отправить ответ")
+                    }
+                    Button(action: toggleLike) {
+                        RiderCompactAction(icon: initialLike ? "heart.fill" : "heart", selected: initialLike)
+                            .foregroundStyle(initialLike ? Color.red : .white)
+                    }
+                    .disabled(changingLike)
+                    .accessibilityLabel(initialLike ? "Убрать лайк" : "Поставить лайк")
+                    .accessibilityAddTraits(initialLike ? .isSelected : [])
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 6)
+        .background(.black)
+    }
+
+    private func playbackTime(at now: TimeInterval) -> TimeInterval {
+        elapsed + (startedAt.map { max(0, now - $0) } ?? 0)
+    }
+
+    private func updatePlayback(_ active: Bool) {
+        let now = ProcessInfo.processInfo.systemUptime
+        if active {
+            guard startedAt == nil else { return }
+            startedAt = now
+            player?.play()
+        } else {
+            elapsed = playbackTime(at: now)
+            startedAt = nil
+            player?.pause()
+        }
+    }
+
+    @MainActor private func load() async {
         do {
             let data = try await RiderCommunity.storyMedia(story.id)
             try Task.checkCancellation()
             guard data.count <= RiderPost.maxVideoBytes else { throw CocoaError(.fileReadTooLarge) }
             if story.video {
                 let url = RiderMediaEncoding.temporary("mp4")
+                defer {
+                    if source != url { try? FileManager.default.removeItem(at: url) }
+                }
                 try data.write(to: url, options: [.atomic, .completeFileProtection])
-                source = url
                 let asset = AVURLAsset(url: url)
                 let time = try await asset.load(.duration)
                 try Task.checkCancellation()
                 duration = time.seconds.isFinite ? min(30.5, max(0.5, time.seconds)) : 6
+                source = url
                 player = AVPlayer(playerItem: AVPlayerItem(asset: asset))
             } else {
                 image = UIImage(data: data)
                 guard image != nil else { throw CocoaError(.fileReadCorruptFile) }
             }
             ready = true
-            if !story.seen {
-                let _: [String:Bool]? = try? await RiderCommunity.decode("stories/" + story.id.uuidString.lowercased() + "/seen", method: "PUT")
+            if !story.mine && !story.seen {
+                Task {
+                    let _: [String: Bool]? = try? await RiderCommunity.decode(story.path + "/seen", method: "PUT")
+                }
             }
-        } catch { if !Task.isCancelled { failed = true } }
+        } catch {
+            if !Task.isCancelled { failed = true }
+        }
     }
 
-    private func reset() {
-        ready = false
-        elapsed = 0
-        duration = 6
+    private func sendReply() {
+        let message = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !sending, !message.isEmpty else { return }
+        let id = draftID
+        sending = true
+        Task {
+            defer { sending = false }
+            do {
+                _ = try await RiderCommunity.sendMessage(to: story.author.id, id: id, text: message, post: nil)
+                draft = ""
+                replySent = true
+                typing = false
+            } catch RiderCommunity.Rejection.forbidden {
+                error = "Для отправки личного сообщения открой профиль во вкладке «Райдер»."
+            } catch {
+                error = "Не удалось отправить ответ. Попробуй ещё раз."
+            }
+        }
+    }
+
+    private func toggleLike() {
+        guard !changingLike else { return }
+        changingLike = true
+        Task {
+            defer { changingLike = false }
+            do {
+                let result: [String: Bool] = try await RiderCommunity.decode(story.path + "/like",
+                                                                            method: initialLike ? "DELETE" : "PUT")
+                guard let liked = result["liked"] else { throw CocoaError(.fileReadCorruptFile) }
+                onLike(liked)
+            } catch {
+                error = "Не удалось обновить лайк. Попробуй ещё раз."
+            }
+        }
+    }
+
+    private func deleteStory() {
+        deleting = true
+        Task {
+            defer { deleting = false }
+            do { onDelete(try await RiderCommunity.decode(story.path, method: "DELETE")) }
+            catch { error = "Не удалось удалить историю. Попробуй ещё раз." }
+        }
+    }
+}
+
+private struct RiderStoryViewers: View {
+    let path: String
+    @Environment(\.dismiss) private var dismiss
+    @State private var people: [RiderStoryViewer] = []
+    @State private var offset: Int? = 0
+    @State private var loading = false
+    @State private var failed = false
+
+    var body: some View {
+        NavigationStack {
+            List {
+                ForEach(people) { viewer in
+                    HStack {
+                        Text(viewer.person.handle)
+                        Spacer()
+                        if viewer.liked {
+                            Image(systemName: "heart.fill").foregroundStyle(.red)
+                                .accessibilityLabel("Понравилась история")
+                        }
+                    }
+                }
+                if failed {
+                    Button("Повторить загрузку") { Task { await load() } }
+                } else if loading {
+                    ProgressView()
+                } else if people.isEmpty && offset == nil {
+                    Text("Пока никто не посмотрел").foregroundStyle(.secondary)
+                } else if !people.isEmpty && offset != nil {
+                    Button("Показать ещё") { Task { await load() } }
+                }
+            }
+            .navigationTitle("Зрители")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) { Button("Готово") { dismiss() } }
+            }
+        }
+        .presentationDetents([.medium, .large])
+        .task { await load() }
+    }
+
+    @MainActor private func load() async {
+        guard let offset, !loading else { return }
+        loading = true
         failed = false
-        player?.pause()
-        player = nil
-        image = nil
-        if let source { try? FileManager.default.removeItem(at: source) }
-        source = nil
+        defer { loading = false }
+        do {
+            let page: RiderStoryViewerPage = try await RiderCommunity.decode(path + "/viewers/\(offset)")
+            guard !Task.isCancelled else { return }
+            let existing = Set(people.map(\.id))
+            people.append(contentsOf: page.people.filter { !existing.contains($0.id) })
+            self.offset = page.nextOffset
+        } catch {
+            if !Task.isCancelled { failed = true }
+        }
     }
 }

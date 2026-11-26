@@ -83,9 +83,13 @@ struct RiderPeopleEntry: View {
                         RiderAvatar(photo: rider.avatar ?? Data(), size: 28)
                             .overlay { Circle().strokeBorder(RiderTheme.surface, lineWidth: 2) }
                     }
-                }.accessibilityHidden(true)
+                }.allowsHitTesting(false).accessibilityHidden(true)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .lagoonCard()
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
         .task {
             if let page = try? await directory(DirectoryInput()) { suggested = page.people }
         }

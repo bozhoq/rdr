@@ -136,6 +136,42 @@ class CommunityTests(unittest.TestCase):
         rider_sos.worker_batch(db, None)
         self.assertEqual(self.call("GET", "/sos/inbox", self.audience), [])
 
+    def test_lan_sos_between_nearby_phones_without_apns(self):
+        self.enterContext(patch.dict(os.environ, {"RIDER_SOS_FOREGROUND": "1"}))
+        coords = dict(latitude=45.0, longitude=35.0, accuracy=12, capturedAt=self.now)
+        far = "c" * 72
+        opted_out = "d" * 72
+        for device, name in [(self.me, "sender"), (self.audience, "receiver"),
+                             (far, "far_rider"), (opted_out, "opted_out")]:
+            self.publish(device, name)
+            location = dict(coords, latitude=46.0) if device == far else coords
+            self.call("PUT", "/sos/foreground", device, {"location":location})
+        self.call("PUT", "/people/preferences", opted_out,
+                  {kind:kind != "sos" for kind in rider_discovery.ALERT_KINDS})
+        self.assertEqual(self.call("GET", "/sos/status", self.me), {"ready":True})
+
+        for sender, receiver, key in [(self.me, self.audience, 700), (self.audience, self.me, 701)]:
+            uid = str(UUID(int=key))
+            path = "/sos/" + uid
+            result = self.call("POST", "/sos", sender, dict(id=uid, name="Rider", location=coords))
+            self.assertEqual((result["recipients"], result["inApp"], result["seenInApp"]), (1,1,0))
+            for excluded in (sender, far, opted_out):
+                self.assertEqual(self.call("GET", "/sos/inbox", excluded), [])
+            self.assertEqual([row["id"] for row in self.call("GET", "/sos/inbox", receiver)], [uid])
+            self.call("GET", "/sos/inbox", receiver)
+            self.assertEqual(self.call("GET", path + "/receipt", sender)["seenInApp"], 1)
+            self.call("PUT", path + "/decision", receiver, {"action":"accept"})
+            self.assertEqual(len(self.call("GET", path + "/receipt", sender)["responders"]), 1)
+            self.call("PUT", path + "/close", sender)
+            self.assertEqual(self.call("GET", "/sos/inbox", receiver), [])
+
+        self.call("DELETE", "/sos/receiver", self.audience)
+        uid = str(UUID(int=702))
+        result = self.call("POST", "/sos", self.me, dict(id=uid, name="Rider", location=coords))
+        self.assertEqual(result["recipients"], 0)
+        self.call("PUT", "/sos/foreground", self.audience, {"location":coords})
+        self.assertEqual(self.call("GET", "/sos/inbox", self.audience)[0]["id"], uid)
+
     def test_sos_accept_skip_and_sender_notification(self):
         coords = dict(latitude=45, longitude=33, accuracy=10, capturedAt=self.now)
         uid = str(UUID(int=322))
@@ -279,6 +315,29 @@ class CommunityTests(unittest.TestCase):
         replay = self.call("PUT", "/registration", self.me, dict(name="Replay", username="first_rider",
                            totals=self.totals))["mine"]["profile"]
         self.assertFalse(replay["statsPublic"])
+
+    def test_story_likes_and_viewer_list(self):
+        self.publish(self.me, "author")
+        viewer = self.publish(self.audience, "viewer")["mine"]
+        key = str(UUID(int=815))
+        path = "/stories/" + key
+        self.call("PUT", path, self.me, dict(id=key, caption="", photo="/9j/2Q=="))
+        self.call("PUT", path + "/seen", self.me)
+        self.assertEqual(self.call("GET", path + "/viewers/0", self.me)["people"], [])
+        self.call("GET", path + "/viewers/0", self.audience, expect=404)
+        self.call("PUT", path + "/like", self.me, expect=403)
+        for _ in range(2):
+            self.assertEqual(self.call("PUT", path + "/like", self.audience), {"liked": True})
+        item = self.call("GET", "/stories", self.audience)[0]
+        self.assertTrue(item["liked"])
+        self.assertTrue(item["seen"])
+        people = self.call("GET", path + "/viewers/0", self.me)["people"]
+        self.assertEqual([(row["person"]["id"], row["liked"]) for row in people], [(viewer["id"], True)])
+        self.assertEqual(self.call("DELETE", path + "/like", self.audience), {"liked": False})
+        self.assertFalse(self.call("GET", path + "/viewers/0", self.me)["people"][0]["liked"])
+        self.now += 86400
+        self.call("PUT", path + "/like", self.audience, expect=404)
+        self.call("GET", path + "/viewers/0", self.me, expect=404)
 
     def test_stories_expire_and_voice_attachments_are_private(self):
         rider = self.publish(self.me, "author")["mine"]

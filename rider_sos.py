@@ -21,6 +21,9 @@ CREATE TABLE IF NOT EXISTS sos_receivers (
     latitude REAL NOT NULL, longitude REAL NOT NULL, captured_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS sos_fresh_receivers ON sos_receivers(captured_at);
+CREATE TABLE IF NOT EXISTS sos_foreground (
+    owner TEXT PRIMARY KEY, latitude REAL NOT NULL, longitude REAL NOT NULL, captured_at REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS sos_incidents (
     id TEXT PRIMARY KEY, owner TEXT NOT NULL, created REAL NOT NULL,
     name TEXT NOT NULL, equipment TEXT, latitude REAL NOT NULL, longitude REAL NOT NULL, accuracy REAL NOT NULL
@@ -35,6 +38,10 @@ CREATE TABLE IF NOT EXISTS sos_outbox (
     PRIMARY KEY(incident, receiver)
 );
 CREATE INDEX IF NOT EXISTS sos_outbox_receiver ON sos_outbox(receiver);
+CREATE TABLE IF NOT EXISTS sos_foreground_seen (
+    incident TEXT NOT NULL, receiver TEXT NOT NULL, PRIMARY KEY(incident,receiver),
+    FOREIGN KEY(incident,receiver) REFERENCES sos_outbox(incident,receiver) ON DELETE CASCADE
+);
 CREATE TABLE IF NOT EXISTS sos_devices (
     owner TEXT PRIMARY KEY, token TEXT UNIQUE NOT NULL, refreshed REAL NOT NULL
 );
@@ -102,15 +109,40 @@ def receipt(db, identifier):
                               WHERE incident=? AND action='accept' ORDER BY decided,receiver""", (identifier,))
     return dict(id=identifier, recipients=sum(states.values()), acceptedByAPNs=states.get("accepted", 0),
                 pending=states.get("pending", 0) + states.get("sending", 0),
+                inApp=states.get("in_app", 0),
+                seenInApp=db.execute("SELECT count(*) FROM sos_foreground_seen WHERE incident=?", (identifier,)).fetchone()[0],
                 location=dict(latitude=latitude, longitude=longitude, accuracy=accuracy, capturedAt=created),
                 createdAt=created, closed=bool(db.execute("SELECT 1 FROM sos_closed WHERE incident=?", (identifier,)).fetchone()),
                 responders=[dict(id=owner, name=name, decidedAt=decided) for owner, name, decided in responses])
 
 
+def receive_enabled(db, owner):
+    prefs = db.execute("SELECT prefs FROM rider_alert_settings WHERE owner=?", (owner,)).fetchone()
+    return not prefs or json.loads(prefs[0]).get("sos", True)
+
+
 def handle(db, owner, path, method, body):
     now = time.time()
+    lan = os.environ.get("RIDER_SOS_FOREGROUND") == "1"
     if (path, method) == ("/sos/status", "GET"):
-        return "200 OK", {"ready": recent_heartbeat(db, now)}
+        return "200 OK", {"ready": lan or recent_heartbeat(db, now)}
+    if lan and (path, method) == ("/sos/foreground", "PUT"):
+        latitude, longitude, _, captured = fix(body().get("location"), now)
+        db.execute("BEGIN IMMEDIATE")
+        if not receive_enabled(db, owner):
+            return "200 OK", {"enabled": False}
+        db.execute("DELETE FROM sos_foreground WHERE captured_at<?", (now - FIX_MAX_AGE,))
+        db.execute("""INSERT INTO sos_foreground VALUES (?,?,?,?) ON CONFLICT(owner) DO UPDATE SET
+            latitude=excluded.latitude,longitude=excluded.longitude,captured_at=excluded.captured_at
+            WHERE excluded.captured_at>=sos_foreground.captured_at""", (owner,latitude,longitude,captured))
+        nearby = db.execute("""SELECT i.id,i.latitude,i.longitude FROM sos_incidents i
+            WHERE i.owner<>? AND i.created>=? AND NOT EXISTS(SELECT 1 FROM sos_closed WHERE incident=i.id)
+              AND NOT EXISTS(SELECT 1 FROM sos_outbox o WHERE o.incident=i.id AND o.receiver=?)""",
+                            (owner, now - PUSH_SECONDS, owner))
+        db.executemany("INSERT OR IGNORE INTO sos_outbox(incident,receiver,status) VALUES (?,?,'in_app')",
+                       [(identifier,owner) for identifier,lat,lon in nearby
+                        if distance((latitude,longitude),(lat,lon)) <= RADIUS_METERS])
+        return "200 OK", {"enabled": True}
     if (path, method) == ("/sos/device", "PUT"):
         token = push_token(body().get("token"))
         db.execute("BEGIN IMMEDIATE")
@@ -122,6 +154,7 @@ def handle(db, owner, path, method, body):
         if path == "/sos/device":
             db.execute("DELETE FROM sos_devices WHERE owner=?", (owner,))
         db.execute("DELETE FROM sos_receivers WHERE owner=?", (owner,))
+        db.execute("DELETE FROM sos_foreground WHERE owner=?", (owner,))
         db.execute("UPDATE sos_outbox SET status='failed' WHERE receiver=? AND status='pending'", (owner,))
         return "200 OK", {"enabled": False}
     if (path, method) == ("/sos/receiver", "PUT"):
@@ -129,8 +162,7 @@ def handle(db, owner, path, method, body):
         token = push_token(raw.get("token"))
         latitude, longitude, _, captured = fix(raw.get("location"), now)
         db.execute("BEGIN IMMEDIATE")
-        prefs = db.execute("SELECT prefs FROM rider_alert_settings WHERE owner=?", (owner,)).fetchone()
-        if prefs and not json.loads(prefs[0]).get("sos", True):
+        if not receive_enabled(db, owner):
             return "200 OK", {"enabled": False}
         db.execute("DELETE FROM sos_receivers WHERE token=? AND owner<>?", (token, owner))
         db.execute("""INSERT INTO sos_receivers VALUES (?,?,?,?,?)
@@ -140,13 +172,20 @@ def handle(db, owner, path, method, body):
                    (owner, token, latitude, longitude, captured))
         return "200 OK", {"enabled": True}
     if (path, method) == ("/sos/inbox", "GET"):
+        if lan and not receive_enabled(db, owner):
+            return "200 OK", []
         rows = db.execute("""SELECT i.id,i.created,i.name,i.equipment,i.latitude,i.longitude,i.accuracy,s.action
             FROM sos_incidents i JOIN sos_outbox o ON o.incident=i.id
             LEFT JOIN sos_responses s ON s.incident=o.incident AND s.receiver=o.receiver
             WHERE o.receiver=? AND i.created>=? AND NOT EXISTS(SELECT 1 FROM sos_closed WHERE incident=i.id)
                 AND (s.action IS NULL OR s.action='accept')
             ORDER BY i.created DESC""", (owner, now - VISIBLE_SECONDS))
-        return "200 OK", [incident(row) for row in rows]
+        alerts = [incident(row) for row in rows]
+        if lan and alerts:
+            db.executemany("""INSERT OR IGNORE INTO sos_foreground_seen
+                SELECT incident,receiver FROM sos_outbox WHERE incident=? AND receiver=? AND status='in_app'""",
+                           [(alert["id"], owner) for alert in alerts])
+        return "200 OK", alerts
     if method == "GET" and re.fullmatch(r"/sos/[0-9a-f-]{36}/receipt", path):
         identifier = str(UUID(path.split("/")[2]))
         found = db.execute("SELECT 1 FROM sos_incidents WHERE id=? AND owner=? AND created>=?",
@@ -191,8 +230,10 @@ def handle(db, owner, path, method, body):
     exists = db.execute("SELECT owner FROM sos_incidents WHERE id=?", (identifier,)).fetchone()
     if exists:
         return ("200 OK", receipt(db, identifier)) if exists[0] == owner else ("409 Conflict", {"error": "ID taken"})
-    if not recent_heartbeat(db, now):
+    if not lan and not recent_heartbeat(db, now):
         return "503 Service Unavailable", {"error": "SOS dispatcher unavailable"}
+    if lan:
+        db.execute("DELETE FROM sos_incidents WHERE created<?", (now - VISIBLE_SECONDS,))
     if db.execute("SELECT 1 FROM sos_incidents WHERE owner=? AND created>=? AND id NOT IN (SELECT incident FROM sos_closed)", (owner, now - 60)).fetchone():
         return "429 Too Many Requests", {"error": "recent SOS"}
     latitude, longitude, accuracy, _ = fix(raw.get("location"), now)
@@ -207,6 +248,12 @@ def handle(db, owner, path, method, body):
     db.executemany("INSERT INTO sos_outbox(incident,receiver) VALUES (?,?)",
                    [(identifier, target) for target, lat, lon in nearby
                     if distance((latitude, longitude), (lat, lon)) <= RADIUS_METERS])
+    if lan:
+        foreground = db.execute("""SELECT owner,latitude,longitude FROM sos_foreground
+            WHERE owner<>? AND captured_at>=?""", (owner, now - FIX_MAX_AGE))
+        db.executemany("INSERT OR IGNORE INTO sos_outbox(incident,receiver,status) VALUES (?,?,'in_app')",
+                       [(identifier,target) for target,lat,lon in foreground
+                        if distance((latitude,longitude),(lat,lon)) <= RADIUS_METERS])
     return "200 OK", receipt(db, identifier)
 
 

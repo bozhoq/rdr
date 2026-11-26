@@ -109,6 +109,11 @@ CREATE TABLE IF NOT EXISTS story_views(
     viewer TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
     PRIMARY KEY(story, viewer)
 );
+CREATE TABLE IF NOT EXISTS story_likes(
+    story TEXT NOT NULL, viewer TEXT NOT NULL,
+    PRIMARY KEY(story, viewer),
+    FOREIGN KEY(story, viewer) REFERENCES story_views(story, viewer) ON DELETE CASCADE
+);
 CREATE INDEX IF NOT EXISTS direct_recipient ON direct_messages(recipient, sender, created_at);
 CREATE TABLE IF NOT EXISTS message_attachments(
     message TEXT PRIMARY KEY REFERENCES direct_messages(id) ON DELETE CASCADE,
@@ -695,12 +700,26 @@ def unread_summary(db, owner):
 
 def visible_stories(db, owner):
     rows = db.execute("""SELECT s.id,s.owner,p.document,s.caption,s.created,s.video IS NOT NULL,
-        EXISTS(SELECT 1 FROM story_views v WHERE v.story=s.id AND v.viewer=?)
+        EXISTS(SELECT 1 FROM story_views v WHERE v.story=s.id AND v.viewer=?),
+        EXISTS(SELECT 1 FROM story_likes l WHERE l.story=s.id AND l.viewer=?)
         FROM stories s JOIN public_profiles p ON p.id=s.owner WHERE s.created>?
-        ORDER BY s.created DESC,s.id LIMIT 150""", (owner, time.time()-86400))
+        ORDER BY (s.owner=?) DESC,s.created DESC,s.id LIMIT 150""", (owner, owner, time.time()-86400, owner))
     return [dict(id=key, author=rider_card(author, document), caption=caption, createdAt=created,
-                 video=bool(video), seen=owner==author or bool(seen), mine=owner==author)
-            for key,author,document,caption,created,video,seen in rows]
+                 video=bool(video), seen=owner==author or bool(seen), mine=owner==author, liked=bool(liked))
+            for key,author,document,caption,created,video,seen,liked in rows]
+
+
+def story_viewers(db, key, offset):
+    people = []
+    rows = db.execute("""SELECT p.id,p.document,l.viewer IS NOT NULL FROM story_views v
+        JOIN profiles p ON p.id=v.viewer LEFT JOIN story_likes l ON l.story=v.story AND l.viewer=v.viewer
+        JOIN stories s ON s.id=v.story WHERE v.story=? AND v.viewer<>s.owner
+        ORDER BY v.viewer LIMIT 31 OFFSET ?""", (key, offset))
+    for viewer, document, liked in rows:
+        rider = json.loads(document)
+        people.append(dict(person={"id":viewer, "name":rider["name"], "username":rider.get("username")},
+                           liked=bool(liked)))
+    return {"people":people[:30], "nextOffset":offset+30 if len(people)>30 else None}
 
 
 def thread(db, owner, peer):
@@ -1181,7 +1200,7 @@ def application(env, start_response):
                 return send("200 OK", unread_summary(db, owner))
             elif (path, method) == ("/stories", "GET"):
                 return send("200 OK", visible_stories(db, owner))
-            elif (story_path := re.fullmatch(r"/stories/([a-fA-F0-9-]{36})(?:/(media|seen))?", path)):
+            elif (story_path := re.fullmatch(r"/stories/([a-fA-F0-9-]{36})(?:/(media|seen|like|viewers/([0-9]{1,9})))?", path)):
                 try:
                     key = identifier(story_path[1])
                 except ValueError:
@@ -1213,8 +1232,27 @@ def application(env, start_response):
                 if method == "PUT" and action == "seen":
                     db.execute("""INSERT OR IGNORE INTO story_views SELECT s.id,p.id FROM stories s
                         JOIN public_profiles author ON author.id=s.owner JOIN profiles p ON p.id=?
-                        WHERE s.id=? AND s.created>?""", (owner,key,time.time()-86400))
+                        WHERE s.id=? AND s.created>? AND s.owner<>?""", (owner,key,time.time()-86400,owner))
                     return send("200 OK", {"seen":True})
+                if (action == "like" and method in ("PUT", "DELETE")) or (story_path[3] and method == "GET"):
+                    if action == "like":
+                        db.execute("BEGIN IMMEDIATE")
+                    story = db.execute("""SELECT s.owner FROM stories s JOIN public_profiles p ON p.id=s.owner
+                        WHERE s.id=? AND s.created>?""", (key, time.time()-86400)).fetchone()
+                    if story is None:
+                        return send("404 Not Found", {"error": "unknown story"})
+                    if story_path[3]:
+                        if story[0] != owner:
+                            return send("404 Not Found", {"error": "unknown story"})
+                        return send("200 OK", story_viewers(db, key, int(story_path[3])))
+                    if story[0] == owner or not db.execute("SELECT 1 FROM profiles WHERE id=?", (owner,)).fetchone():
+                        return send("403 Forbidden", {"error": "invalid story viewer"})
+                    if method == "PUT":
+                        db.execute("INSERT OR IGNORE INTO story_views VALUES(?,?)", (key,owner))
+                        db.execute("INSERT OR IGNORE INTO story_likes VALUES(?,?)", (key,owner))
+                    else:
+                        db.execute("DELETE FROM story_likes WHERE story=? AND viewer=?", (key,owner))
+                    return send("200 OK", {"liked":method=="PUT"})
                 if method == "GET" and action == "media":
                     asset = db.execute("""SELECT s.photo,s.video FROM stories s JOIN public_profiles p ON p.id=s.owner
                         WHERE s.id=? AND s.created>?""", (key,time.time()-86400)).fetchone()

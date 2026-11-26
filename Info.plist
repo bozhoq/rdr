@@ -45,6 +45,8 @@
 	<string>Rider ищет знакомых по выбранным контактам, когда вы включаете поиск.</string>
 	<key>NSCameraUsageDescription</key>
 	<string>Rider использует камеру для фото, кружочков и историй по вашему запросу.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Rider распознаёт выбранные голосовые сообщения на iPhone и показывает их текст в чате.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Rider записывает звук голосовых сообщений и кружочков, когда вы включаете запись.</string>
 </dict>

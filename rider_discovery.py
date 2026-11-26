@@ -230,6 +230,7 @@ def handle(db, owner, path, method, raw, ip, card):
         db.execute("INSERT OR REPLACE INTO rider_alert_settings VALUES(?,?)",(owner,json.dumps(raw)))
         if not raw["sos"]:
             db.execute("DELETE FROM sos_receivers WHERE owner=?",(owner,))
+            db.execute("DELETE FROM sos_foreground WHERE owner=?",(owner,))
             db.execute("UPDATE sos_outbox SET status='failed' WHERE receiver=? AND status='pending'",(owner,))
         return "200 OK",{"saved":True}
     db.execute("BEGIN IMMEDIATE")

@@ -471,14 +471,6 @@ struct RiderProfileView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
-                NavigationLink(value: RiderDestination.statistics) {
-                    Image(systemName: "clock.arrow.circlepath").accessibilityLabel("История каталок")
-                }
-                NavigationLink {
-                    RiderAnalytics(title: "Личная статистика", rides: RiderPublicRide.summaries(in: recorder.history))
-                } label: {
-                    Image(systemName: "chart.bar.xaxis").accessibilityLabel("Личная статистика")
-                }
                 NavigationLink { RiderNotificationsView() } label: {
                     RiderBadgeIcon(icon: "bell", title: "Уведомления", count: social.unread.activity)
                 }
@@ -699,26 +691,35 @@ struct RiderProfileView: View {
                     profileError = nil
                     editing = true
                 } label: {
-                    Image(systemName: "pencil").font(.headline).padding(10)
-                        .background(.white.opacity(0.17), in: Circle())
+                    RiderCompactAction(icon: "pencil")
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Изменить профиль")
             }
             ViewThatFits(in: .horizontal) {
-                HStack(spacing: 16) { followCounts }
+                HStack(spacing: 10) { followCounts }
                 VStack(alignment: .leading, spacing: 4) { followCounts }
             }
-            .font(.subheadline.monospacedDigit())
+            .font(.caption.monospacedDigit())
             .foregroundStyle(RiderTheme.foam)
-            HStack(spacing: 13) {
-                Label(RiderTotals(recorder.history).timeOnWater, systemImage: "water.waves")
-                Button { showingAchievements = true } label: { Label("Ачивки", systemImage: "medal") }
-                    .buttonStyle(.plain)
-            }.font(.caption.weight(.semibold)).foregroundStyle(RiderTheme.foam)
             if !bio.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 Text(bio).font(.subheadline).fixedSize(horizontal: false, vertical: true)
             }
+            HStack(spacing: 0) {
+                Label(RiderTotals(recorder.history).timeOnWater, systemImage: "water.waves")
+                    .font(.caption.weight(.semibold)).foregroundStyle(RiderTheme.foam)
+                Spacer(minLength: 4)
+                Button { showingAchievements = true } label: { RiderCompactAction(icon: "medal") }
+                    .accessibilityLabel("Ачивки")
+                NavigationLink(value: RiderDestination.statistics) {
+                    RiderCompactAction(icon: "clock.arrow.circlepath")
+                }.accessibilityLabel("История каталок")
+                NavigationLink {
+                    RiderAnalytics(title: "Личная статистика", rides: RiderPublicRide.summaries(in: recorder.history))
+                } label: {
+                    RiderCompactAction(icon: "chart.bar.xaxis")
+                }.accessibilityLabel("Личная статистика")
+            }.buttonStyle(.plain)
         }
         .foregroundStyle(.white)
         .padding(16)
@@ -731,8 +732,8 @@ struct RiderProfileView: View {
             RiderFollowCount(id: "me", kind: .followers, count: mine?.followers ?? 0)
             RiderFollowCount(id: "me", kind: .following, count: mine?.followingCount ?? 0)
         } else {
-            Text("Подписчики · 0")
-            Text("Подписан · 0")
+            Text("Подписчики 0")
+            Text("Подписки 0")
         }
     }
 
@@ -833,6 +834,8 @@ struct RiderProfileView: View {
         VStack(alignment: .leading, spacing: 8) {
             Button { composing = true } label: {
                 Label("Добавить пост", systemImage: "plus").font(.subheadline.weight(.semibold))
+                    .frame(minHeight: 36)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.bordered)
             .frame(maxWidth: .infinity, alignment: .trailing)
@@ -873,11 +876,9 @@ private struct RiderProfilePublications: View {
         let posts = Entry.merged(remote: entries.filter { !social.deletedPosts.contains($0.id) },
                                  local: isMine ? social.posts : []).filter { $0.post.publicationSection == selection }
         VStack(alignment: .leading, spacing: 8) {
-            Picker("Публикации", selection: $selection) {
-                ForEach(RiderPublicationSection.allCases) { section in
-                    Image(systemName: section.icon).accessibilityLabel(section.title).tag(section)
-                }
-            }.pickerStyle(.segmented)
+            RiderSections(options: RiderPublicationSection.allCases, selection: $selection) { section in
+                Image(systemName: section.icon).accessibilityLabel(section.title)
+            }
             if posts.isEmpty {
                 Text(selection == .gallery ? "Пока нет фото и видео." : "Пока нет заметок.")
                     .font(.subheadline).foregroundStyle(.secondary)
@@ -887,7 +888,9 @@ private struct RiderProfilePublications: View {
                         NavigationLink { detail(item) } label: { RiderPostSquare(post: item.post) }
                             .buttonStyle(.plain)
                     }
-                }.clipShape(RoundedRectangle(cornerRadius: 10))
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .contentShape(Rectangle())
             } else {
                 LazyVStack(spacing: 8) {
                     ForEach(posts) { item in
@@ -1177,6 +1180,7 @@ struct RiderAvatar: View {
         }
         .frame(width: size, height: size)
         .clipShape(Circle())
+        .contentShape(Circle())
     }
 }
 
@@ -1184,7 +1188,6 @@ private enum RiderFollowKind: String {
     case followers, following
 
     var title: String { self == .followers ? "Подписчики" : "Подписки" }
-    var label: String { self == .followers ? "Подписчики" : "Подписан" }
 }
 
 private struct RiderFollowCount: View {
@@ -1196,7 +1199,13 @@ private struct RiderFollowCount: View {
         NavigationLink {
             RiderFollowList(id: id, kind: kind)
         } label: {
-            Text("\(kind.label) · \(count)").frame(minHeight: 36)
+            HStack(spacing: 3) {
+                Text(kind.title)
+                Text(count.formatted()).fontWeight(.semibold)
+            }
+            .frame(minHeight: 36)
+            .contentShape(Rectangle())
+            .accessibilityElement(children: .combine)
         }
         .buttonStyle(.plain)
     }
@@ -1290,17 +1299,6 @@ struct RiderPublicProfileView: View {
         .toolbar(.visible, for: .navigationBar)
         .navigationTitle(page?.rider.profile.username.map { "@" + $0 } ?? "Райдер")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            if let page, let rides = page.rides {
-                ToolbarItem(placement: .topBarTrailing) {
-                    NavigationLink {
-                        RiderAnalytics(title: page.rider.profile.username.map { "Статистика @" + $0 } ?? "Статистика райдера", rides: rides)
-                    } label: {
-                        Image(systemName: "chart.bar.xaxis").accessibilityLabel("Статистика райдера")
-                    }
-                }
-            }
-        }
         .task(id: id) { await load() }
         .refreshable { await load() }
         .sheet(isPresented: $showingAchievements) {
@@ -1343,24 +1341,25 @@ struct RiderPublicProfileView: View {
                 if let rank { RiderRankBadge(rank: rank, size: 43) }
             }
             ViewThatFits(in: .horizontal) {
-                HStack(spacing: 14) { followCounts(rider) }
+                HStack(spacing: 10) { followCounts(rider) }
                 VStack(alignment: .leading, spacing: 0) { followCounts(rider) }
             }
-            .font(.subheadline.monospacedDigit()).foregroundStyle(RiderTheme.foam)
-            HStack(spacing: 13) {
-                Label(user.totals.timeOnWater, systemImage: "water.waves")
-                Button { showingAchievements = true } label: { Label("Ачивки", systemImage: "medal") }
-                    .buttonStyle(.plain)
-                if page?.rides == nil { Image(systemName: "lock").accessibilityLabel("Статистика закрыта") }
-            }.font(.caption.weight(.semibold)).foregroundStyle(RiderTheme.foam)
+            .font(.caption.monospacedDigit()).foregroundStyle(RiderTheme.foam)
             if let birth = user.birthday, birth.count == 5 {
                 let parts = birth.split(separator: "-")
                 if parts.count == 2 { Label("\(parts[1]).\(parts[0])", systemImage: "birthday.cake").font(.caption) }
             }
             if let bio = user.bio { Text(bio).font(.subheadline).fixedSize(horizontal: false, vertical: true) }
-            if !isMine && user.publicProfile != false {
-                HStack {
-                    Button(following ? "Отписаться" : "Подписаться") {
+            HStack(spacing: 0) {
+                Label(user.totals.timeOnWater, systemImage: "water.waves")
+                    .font(.caption.weight(.semibold)).foregroundStyle(RiderTheme.foam)
+                Spacer(minLength: 4)
+                if rank != nil {
+                    Button { showingAchievements = true } label: { RiderCompactAction(icon: "medal") }
+                        .accessibilityLabel("Ачивки")
+                }
+                if !isMine && user.publicProfile != false {
+                    Button {
                         busy = true
                         actionError = false
                         Task {
@@ -1368,20 +1367,46 @@ struct RiderPublicProfileView: View {
                             do {
                                 try await RiderCommunity.follow(rider.id, enabled: !following)
                                 social.follows[rider.id] = !following
-                                await load()
+                                await load(keepPageOnFailure: true)
                             } catch { actionError = true }
                         }
+                    } label: {
+                        RiderFollowIcon(following: following)
                     }
-                    .buttonStyle(RiderFollowStyle(following: following)).disabled(busy)
+                    .disabled(busy)
+                    .accessibilityLabel(following ? "Отписаться" : "Подписаться")
+                    .accessibilityAddTraits(following ? .isSelected : [])
                     NavigationLink {
                         RiderThreadView(peer: RiderPerson(id: rider.id, name: user.name, username: user.username,
                                                          avatar: user.avatar, premium: user.premium))
                     } label: {
-                        Label("Написать", systemImage: "paperplane")
-                    }.buttonStyle(.bordered)
+                        RiderCompactAction(icon: "paperplane")
+                    }.accessibilityLabel("Написать")
                 }
-                if actionError { Text("Не удалось изменить подписку.").font(.footnote).foregroundStyle(.secondary) }
-            }
+                if let rides = page?.rides {
+                    NavigationLink {
+                        List(rides.sorted { $0.startedAt > $1.startedAt }) { ride in
+                            RiderRideCard(date: ride.date, title: ride.spot) {
+                                Label("\(Int(ride.seconds / 60)) мин · \(ride.jumps) прыжков", systemImage: "water.waves")
+                                    .font(.subheadline)
+                            }
+                            .listRowSeparator(.hidden)
+                        }
+                        .overlay {
+                            if rides.isEmpty { ContentUnavailableView("Пока нет каталок", systemImage: "water.waves").allowsHitTesting(false) }
+                        }
+                        .navigationTitle("История каталок")
+                    } label: {
+                        RiderCompactAction(icon: "clock.arrow.circlepath")
+                    }.accessibilityLabel("История каталок")
+                    NavigationLink {
+                        RiderAnalytics(title: user.username.map { "Статистика @" + $0 } ?? "Статистика райдера", rides: rides)
+                    } label: {
+                        RiderCompactAction(icon: "chart.bar.xaxis")
+                    }.accessibilityLabel("Статистика райдера")
+                }
+            }.buttonStyle(.plain)
+            if actionError { Text("Не удалось изменить подписку.").font(.footnote) }
         }
         .foregroundStyle(.white)
         .padding(16)
@@ -1391,7 +1416,9 @@ struct RiderPublicProfileView: View {
     }
 
     @ViewBuilder private func followCounts(_ rider: RemoteRider) -> some View {
-        RiderFollowCount(id: rider.id, kind: .followers, count: rider.followers)
+        let following = social.follows[rider.id] ?? rider.following
+        let followers = max(0, rider.followers + (following ? 1 : 0) - (rider.following ? 1 : 0))
+        RiderFollowCount(id: rider.id, kind: .followers, count: followers)
         RiderFollowCount(id: rider.id, kind: .following, count: rider.followingCount ?? 0)
     }
 
@@ -1399,12 +1426,12 @@ struct RiderPublicProfileView: View {
         RiderAchievement.milestones(page.rider.profile.totals, followers: page.rider.followers)
     }
 
-    @MainActor private func load() async {
+    @MainActor private func load(keepPageOnFailure: Bool = false) async {
         do {
             let result: RiderPublicPage = try await RiderCommunity.decode("riders/" + id)
             if !Task.isCancelled { page = result; unavailable = false }
         } catch {
-            if !Task.isCancelled { page = nil; unavailable = true }
+            if !Task.isCancelled && !keepPageOnFailure { page = nil; unavailable = true }
         }
     }
 }
