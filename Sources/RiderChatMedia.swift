@@ -325,46 +325,289 @@ private struct CameraPreview: UIViewRepresentable {
     }
 }
 
-struct RiderChatPlayback: View {
-    let url: URL
-    let circle: Bool
-    @State private var player: AVPlayer?
-    @State private var playing = false
 
-    var body: some View {
-        if circle {
-            ZStack {
-                if let player { VideoPlayer(player: player).allowsHitTesting(false) }
-                Button(action: toggle) {
-                    Image(systemName: playing ? "pause.fill" : "play.fill")
-                        .padding(13).background(.black.opacity(0.57), in: Circle()).foregroundStyle(.white)
-                }.buttonStyle(.plain).accessibilityLabel(playing ? "Пауза" : "Смотреть кружочек")
+@MainActor final class RiderChatPlayer: ObservableObject {
+    struct Track: Identifiable {
+        let id: UUID
+        let url: URL
+        let title: String
+        let circle: Bool
+    }
+
+    @Published private(set) var track: Track?
+    @Published private(set) var playing = false
+    @Published private(set) var position = 0.0
+    @Published private(set) var duration = 0.0
+    @Published private(set) var speed = 1.0
+    private(set) var player: AVPlayer?
+    private var tracking: Task<Void, Never>?
+
+    func select(_ item: Track) {
+        if track?.id == item.id { toggle(); return }
+        close()
+        let player = AVPlayer(url: item.url)
+        self.player = player
+        track = item
+        toggle()
+        tracking = Task { [weak self] in
+            for await notification in NotificationCenter.default.notifications(named: .AVPlayerItemDidPlayToEndTime) {
+                guard let self, !Task.isCancelled else { return }
+                if self.track?.id == item.id, let received = notification.object as? AVPlayerItem, received === player.currentItem {
+                    self.close()
+                    return
+                }
             }
-            .frame(width: 168, height: 168)
-            .background(.black, in: Circle()).clipShape(Circle())
-            .overlay { Circle().strokeBorder(RiderTheme.accent.opacity(0.7), lineWidth: 2) }
-            .task { player = AVPlayer(url: url) }
-            .onDisappear { player?.pause() }
-        } else {
-            Button(action: toggle) {
-                Label(playing ? "Пауза" : "Голосовое", systemImage: playing ? "pause.circle.fill" : "waveform.circle.fill")
-                    .font(.subheadline.weight(.semibold)).foregroundStyle(RiderTheme.accent)
-            }.buttonStyle(.plain)
-            .task { player = AVPlayer(url: url) }
-            .onDisappear { player?.pause() }
         }
     }
 
-    private func toggle() {
+    func updateProgress() {
         guard let player else { return }
-        if player.timeControlStatus == .paused {
-            if let duration = player.currentItem?.duration.seconds, duration.isFinite,
-               player.currentTime().seconds >= duration - 0.1 { player.seek(to: .zero) }
-            player.play()
-            playing = true
-        } else {
-            player.pause()
-            playing = false
+        let seconds = player.currentTime().seconds
+        let length = player.currentItem?.duration.seconds ?? 0
+        if length.isFinite && length > 0 { duration = length }
+        if seconds.isFinite { position = max(0, seconds) }
+        if duration > 0 && playing && position >= duration - 0.02 && player.timeControlStatus == .paused { close() }
+    }
+
+    func toggle() {
+        guard let player else { return }
+        playing.toggle()
+        if playing { player.playImmediately(atRate: Float(speed)) }
+        else { player.pause() }
+    }
+
+    func setSpeed(_ speed: Double) {
+        self.speed = speed
+        if playing { player?.playImmediately(atRate: Float(speed)) }
+    }
+
+    func seek(_ seconds: Double) {
+        guard duration > 0, let player else { return }
+        let target = min(duration, max(0, seconds))
+        position = target
+        player.seek(to: CMTime(seconds: target, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+    }
+
+    func close() {
+        tracking?.cancel()
+        tracking = nil
+        player?.pause()
+        player = nil
+        track = nil
+        playing = false
+        position = 0
+        duration = 0
+    }
+
+    static func time(_ seconds: Double) -> String {
+        let whole = seconds.isFinite ? Int(max(0, seconds)) : 0
+        return String(format: "%d:%02d", whole / 60, whole % 60)
+    }
+}
+
+struct RiderChatPlayerBar: View {
+    @ObservedObject var playback: RiderChatPlayer
+    @State private var seek: Double?
+    private let speeds = [1.0, 1.25, 1.5, 1.75, 2.0]
+
+    var body: some View {
+        if let track = playback.track {
+            VStack(spacing: 1) {
+                HStack(spacing: 12) {
+                    Button { playback.toggle() } label: {
+                        Image(systemName: playback.playing ? "pause.fill" : "play.fill").frame(width: 36, height: 36)
+                    }.accessibilityLabel(playback.playing ? "Пауза" : "Воспроизвести")
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(track.title).font(.subheadline.weight(.semibold)).lineLimit(1)
+                        Text(track.circle ? "Видеосообщение" : "Голосовое сообщение")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 3)
+                    Menu {
+                        ForEach(speeds, id: \.self) { speed in
+                            Button {
+                                playback.setSpeed(speed)
+                            } label: {
+                                if playback.speed == speed { Label(label(speed), systemImage: "checkmark") }
+                                else { Text(label(speed)) }
+                            }
+                        }
+                    } label: {
+                        Text(label(playback.speed)).font(.subheadline.bold().monospacedDigit())
+                            .padding(.horizontal, 6).frame(height: 36)
+                    }
+                    .accessibilityLabel("Скорость воспроизведения \(label(playback.speed))")
+                    Button { playback.close() } label: {
+                        Image(systemName: "xmark").font(.subheadline.bold()).frame(width: 36, height: 36)
+                    }.accessibilityLabel("Закрыть проигрыватель")
+                }
+                HStack(spacing: 8) {
+                    Text(RiderChatPlayer.time(seek ?? playback.position))
+                    Slider(value: Binding(get: { min(max(0.1, playback.duration), seek ?? playback.position) },
+                                          set: { seek = $0 }),
+                           in: 0...max(0.1, playback.duration), onEditingChanged: { editing in
+                        if !editing, let seek { playback.seek(seek); self.seek = nil }
+                    }).disabled(playback.duration <= 0)
+                    .accessibilityLabel("Перемотка")
+                    Text(RiderChatPlayer.time(playback.duration))
+                }.font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 10).padding(.vertical, 4)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+            .overlay { RoundedRectangle(cornerRadius: 16).strokeBorder(RiderTheme.border).allowsHitTesting(false) }
+            .padding(.horizontal, 10)
+            .task(id: track.id) {
+                seek = nil
+                while !Task.isCancelled && playback.track?.id == track.id {
+                    playback.updateProgress()
+                    do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
+                }
+            }
         }
+    }
+
+    private func label(_ rate: Double) -> String {
+        rate.formatted(.number.precision(.fractionLength(0...2))) + "×"
+    }
+}
+
+struct RiderChatPlayback: View {
+    let url: URL
+    let circle: Bool
+    let message: UUID
+    let title: String
+    @ObservedObject var playback: RiderChatPlayer
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var poster: UIImage?
+    @State private var scrub: Double?
+
+    private var active: Bool { playback.track?.id == message }
+    private var progress: Double {
+        playback.duration > 0 ? min(1, (scrub ?? playback.position) / playback.duration) : 0
+    }
+
+    var body: some View {
+        Group {
+            if circle {
+                ZStack {
+                    Circle().fill(.black)
+                    if active, let player = playback.player { RiderVideoLayer(player: player) }
+                    else if let poster { Image(uiImage: poster).resizable().scaledToFill() }
+                    if active { progressRing }
+                    if !active || !playback.playing {
+                        Button(action: play) {
+                            Image(systemName: "play.fill").font(.headline)
+                                .padding(14).background(.black.opacity(0.64), in: Circle()).foregroundStyle(.white)
+                        }.buttonStyle(.plain).accessibilityLabel("Смотреть кружочек")
+                    }
+                }
+                .frame(width: active ? 270 : 144, height: active ? 270 : 144)
+                .clipShape(Circle())
+                .overlay { Circle().strokeBorder(RiderTheme.accent.opacity(0.78), lineWidth: 2).allowsHitTesting(false) }
+                .animation(reduceMotion ? nil : .easeInOut(duration: 0.24), value: active)
+                .task(id: url) { await loadCover() }
+            } else {
+                Button(action: play) {
+                    HStack(spacing: 8) {
+                        Image(systemName: active && playback.playing ? "pause.circle.fill" : "play.circle.fill")
+                            .font(.title2)
+                        Text("Голосовое").font(.subheadline.weight(.semibold))
+                        if active { Text(RiderChatPlayer.time(playback.position)).font(.caption.monospacedDigit()) }
+                    }.foregroundStyle(RiderTheme.accent)
+                }.buttonStyle(.plain)
+            }
+        }
+    }
+
+    private var progressRing: some View {
+        GeometryReader { area in
+            let center = CGPoint(x: area.size.width / 2, y: area.size.height / 2)
+            ZStack {
+                Circle().strokeBorder(.white.opacity(0.32), lineWidth: 3).padding(8)
+                Circle().trim(from: 0, to: progress).stroke(.white, style: StrokeStyle(lineWidth: 4, lineCap: .round))
+                    .rotationEffect(.degrees(-90)).padding(9)
+                Circle().strokeBorder(.clear, lineWidth: 26)
+                    .contentShape(RiderScrubRing(), eoFill: true)
+                    .gesture(DragGesture(minimumDistance: 0).onChanged { value in
+                        scrub = seconds(at: value.location, around: center)
+                    }.onEnded { value in
+                        playback.seek(seconds(at: value.location, around: center))
+                        scrub = nil
+                    })
+                    .accessibilityHidden(true)
+            }
+        }
+    }
+
+    private func seconds(at point: CGPoint, around center: CGPoint) -> Double {
+        let angle = atan2(Double(point.x - center.x), Double(center.y - point.y))
+        let fraction = (angle < 0 ? angle + 2 * .pi : angle) / (2 * .pi)
+        return playback.duration * fraction
+    }
+
+    private func play() {
+        playback.select(.init(id: message, url: url, title: title, circle: circle))
+    }
+
+    @MainActor private func loadCover() async {
+        let generator = AVAssetImageGenerator(asset: AVURLAsset(url: url))
+        generator.appliesPreferredTrackTransform = true
+        generator.maximumSize = CGSize(width: 300, height: 300)
+        if let frame = try? await generator.image(at: .zero), !Task.isCancelled { poster = UIImage(cgImage: frame.image) }
+    }
+}
+
+private struct RiderScrubRing: Shape {
+    func path(in rect: CGRect) -> Path {
+        var path = Path(ellipseIn: rect)
+        path.addEllipse(in: rect.insetBy(dx: 28, dy: 28))
+        return path
+    }
+}
+
+private struct RiderVideoLayer: UIViewRepresentable {
+    let player: AVPlayer
+    final class Host: UIView {
+        override class var layerClass: AnyClass { AVPlayerLayer.self }
+    }
+    func makeUIView(context: Context) -> Host { Host() }
+    func updateUIView(_ view: Host, context: Context) {
+        guard let layer = view.layer as? AVPlayerLayer else { return }
+        layer.player = player
+        layer.videoGravity = .resizeAspectFill
+    }
+}
+
+struct RiderChatBackdrop: View {
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
+        Canvas { context, size in
+            let motifs = ["kite", "board", "wind", "palm.tree", "sun.horizon", "water.waves", "umbrella.beach", "location.north.line"]
+            let columns = max(3, Int(size.width / 70))
+            let step = size.width / Double(columns)
+            guard step > 0 else { return }
+            for row in 0..<(Int(size.height / 72) + 2) {
+                for column in -1...columns {
+                    var tile = context
+                    let index = (row * 5 + column + motifs.count) % motifs.count
+                    tile.translateBy(x: Double(column) * step + step * (row.isMultiple(of: 2) ? 0.43 : 0.89),
+                                     y: Double(row) * 72 + 20)
+                    tile.rotate(by: .degrees(Double((row * 17 + (column + 1) * 11) % 42) - 21))
+                    tile.opacity = scheme == .dark ? 0.20 : 0.23
+                    let motif = motifs[index]
+                    if motif == "kite" || motif == "board" {
+                        let glyph = EquipmentGlyph(kind: motif == "kite" ? .kite : .board)
+                        tile.stroke(glyph.path(in: CGRect(x: -15, y: -15, width: 30, height: 30)),
+                                    with: .color(RiderTheme.accent), style: StrokeStyle(lineWidth: 1.4, lineCap: .round, lineJoin: .round))
+                    } else {
+                        tile.draw(Text(Image(systemName: motif)).font(.system(size: 26, weight: .ultraLight))
+                            .foregroundColor(RiderTheme.accent), at: .zero)
+                    }
+                }
+            }
+        }.background(RiderTheme.canvas)
+        .accessibilityHidden(true).allowsHitTesting(false)
     }
 }

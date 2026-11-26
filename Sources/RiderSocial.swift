@@ -93,6 +93,7 @@ struct RiderReaction: Decodable {
 }
 
 struct RiderActivity: Decodable {
+    let id: String?
     let kind: String
     let person: RiderPerson
     let postID: UUID?
@@ -602,6 +603,19 @@ struct RiderFollowStyle: ButtonStyle {
     }
 }
 
+private struct RiderFollowAppearance<Content: View>: View {
+    let following: Bool
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        content().font(.subheadline.weight(.semibold))
+            .foregroundStyle(.white).padding(.horizontal, 13).frame(minHeight: 44)
+            .background(following ? Color(red: 0.12, green: 0.24, blue: 0.29) : Color(red: 0, green: 0.35, blue: 0.37), in: Capsule())
+            .overlay { Capsule().strokeBorder(.white.opacity(0.28)).allowsHitTesting(false) }
+            .contentShape(Capsule())
+    }
+}
+
 struct RiderName: View {
     let name: String
     let premium: Bool?
@@ -824,6 +838,17 @@ struct ImportedRiderClip: Transferable {
     }
 }
 
+private struct ImportedRiderPhoto: Transferable {
+    let url: URL
+    static var transferRepresentation: some TransferRepresentation {
+        FileRepresentation(importedContentType: .image) { file in
+            let copy = RiderMediaEncoding.temporary(file.file.pathExtension.isEmpty ? "img" : file.file.pathExtension)
+            try FileManager.default.copyItem(at: file.file, to: copy)
+            return Self(url: copy)
+        }
+    }
+}
+
 struct RiderPostComposer: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var social: RiderSocialStore
@@ -831,6 +856,7 @@ struct RiderPostComposer: View {
     @ObservedObject var recorder: SessionRecorder
     @State private var equipmentID: UUID?
     @State private var picked: PhotosPickerItem?
+    @State private var choosingMedia = false
     @State private var photo: Data?
     @State private var video: Data?
     @State private var section: RiderPublicationSection
@@ -875,13 +901,23 @@ struct RiderPostComposer: View {
                 if photo == nil && section == .gallery && !trimmed.isEmpty {
                     Text("Пост с одним текстом появится в «Заметках».").font(.footnote).foregroundStyle(.secondary)
                 }
-                PhotosPicker(selection: $picked, matching: .any(of: [.images, .videos])) {
+                Button {
+                    captionFocused = false
+                    choosingMedia = true
+                } label: {
                     Label(photo == nil ? "Добавить фото или видео" : "Заменить вложение", systemImage: "photo.on.rectangle")
-                }.onChange(of: picked) { _, _ in captionFocused = false }
+                }.disabled(loading)
                 if loading { ProgressView("Готовим вложение") }
                 if let photo {
-                    RiderPostSquare(post: RiderPost(id: postID, createdAt: 0, caption: "", location: nil,
-                                                    photo: photo, hasVideo: video != nil))
+                    if let preview = UIImage(data: photo) {
+                        Image(uiImage: preview).resizable().scaledToFit().frame(maxHeight: 230)
+                            .frame(maxWidth: .infinity)
+                            .overlay(alignment: .topTrailing) {
+                                if video != nil {
+                                    Image(systemName: "play.rectangle.fill").padding(8)
+                                }
+                            }
+                    }
                     Button("Убрать вложение", role: .destructive) { picked = nil; self.photo = nil; video = nil; loading = false }
                         .disabled(loading)
                 }
@@ -923,6 +959,7 @@ struct RiderPostComposer: View {
                 }
             }
         }
+        .photosPicker(isPresented: $choosingMedia, selection: $picked, matching: .any(of: [.images, .videos]))
         .interactiveDismissDisabled(sending)
         .task(id: picked) { await loadMedia() }
     }
@@ -943,10 +980,16 @@ struct RiderPostComposer: View {
                 photo = cover
                 video = data
             } else {
-                guard let raw = try await picked.loadTransferable(type: Data.self), let image = Self.postJPEG(raw) else {
+                guard let item = try await picked.loadTransferable(type: ImportedRiderPhoto.self) else {
                     throw CocoaError(.fileReadCorruptFile)
                 }
+                defer { try? FileManager.default.removeItem(at: item.url) }
+                let image = await Task.detached(priority: .userInitiated) {
+                    let source = CGImageSourceCreateWithURL(item.url as CFURL, nil)
+                    return Self.postJPEG(source)
+                }.value
                 guard !Task.isCancelled else { return }
+                guard let image else { throw CocoaError(.fileReadCorruptFile) }
                 photo = image
                 video = nil
             }
@@ -955,9 +998,12 @@ struct RiderPostComposer: View {
         }
     }
 
-    static func postJPEG(_ data: Data, forChat: Bool = false) -> Data? {
-        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
-              let thumb = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+    nonisolated static func postJPEG(_ data: Data, forChat: Bool = false) -> Data? {
+        postJPEG(CGImageSourceCreateWithData(data as CFData, nil), forChat: forChat)
+    }
+
+    nonisolated private static func postJPEG(_ source: CGImageSource?, forChat: Bool = false) -> Data? {
+        guard let source, let thumb = CGImageSourceCreateThumbnailAtIndex(source, 0, [
                 kCGImageSourceCreateThumbnailFromImageAlways: true,
                 kCGImageSourceCreateThumbnailWithTransform: true,
                 kCGImageSourceThumbnailMaxPixelSize: forChat ? 3200 : 1080
@@ -1179,13 +1225,25 @@ struct RiderFeedCard: View {
                 Label(location.name, systemImage: "mappin").font(.caption).foregroundStyle(.secondary)
             }
 
+            if post.publicationSection == .journal { caption }
             HStack(spacing: 8) {
                 actions
                 Spacer(minLength: 0)
                 RiderPostEquipmentTag(equipment: post.equipment)
             }
             if reaction.total > 0 { reactionSummary }
-            if !post.caption.isEmpty {
+            if post.publicationSection == .gallery { caption }
+            if onComments == nil, let preview = commentSummary?.preview {
+                RiderLinkedText(text: preview.text, author: riderHandle(preview.username, or: preview.author), authorID: preview.username)
+                    .font(.caption).lineLimit(2)
+            }
+            RiderPostDate(date: post.date)
+            if let error { Text(error).font(.footnote).foregroundStyle(.secondary) }
+        }
+    }
+
+    @ViewBuilder private var caption: some View {
+        if !post.caption.isEmpty {
                 RiderLinkedText(text: post.caption,
                     author: riderHandle(post.sourceUsername ?? (post.sourceID == nil ? username : nil), or: post.sourceAuthor ?? author),
                     authorID: post.sourceID == nil ? (entry?.authorID ?? username) : post.sourceUsername)
@@ -1193,16 +1251,6 @@ struct RiderFeedCard: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.top, 2)
             }
-            if onComments == nil, let preview = commentSummary?.preview {
-                RiderLinkedText(text: preview.text, author: riderHandle(preview.username, or: preview.author), authorID: preview.username)
-                    .font(.caption).lineLimit(2)
-            }
-            if !post.showsMedia && onComments == nil {
-                NavigationLink("Открыть заметку") { detail() }.font(.caption)
-            }
-            RiderPostDate(date: post.date)
-            if let error { Text(error).font(.footnote).foregroundStyle(.secondary) }
-        }
     }
 
     private func openSentConversation() {
@@ -1229,13 +1277,15 @@ struct RiderFeedCard: View {
             if let id = entry?.authorID {
                 NavigationLink { RiderPublicProfileView(id: id) } label: {
                     RiderPostHeader(author: author, username: username, avatar: avatar, premium: entry?.premium ?? (editable ? social.myPremium : nil))
-                }.buttonStyle(.plain)
+                }.buttonStyle(.borderless)
             } else {
                 RiderPostHeader(author: author, username: username, avatar: avatar, premium: entry?.premium ?? (editable ? social.myPremium : nil))
             }
             if let target = entry?.authorID, entry?.mine != true {
-                Button(following ? "Подписан" : "Подписаться") { toggleFollow(target) }
-                    .buttonStyle(RiderFollowStyle(following: following))
+                Button { toggleFollow(target) } label: {
+                    RiderFollowAppearance(following: following) { Text(following ? "Подписан" : "Подписаться") }
+                }
+                    .buttonStyle(.borderless)
                     .disabled(changingFollow)
                     .accessibilityAddTraits(following ? .isSelected : [])
             }
@@ -1587,12 +1637,24 @@ struct RiderNotificationsView: View {
     @State private var items: [RiderActivity]?
     @ObservedObject private var sos = RiderSOSService.shared
     @State private var failed = false
+    @State private var changing = false
+    @State private var clearPrompt = false
+    @State private var mutationError: String?
+    @State private var allowsDrill = false
+    @State private var sendingDrill = false
 
     var body: some View {
         List {
             Button { sos.open() } label: {
                 Label("SOS рядом", systemImage: "dot.radiowaves.left.and.right")
             }
+            if allowsDrill {
+                Button {
+                    Task { await drill() }
+                } label: { Label("Отправить учебный SOS себе", systemImage: "antenna.radiowaves.left.and.right") }
+                .disabled(sendingDrill)
+            }
+            if let mutationError { Text(mutationError).font(.footnote).foregroundStyle(.secondary) }
             if RiderCommunity.endpoint == nil {
                 ContentUnavailableView("Уведомления", systemImage: "bell",
                                        description: Text("Уведомления появятся после подключения сервера Rider."))
@@ -1611,6 +1673,13 @@ struct RiderNotificationsView: View {
                             } label: { Text("К публикации").font(.caption) }.buttonStyle(.borderless)
                         }
                     }
+                    .swipeActions(edge: .trailing) {
+                        if let id = item.id {
+                            Button(role: .destructive) { Task { await remove(id) } } label: {
+                                Label("Удалить", systemImage: "trash")
+                            }.disabled(changing)
+                        }
+                    }
                 }
             } else if failed {
                 Button("Повторить загрузку") { Task { await load() } }
@@ -1622,7 +1691,19 @@ struct RiderNotificationsView: View {
         .background(RiderTheme.canvas)
         .navigationTitle("Уведомления")
         .navigationBarTitleDisplayMode(.inline)
-        .task { await load() }
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("Очистить все") { clearPrompt = true }
+                    .disabled(changing || items?.isEmpty != false)
+            }
+        }
+        .confirmationDialog("Очистить все уведомления?", isPresented: $clearPrompt, titleVisibility: .visible) {
+            Button("Очистить все", role: .destructive) { Task { await remove(nil) } }
+        }
+        .task {
+            allowsDrill = await sos.allowsDrill()
+            await load()
+        }
         .onChange(of: social.unread.activity) { _, count in if count > 0 { Task { await load() } } }
         .refreshable { await load() }
     }
@@ -1636,6 +1717,35 @@ struct RiderNotificationsView: View {
             }
         }
         .padding(.vertical, 4)
+    }
+
+    @MainActor private func drill() async {
+        guard !sendingDrill else { return }
+        sendingDrill = true
+        defer { sendingDrill = false }
+        do {
+            try await sos.requestDrill()
+            NotificationCenter.default.post(name: RiderSOSService.drillNotification, object: nil)
+        } catch { mutationError = "Учебный сигнал не отправился." }
+    }
+
+    @MainActor private func remove(_ id: String?) async {
+        guard !changing else { return }
+        changing = true
+        mutationError = nil
+        defer { changing = false }
+        do {
+            let counts: RiderUnread
+            if let id {
+                counts = try await RiderCommunity.decode("activity/hide", method: "PUT", body: JSONEncoder().encode(["id":id]))
+                items?.removeAll { $0.id == id }
+            } else {
+                counts = try await RiderCommunity.decode("activity", method: "DELETE")
+                items = []
+            }
+            social.acceptUnread(counts)
+            await load()
+        } catch { mutationError = "Не удалось удалить уведомление. Попробуй ещё раз." }
     }
 
     @MainActor private func load() async {
@@ -1756,6 +1866,7 @@ struct RiderThreadView: View {
     @EnvironmentObject private var social: RiderSocialStore
     @Environment(\.scenePhase) private var phase
     let peer: RiderPerson
+    @StateObject private var playback = RiderChatPlayer()
     @State private var conversation: RiderPerson?
     @State private var messages: [RiderMessage] = []
     @State private var messageRevision = 0
@@ -1802,6 +1913,7 @@ struct RiderThreadView: View {
             }
             .refreshable { await load() }
         }
+        .safeAreaInset(edge: .top, spacing: 0) { RiderChatPlayerBar(playback: playback) }
         .safeAreaInset(edge: .bottom) { composer }
         .photosPicker(isPresented: $pickingPhoto, selection: $photo, matching: .images)
         .task(id: photo) { await attachPhoto() }
@@ -1809,7 +1921,7 @@ struct RiderThreadView: View {
             RiderCameraPhoto(selected: attachCapturedPhoto)
                 .ignoresSafeArea()
         }
-        .background(RiderTheme.canvas)
+        .background { RiderChatBackdrop() }
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.visible, for: .navigationBar)
@@ -1825,7 +1937,7 @@ struct RiderThreadView: View {
         }
         .navigationDestination(item: $conversation) { RiderThreadView(peer: $0) }
         .onAppear { visible = true }
-        .onDisappear { visible = false }
+        .onDisappear { visible = false; playback.close() }
         .task(id: visible && phase == .active) {
             guard visible, phase == .active else { return }
             while !Task.isCancelled {
@@ -1900,7 +2012,8 @@ struct RiderThreadView: View {
                     .accessibilityIdentifier(post.uuidString)
             }
             if let attachment = message.attachment {
-                RiderChatAttachmentView(attachment: attachment, message: message.id, peer: peer.id)
+                RiderChatAttachmentView(attachment: attachment, message: message.id, peer: peer.id,
+                                        author: message.mine ? "Ты" : peer.name, playback: playback)
             }
             if !message.text.isEmpty { RiderLinkedText(text: message.text) }
             HStack(spacing: 4) {
@@ -1999,6 +2112,8 @@ private struct RiderChatAttachmentView: View {
     let attachment: RiderChatAttachment
     let message: UUID
     let peer: String
+    let author: String
+    let playback: RiderChatPlayer
     @State private var fullScreenPhoto: URL?
     @State private var shareFile: RiderChatFile?
     @State private var preview: UIImage?
@@ -2014,7 +2129,7 @@ private struct RiderChatAttachmentView: View {
                         .clipShape(RoundedRectangle(cornerRadius: 12))
                 }.buttonStyle(.plain).accessibilityLabel("Открыть фото во весь экран")
             } else if let shareFile, attachment.isVoice || attachment.isCircle {
-                RiderChatPlayback(url: shareFile.url, circle: attachment.isCircle)
+                RiderChatPlayback(url: shareFile.url, circle: attachment.isCircle, message: message, title: author, playback: playback)
             } else if let shareFile {
                 ShareLink(item: shareFile, preview: SharePreview(attachment.filename)) { label("square.and.arrow.up") }
             } else if attachment.showsPhoto && !failed {

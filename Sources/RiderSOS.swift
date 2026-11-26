@@ -86,12 +86,14 @@ final class RiderSOSAppDelegate: NSObject, UIApplicationDelegate, UNUserNotifica
         let location: RiderSOSFix?
         let responders: [Responder]?
         let createdAt: TimeInterval?
+        let closed: Bool?
 
         var active: Bool {
-            createdAt.map { Date().timeIntervalSince1970 - $0 < 900 } ?? true
+            closed != true && (createdAt.map { Date().timeIntervalSince1970 - $0 < 900 } ?? true)
         }
 
         var status: String {
+            if closed == true { return "Сигнал завершён" }
             if !active { return "Время оповещения истекло" }
             if recipients == 0 { return "Сигнал принят. Нет доступных райдеров поблизости." }
             if pending > 0 { return "Сигнал принят сервером · адресатов \(recipients)" }
@@ -262,6 +264,23 @@ final class RiderSOSAppDelegate: NSObject, UIApplicationDelegate, UNUserNotifica
         return try await RiderCommunity.decode("sos", method: "POST", body: JSONEncoder().encode(payload))
     }
 
+    static let drillNotification = Notification.Name("rider.sos.drill")
+
+    func allowsDrill() async -> Bool {
+        guard RiderCommunity.usesLANTrust else { return false }
+        let result: [String: Bool]? = try? await RiderCommunity.decode("people/demo/status")
+        return result?["enabled"] == true
+    }
+
+    func requestDrill() async throws {
+        let result: [String: Bool] = try await RiderCommunity.decode("people/demo/sos", method: "POST", body: Data("{}".utf8))
+        guard result["drill"] == true else { throw URLError(.badServerResponse) }
+    }
+
+    func close(_ id: UUID) async throws -> Receipt {
+        try await RiderCommunity.decode("sos/\(id.uuidString.lowercased())/close", method: "PUT")
+    }
+
     func receipt(_ id: UUID) async throws -> Receipt {
         try await RiderCommunity.decode("sos/\(id.uuidString.lowercased())/receipt")
     }
@@ -288,7 +307,7 @@ struct RiderSOSReadiness: View {
         VStack(alignment: .leading, spacing: 7) {
             Label("SOS рядом", systemImage: "dot.radiowaves.left.and.right").font(.headline)
             if RiderCommunity.usesLANTrust {
-                Text("В домашнем тесте можно посмотреть радар. Для уведомлений SOS нужна отдельная настройка Apple Push.")
+                Text("Учебный сигнал можно отправить себе с аккаунта, включённого в домашний тест.")
             } else if RiderCommunity.endpoint == nil {
                 Text("Приём появится после подключения сервера Rider.")
             } else if !service.available {
@@ -322,6 +341,8 @@ struct RiderSOSControl: View {
     @State private var feedback: String?
     @State private var receipt: RiderSOSService.Receipt?
     @State private var incidentID = UUID()
+    @State private var allowsDrill = false
+    @State private var drillRequested = false
 
     private var equipment: String? {
         guard let setup = session.setup else { return nil }
@@ -350,7 +371,7 @@ struct RiderSOSControl: View {
                             .onEnded { value in
                                 defer { started = nil }
                                 guard value.translation.width >= travel * 0.95 else { return }
-                                if let started, value.time.timeIntervalSince(started) >= 2 {
+                                if receipt?.active == true || started.map({ value.time.timeIntervalSince($0) >= 2 }) == true {
                                     showingRadar = true
                                     feedback = nil
                                 } else if receipt?.active != true {
@@ -365,7 +386,6 @@ struct RiderSOSControl: View {
             .accessibilityLabel("Открыть радар SOS")
             .accessibilityAddTraits(.isButton)
             .accessibilityAction { showingRadar = true }
-            .onChange(of: offset) { _, value in if value == 0 { started = nil } }
 
             if receipt?.active == true {
                 Button("Открыть радар SOS") { showingRadar = true }
@@ -374,14 +394,26 @@ struct RiderSOSControl: View {
                 Text(feedback).multilineTextAlignment(.center).font(.caption2.weight(.semibold))
             }
         }
-        .sheet(isPresented: $showingRadar) {
+        .task { allowsDrill = await RiderSOSService.shared.allowsDrill() }
+        .sheet(isPresented: $showingRadar, onDismiss: {
+            started = nil
+            if drillRequested {
+                drillRequested = false
+                NotificationCenter.default.post(name: RiderSOSService.drillNotification, object: nil)
+            }
+        }) {
             RiderSOSRadarScreen(fix: receipt?.location ?? RiderSOSFix(recorder.usableFix),
                                 receipt: receipt, sending: sending, message: feedback,
                                 send: RiderCommunity.endpoint != nil && !RiderCommunity.usesLANTrust ? { Task { await send() } } : nil,
+                                drill: allowsDrill ? { Task { await sendDrill() } } : nil,
+                                closeSignal: receipt?.active == true ? { Task { await closeSignal() } } : nil,
                                 enableReplies: RiderCommunity.endpoint != nil && !RiderCommunity.usesLANTrust ? {
                 Task { await RiderSOSService.shared.refreshAuthorization(prompt: true) }
             } : nil)
-            .onAppear { RiderSOSService.shared.showRadar(true) }
+            .onAppear {
+                RiderSOSService.shared.showRadar(true)
+                recorder.refreshSOSFix()
+            }
             .onDisappear { RiderSOSService.shared.showRadar(false) }
             .task(id: receipt?.id) { await followResponses() }
         }
@@ -401,6 +433,28 @@ struct RiderSOSControl: View {
                 if !Task.isCancelled, receipt?.active == true { feedback = "Связь прервалась. Проверяем отклики снова." }
             }
         }
+    }
+
+    @MainActor private func sendDrill() async {
+        guard !sending else { return }
+        sending = true
+        defer { sending = false }
+        do {
+            try await RiderSOSService.shared.requestDrill()
+            drillRequested = true
+            showingRadar = false
+        } catch { feedback = "Сервер не подтвердил учебный сигнал." }
+    }
+
+    @MainActor private func closeSignal() async {
+        guard !sending, let id = receipt?.id else { return }
+        sending = true
+        defer { sending = false }
+        do {
+            _ = try await RiderSOSService.shared.close(id)
+            receipt = nil
+            feedback = "Сигнал завершён. Радар готов к новой отправке."
+        } catch { feedback = "Не удалось завершить сигнал. Проверь связь." }
     }
 
     @MainActor private func send() async {
@@ -434,6 +488,9 @@ private struct RiderSOSRadarScreen: View {
     let sending: Bool
     let message: String?
     let send: (() -> Void)?
+    var drill: (() -> Void)? = nil
+    var closeSignal: (() -> Void)? = nil
+    @State private var confirmClose = false
     let enableReplies: (() -> Void)?
 
     var body: some View {
@@ -452,7 +509,7 @@ private struct RiderSOSRadarScreen: View {
                             Text("Имя, комплект и точка GPS будут доступны райдерам в зоне оповещения.")
                                 .font(.subheadline).foregroundStyle(.secondary)
                         } else if RiderCommunity.usesLANTrust {
-                            Text("Домашний режим · просмотр радара").font(.title3.bold())
+                            Text(drill == nil ? "Домашний режим · просмотр радара" : "Домашний режим · учебный SOS").font(.title3.bold())
                         } else if RiderCommunity.endpoint == nil {
                             Text("Сервер Rider ещё не подключён.").font(.title3.bold())
                         } else if message == nil {
@@ -468,6 +525,16 @@ private struct RiderSOSRadarScreen: View {
                         .buttonStyle(.borderedProminent).controlSize(.large).tint(.red)
                         .disabled(sending || fix == nil)
                     }
+                    if let drill {
+                        Button(action: drill) {
+                            Label("Отправить учебный SOS себе", systemImage: "dot.radiowaves.left.and.right")
+                                .frame(maxWidth: .infinity)
+                        }.buttonStyle(.borderedProminent).tint(.orange).disabled(sending)
+                    }
+                    if closeSignal != nil {
+                        Button("Завершить SOS", role: .destructive) { confirmClose = true }
+                            .buttonStyle(.bordered).disabled(sending)
+                    }
                     if let enableReplies, !service.available, !sending {
                         Button("Разрешить push для откликов", action: enableReplies)
                             .font(.subheadline).buttonStyle(.borderless)
@@ -478,6 +545,9 @@ private struct RiderSOSRadarScreen: View {
             .navigationTitle("Радар SOS")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Закрыть") { dismiss() } } }
+            .confirmationDialog("Завершить активный сигнал SOS?", isPresented: $confirmClose, titleVisibility: .visible) {
+                Button("Завершить SOS", role: .destructive) { closeSignal?() }
+            }
         }
     }
 }
@@ -582,11 +652,13 @@ private struct RiderSOSResponseSummary: View {
 struct RiderSOSOutgoing: View {
     let id: UUID
     @State private var current: RiderSOSService.Receipt?
+    @State private var closing = false
     @State private var message: String?
 
     var body: some View {
-        RiderSOSRadarScreen(fix: current?.location, receipt: current, sending: false,
-                            message: message, send: nil, enableReplies: nil)
+        RiderSOSRadarScreen(fix: current?.location, receipt: current, sending: closing,
+                            message: message, send: nil,
+                            closeSignal: current?.active == true ? { Task { await close() } } : nil, enableReplies: nil)
             .task(id: id) {
                 for _ in 0..<225 {
                     do {
@@ -601,6 +673,13 @@ struct RiderSOSOutgoing: View {
                 }
             }
     }
+    @MainActor private func close() async {
+        closing = true
+        defer { closing = false }
+        do { current = try await RiderSOSService.shared.close(id); message = nil }
+        catch { message = "Не удалось завершить сигнал." }
+    }
+
 }
 
 struct RiderSOSInbox: View {

@@ -146,7 +146,7 @@ struct RiderSocialAlerts: ViewModifier {
             VStack(spacing: 18) {
                 Image(systemName: "antenna.radiowaves.left.and.right").font(.system(size: 48)).foregroundStyle(.orange)
                 Text("Учебный SOS").font(.largeTitle.bold())
-                Text(drillAccepted ? "Отклик принят в демо." : "Демо-райдер подал учебный сигнал рядом. Проверь, как выглядит отклик.")
+                Text(drillAccepted ? "Отклик принят в демо." : "Получен учебный сигнал SOS. Можно проверить окно оповещения и отклик.")
                     .multilineTextAlignment(.center)
                 if !drillAccepted {
                     Button("Отозваться") { drillAccepted = true }.buttonStyle(.borderedProminent)
@@ -157,6 +157,12 @@ struct RiderSocialAlerts: ViewModifier {
         }
         .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)) { _ in
             revision = RiderAlertKind.allCases.reduce(0) { $0 * 2 + ($1.enabled ? 1 : 0) }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: RiderSOSService.drillNotification)) { _ in
+            drillAccepted = false
+            showDrill = true
+            if RiderAlertKind.sound.enabled { AudioServicesPlaySystemSound(1007) }
+            if RiderAlertKind.vibrate.enabled { UINotificationFeedbackGenerator().notificationOccurred(.warning) }
         }
         .onReceive(NotificationCenter.default.publisher(for: Notification.Name("rider.social.open"))) { note in
             opened = note.object as? String; showDestination = true
