@@ -226,8 +226,10 @@ CREATE INDEX IF NOT EXISTS login_devices_owner ON login_devices(owner);
 
 
 def login_methods():
+    smtp_configured = bool(os.environ.get("RIDER_SMTP_HOST") and os.environ.get("RIDER_SMTP_FROM"))
+    smtp_auth_ready = not os.environ.get("RIDER_SMTP_USER") or bool(os.environ.get("RIDER_SMTP_PASSWORD"))
     return {"phone": bool(os.environ.get("RIDER_SMS_RU_API_ID")),
-            "email": bool(os.environ.get("RIDER_SMTP_HOST") and os.environ.get("RIDER_SMTP_FROM"))}
+            "email": smtp_configured and smtp_auth_ready}
 
 
 def deliver_email(address, code):
