@@ -248,6 +248,58 @@ class CommunityTests(unittest.TestCase):
         self.now += 301
         self.call("POST", "/people/phone/verify", self.me, {"code":sms.call_args.args[1]}, expect=403)
 
+    def test_account_registration_and_recovery_by_phone_or_email(self):
+        self.enterContext(patch.dict(os.environ, {"RIDER_SMS_RU_API_ID":"test", "RIDER_SMTP_HOST":"localhost",
+                                                  "RIDER_SMTP_FROM":"rider@example.test"}))
+        sms = self.enterContext(patch.object(rider_discovery, "deliver"))
+        email = self.enterContext(patch.object(rider_discovery, "deliver_email"))
+        profile = dict(name="Rider", username="persistent", totals=self.totals)
+        self.call("PUT", "/registration", self.me, profile, expect=403)
+        self.assertEqual(self.call("GET", "/account", self.me)["methods"], {"phone":True,"email":True})
+
+        def request(device, kind, contact, sender):
+            self.call("POST", "/account/start", device, {"kind":kind, "contact":contact})
+            return sender.call_args.args[1]
+
+        def verify(device, code, expect=200):
+            return self.call("POST", "/account/verify", device, {"code":code}, expect=expect)
+
+        number = "+12025550101"
+        address = "rider@example.test"
+        code = request(self.me, "phone", number, sms)
+        verify(self.me, str((int(code)+1)%1_000_000).zfill(6), expect=403)
+        verify(self.me, code)
+        verify(self.me, code, expect=403)
+        first = self.call("PUT", "/registration", self.me, profile)["mine"]["id"]
+        verify(self.me, request(self.me, "email", "Rider@Example.Test", email))
+        self.assertEqual(self.call("GET", "/account", self.me)["linked"], ["email","phone"])
+        self.publish(self.me, "renamed")
+
+        self.now += 61
+        verify(self.audience, request(self.audience, "email", address, email))
+        self.assertFalse(self.call("GET", "/registration", self.audience)["required"])
+        self.assertEqual(self.call("GET", "/me", self.audience)["mine"]["id"], first)
+        self.assertEqual(self.call("GET", "/registration", self.audience)["username"], "renamed")
+
+        third = "c"*72
+        verify(third, request(third, "phone", number, sms))
+        self.assertEqual(self.call("GET", "/me", third)["mine"]["id"], first)
+        separate = "d"*72
+        self.publish(separate, "separate")
+        self.now += 61
+        verify(separate, request(separate, "email", address, email), expect=409)
+        self.assertNotEqual(self.call("GET", "/me", separate)["mine"]["id"], first)
+        late = "e"*72
+        code = request(late, "phone", number, sms)
+        self.now += 301
+        verify(late, code, expect=403)
+
+        fresh = "f"*72
+        verify(fresh, request(fresh, "email", "new@example.test", email))
+        result = self.call("PUT", "/registration", fresh, dict(profile, username="email_first"))
+        self.assertNotEqual(result["mine"]["id"], first)
+        self.assertEqual(self.call("GET", "/account", fresh)["linked"], ["email"])
+
     def test_demo_alert_delivery_and_preferences(self):
         recipient = self.publish(self.me, "recipient")["mine"]["id"]
         alpha = self.publish(self.audience, "alpha")["mine"]["id"]

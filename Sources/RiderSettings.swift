@@ -258,6 +258,149 @@ struct RiderSocialAlerts: ViewModifier {
 }
 
 
+private enum RiderLoginMethod: String, CaseIterable, Identifiable {
+    case phone, email
+
+    var id: Self { self }
+    var title: String { self == .phone ? "Телефон" : "Почта" }
+    var placeholder: String { self == .phone ? "+7 …" : "name@example.com" }
+}
+
+struct RiderAccountAccessSettings: View {
+    var body: some View {
+        Form { RiderAccountVerification { _ in } }
+            .navigationTitle("Вход и восстановление")
+            .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private struct RiderAccountVerification: View {
+    let verified: (RiderCommunity.Registration) -> Void
+
+    private struct Availability: Decodable {
+        let methods: [String: Bool]
+        let linked: [String]
+    }
+
+    @State private var availability: Availability?
+    @State private var method = RiderLoginMethod.phone
+    @State private var contact = ""
+    @State private var code = ""
+    @State private var awaitingCode = false
+    @State private var working = false
+    @State private var notice: String?
+
+    var body: some View {
+        Section {
+            Picker("Способ входа", selection: $method) {
+                ForEach(RiderLoginMethod.allCases) { option in
+                    Text(option.title).tag(option)
+                }
+            }
+            .pickerStyle(.segmented)
+            .disabled(working || awaitingCode)
+            if let availability {
+                if availability.linked.contains(method.rawValue) {
+                    Label("Способ входа привязан", systemImage: "checkmark.circle")
+                } else if availability.methods[method.rawValue] != true {
+                    Text(method == .phone ? "Отправка SMS пока недоступна." : "Отправка писем пока недоступна.")
+                        .font(.subheadline).foregroundStyle(.secondary)
+                } else if awaitingCode {
+                    TextField("Код из 6 цифр", text: $code)
+                        .keyboardType(.numberPad).textContentType(.oneTimeCode)
+                        .onChange(of: code) { _, value in
+                            code = String(value.filter { $0.isASCII && $0.isNumber }.prefix(6))
+                        }
+                    Button("Подтвердить код", action: verify).disabled(code.count != 6 || working)
+                    Button("Изменить данные") {
+                        awaitingCode = false
+                        code = ""
+                        notice = nil
+                    }.disabled(working)
+                } else {
+                    TextField(method.placeholder, text: $contact)
+                        .textContentType(method == .phone ? .telephoneNumber : .emailAddress)
+                        .keyboardType(method == .phone ? .phonePad : .emailAddress)
+                        .textInputAutocapitalization(.never).autocorrectionDisabled()
+                    Button("Получить код", action: request)
+                        .disabled(working || contact.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            } else if notice == nil {
+                ProgressView()
+            } else {
+                Button("Проверить снова") { Task { await load() } }
+            }
+            if let notice { Text(notice).font(.footnote).foregroundStyle(.secondary) }
+        } header: {
+            Text("Телефон или почта")
+        } footer: {
+            Text("Подтверждённый контакт позволяет войти в тот же профиль на другом iPhone.")
+        }
+        .onChange(of: method) { _, _ in contact = ""; code = ""; notice = nil }
+        .task { await load() }
+    }
+
+    @MainActor private func load() async {
+        do {
+            availability = try await RiderCommunity.decode("account")
+            notice = nil
+        } catch {
+            if !Task.isCancelled { notice = "Не удалось загрузить доступные способы входа." }
+        }
+    }
+
+    private func request() {
+        guard !working else { return }
+        working = true
+        notice = nil
+        Task {
+            defer { working = false }
+            do {
+                let payload = ["kind":method.rawValue, "contact":contact.trimmingCharacters(in: .whitespacesAndNewlines)]
+                let result: [String: Bool] = try await RiderCommunity.decode("account/start", method: "POST",
+                                                                            body: JSONEncoder().encode(payload))
+                guard result["sent"] == true else { throw URLError(.badServerResponse) }
+                code = ""
+                awaitingCode = true
+                notice = method == .phone ? "Код отправлен по SMS." : "Код отправлен на почту."
+            } catch {
+                notice = "Не удалось отправить код. Проверь данные и попробуй чуть позже."
+            }
+        }
+    }
+
+    private func verify() {
+        guard !working else { return }
+        working = true
+        notice = nil
+        Task {
+            defer { working = false }
+            do {
+                let result: [String: Bool] = try await RiderCommunity.decode("account/verify", method: "POST",
+                                                                            body: JSONEncoder().encode(["code":code]))
+                guard result["verified"] == true else { throw URLError(.badServerResponse) }
+                let profile: RiderCommunity.Registration = try await RiderCommunity.decode("registration")
+                awaitingCode = false
+                code = ""
+                await load()
+                verified(profile)
+            } catch RiderCommunity.Rejection.forbidden {
+                notice = "Код неверный или истёк. Проверь код или запроси новый."
+            } catch RiderCommunity.Rejection.conflict {
+                notice = "Этот контакт уже привязан. Для действующего профиля добавляй контакт с устройства, где в него уже выполнен вход."
+            } catch {
+                notice = "Не удалось подтвердить код. Проверь подключение к Rider."
+                await load()
+                if let state: RiderCommunity.Registration = try? await RiderCommunity.decode("registration"),
+                   state.verified == true, availability?.linked.contains(method.rawValue) == true {
+                    awaitingCode = false
+                    verified(state)
+                }
+            }
+        }
+    }
+}
+
 struct RiderRegistrationView: View {
     let onDone: () -> Void
     @AppStorage("rider.profileName") private var savedName = "Райдер"
@@ -266,6 +409,7 @@ struct RiderRegistrationView: View {
     @State private var username = ""
     @State private var publicProfile = true
     @State private var publicStats = true
+    @State private var contactVerified = false
     @State private var working = false
     @State private var notice: String?
 
@@ -276,32 +420,46 @@ struct RiderRegistrationView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section {
-                    TextField("Имя или ник", text: $name)
-                        .onChange(of: name) { _, value in name = String(value.prefix(50)) }
-                    TextField("Уникальный @юзернейм", text: $username)
-                        .textInputAutocapitalization(.never).autocorrectionDisabled()
-                        .onChange(of: username) { _, value in username = String(value.prefix(25)) }
-                } header: { Text("Создай профиль Rider") }
-                footer: { Text("Для юзернейма используй 3–24 латинские буквы, цифры или подчёркивания.") }
-                Section {
-                    Toggle("Публичный профиль", isOn: $publicProfile)
-                    Toggle("Публичная статистика", isOn: $publicStats)
-                } footer: {
-                    Text("Открытый профиль позволяет сразу публиковать посты, подписываться и писать райдерам. Публичная статистика открывает графики каталок. Видимость можно изменить в профиле.")
+                if contactVerified {
+                    Section {
+                        TextField("Имя или ник", text: $name)
+                            .onChange(of: name) { _, value in name = String(value.prefix(50)) }
+                        TextField("Уникальный @юзернейм", text: $username)
+                            .textInputAutocapitalization(.never).autocorrectionDisabled()
+                            .onChange(of: username) { _, value in username = String(value.prefix(25)) }
+                    } header: { Text("Создай профиль Rider") }
+                    footer: { Text("Для юзернейма используй 3–24 латинские буквы, цифры или подчёркивания.") }
+                    Section {
+                        Toggle("Публичный профиль", isOn: $publicProfile)
+                        Toggle("Публичная статистика", isOn: $publicStats)
+                    } footer: {
+                        Text("Открытый профиль позволяет сразу публиковать посты, подписываться и писать райдерам. Публичная статистика открывает графики каталок. Видимость можно изменить в профиле.")
+                    }
+                    if let notice { Text(notice).foregroundStyle(.red) }
+                    Button(working ? "Регистрируем…" : "Зарегистрироваться", action: register)
+                        .disabled(working || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                                  handle.range(of: #"^[a-z0-9_]{3,24}$"#, options: .regularExpression) == nil)
+                } else {
+                    RiderAccountVerification(verified: acceptStatus)
                 }
-                if let notice { Text(notice).foregroundStyle(.red) }
-                Button(working ? "Регистрируем…" : "Зарегистрироваться", action: register)
-                    .disabled(working || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
-                              handle.range(of: #"^[a-z0-9_]{3,24}$"#, options: .regularExpression) == nil)
             }
             .scrollDismissesKeyboard(.interactively)
             .navigationTitle("Добро пожаловать")
             .task {
                 // A previous request may have succeeded while the connection was closing.
                 if let status: RiderCommunity.Registration = try? await RiderCommunity.decode("registration"),
-                   !status.required, !Task.isCancelled { onDone() }
+                   !Task.isCancelled { acceptStatus(status) }
             }
+        }
+    }
+
+    private func acceptStatus(_ status: RiderCommunity.Registration) {
+        if !status.required {
+            if let name = status.name { savedName = name }
+            if let username = status.username { savedUsername = username }
+            onDone()
+        } else {
+            contactVerified = status.verified == true
         }
     }
 

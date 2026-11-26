@@ -949,7 +949,7 @@ def application(env, start_response):
     auth = re.fullmatch(r"Bearer ([a-fA-F0-9-]{72})", env.get("HTTP_AUTHORIZATION", ""))
     if not auth:
         return send("401 Unauthorized", {"error": "authentication required"})
-    owner = hashlib.sha256(auth[1].encode("ascii")).hexdigest()
+    device = hashlib.sha256(auth[1].encode("ascii")).hexdigest()
     if (path, method) == ("/route-eta", "POST"):
         api_key = os.environ.get("RIDER_YANDEX_ROUTING_KEY")
         if not api_key:
@@ -969,8 +969,19 @@ def application(env, start_response):
 
     with closing(sqlite3.connect(os.environ.get("RIDER_DB", "rider-profiles.sqlite3"), timeout=5)) as db:
         db.execute("PRAGMA foreign_keys=ON")
-        db.executescript(SCHEMA + rider_sos.SCHEMA + rider_discovery.SCHEMA)
+        db.executescript(SCHEMA + rider_sos.SCHEMA + rider_discovery.SCHEMA + rider_discovery.ACCOUNT_SCHEMA)
         with db:
+            linked = db.execute("SELECT owner FROM login_devices WHERE device=?", (device,)).fetchone()
+            owner = linked[0] if linked else device
+            if path == "/account" or path.startswith("/account/"):
+                try:
+                    raw = read_json(env, 2048) if method == "POST" else {}
+                    if not isinstance(raw, dict):
+                        raise ValueError()
+                    status, result = rider_discovery.account(db, owner, device, path, method, raw, env.get("REMOTE_ADDR", ""))
+                    return send(status, result)
+                except (ValueError, TypeError, RecursionError):
+                    return send("400 Bad Request", {"error":"invalid account request"})
             if path.startswith("/people/"):
                 try:
                     raw = read_json(env, 22000) if method in ("POST", "PATCH", "PUT") else {}
@@ -1006,7 +1017,9 @@ def application(env, start_response):
                 pending = doc.get("onboardingPending", not doc or (
                     doc.get("name") == "Райдер" and (doc.get("username") or "").startswith("rider_" + owner[:12])
                     and not doc.get("publicProfile")))
-                return send("200 OK", {"required": pending})
+                verified = db.execute("SELECT 1 FROM login_contacts WHERE owner=?", (owner,)).fetchone() is not None
+                return send("200 OK", {"required": pending, "verified": verified,
+                                       "name": doc.get("name"), "username": doc.get("username")})
             if (path, method) == ("/me", "GET"):
                 return send("200 OK", state(db, owner, include_directory=False))
             if (path, method) == ("/me", "PATCH"):
@@ -1042,6 +1055,9 @@ def application(env, start_response):
                     old.get("name") == "Райдер" and (old.get("username") or "").startswith("rider_" + owner[:12])
                     and not old.get("publicProfile"))):
                     return send("200 OK", state(db, owner, include_directory=False))
+                if path == "/registration" and any(rider_discovery.login_methods().values()) and not db.execute(
+                    "SELECT 1 FROM login_contacts WHERE owner=?", (owner,)).fetchone():
+                    return send("403 Forbidden", {"error":"verify an email address or phone number first"})
                 doc["onboardingPending"] = False
                 for key in ("publicProfile", "statsPublic"):
                     value = raw.get(key, True if path == "/registration" else old.get(key, True))
@@ -1127,6 +1143,9 @@ def application(env, start_response):
                 return send("200 OK", season_credit(db, owner, year, start, end))
             elif (path, method) == ("/me", "DELETE"):
                 db.execute("DELETE FROM follows WHERE owner=?", (owner,))
+                db.execute("DELETE FROM login_contacts WHERE owner=?", (owner,))
+                db.execute("DELETE FROM login_challenges WHERE device=? OR device IN (SELECT device FROM login_devices WHERE owner=?)", (device,owner))
+                db.execute("DELETE FROM login_devices WHERE owner=?", (owner,))
                 db.execute("DELETE FROM profiles WHERE id=?", (owner,))
             elif path.startswith("/follow/") and method in ("PUT", "DELETE"):
                 target = path.removeprefix("/follow/")

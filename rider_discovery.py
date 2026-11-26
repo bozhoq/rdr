@@ -6,6 +6,9 @@ import math
 import os
 import re
 import secrets
+import smtplib
+import ssl
+from email.message import EmailMessage
 import time
 import uuid
 from urllib.parse import urlencode
@@ -208,6 +211,108 @@ def deliver(phone, otp):
     with urlopen(Request("https://sms.ru/sms/send",data=form),timeout=6) as reply:
         data=json.load(reply)
     if data.get("sms",{}).get(phone[1:],{}).get("status")!="OK": raise OSError("SMS not accepted")
+
+ACCOUNT_SCHEMA = """
+CREATE TABLE IF NOT EXISTS login_contacts(
+ owner TEXT NOT NULL, kind TEXT NOT NULL, digest TEXT NOT NULL,
+ PRIMARY KEY(owner,kind), UNIQUE(kind,digest));
+CREATE TABLE IF NOT EXISTS login_challenges(
+ device TEXT PRIMARY KEY, kind TEXT NOT NULL, digest TEXT NOT NULL, proof TEXT NOT NULL,
+ expires INTEGER NOT NULL, attempts INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS login_devices(
+ device TEXT PRIMARY KEY, owner TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS login_devices_owner ON login_devices(owner);
+"""
+
+
+def login_methods():
+    return {"phone": bool(os.environ.get("RIDER_SMS_RU_API_ID")),
+            "email": bool(os.environ.get("RIDER_SMTP_HOST") and os.environ.get("RIDER_SMTP_FROM"))}
+
+
+def deliver_email(address, code):
+    message = EmailMessage()
+    message["From"] = os.environ["RIDER_SMTP_FROM"]
+    message["To"] = address
+    message["Subject"] = "Код входа в Rider"
+    message.set_content(f"Код входа в Rider: {code}. Он действует 5 минут. Если ты его не запрашивал, проигнорируй письмо.")
+    with smtplib.SMTP_SSL(os.environ["RIDER_SMTP_HOST"], int(os.environ.get("RIDER_SMTP_PORT", "465")),
+                         timeout=8, context=ssl.create_default_context()) as server:
+        if username := os.environ.get("RIDER_SMTP_USER"):
+            server.login(username, os.environ["RIDER_SMTP_PASSWORD"])
+        server.send_message(message)
+
+
+def login_address(kind, raw):
+    if kind == "phone":
+        return normalized(raw)
+    if kind == "email" and isinstance(raw, str):
+        address = raw.strip().lower()
+        if len(address) <= 254 and re.fullmatch(r"[a-z0-9.!#$%&'*+/=?^_{|}~-]+@[a-z0-9-]+(?:[.][a-z0-9-]+)+", address):
+            return address
+    raise ValueError()
+
+
+def account(db, owner, device, path, method, raw, ip):
+    if (path, method) == ("/account", "GET"):
+        linked = {row[0] for row in db.execute("SELECT kind FROM login_contacts WHERE owner=?", (owner,))}
+        return "200 OK", {"methods":login_methods(), "linked":sorted(linked)}
+    if method != "POST" or path not in ("/account/start", "/account/verify"):
+        return "404 Not Found", {"error":"unknown account request"}
+    db.execute("BEGIN IMMEDIATE")
+    now = int(time.time())
+    key = secret_key(db)
+    if path == "/account/start":
+        kind = raw.get("kind")
+        address = login_address(kind, raw.get("contact"))
+        if not login_methods().get(kind):
+            return "503 Service Unavailable", {"error":"delivery unavailable"}
+        digest = digest_phone(key, address) if kind == "phone" else sealed(key, "email:" + address)
+        if not spend(db, [("login:device:"+device, 3, 1, 3600), ("login:contact:"+digest, 1, 1, 60),
+                          ("login:day:"+digest, 6, 1, 86400), ("login:ip:"+sealed(key,ip), 12, 1, 3600),
+                          ("login:global:"+kind, 100, 1, 86400)], now):
+            return "429 Too Many Requests", {"error":"try later"}
+        code = f"{secrets.randbelow(1000000):06d}"
+        proof = sealed(key, "login:"+device+digest+code)
+        db.execute("DELETE FROM login_challenges WHERE expires<=?", (now,))
+        db.execute("INSERT OR REPLACE INTO login_challenges VALUES(?,?,?,?,?,5)", (device,kind,digest,proof,now+300))
+        db.commit()
+        try:
+            (deliver if kind == "phone" else deliver_email)(address, code)
+        except (OSError, ValueError, KeyError, smtplib.SMTPException):
+            db.execute("DELETE FROM login_challenges WHERE device=? AND proof=?", (device,proof))
+            return "503 Service Unavailable", {"error":"delivery unavailable"}
+        return "200 OK", {"sent":True}
+
+    code = raw.get("code")
+    if not isinstance(code, str) or not re.fullmatch(r"[0-9]{6}", code):
+        raise ValueError()
+    challenge = db.execute("SELECT kind,digest,proof,expires,attempts FROM login_challenges WHERE device=?", (device,)).fetchone()
+    if not challenge or challenge[3] <= now or not challenge[4]:
+        return "403 Forbidden", {"error":"code expired"}
+    kind, digest, proof = challenge[:3]
+    db.execute("UPDATE login_challenges SET attempts=attempts-1 WHERE device=?", (device,))
+    if not hmac.compare_digest(proof, sealed(key, "login:"+device+digest+code)):
+        return "403 Forbidden", {"error":"invalid code"}
+    db.execute("DELETE FROM login_challenges WHERE device=?", (device,))
+    existing = db.execute("SELECT owner FROM login_contacts WHERE kind=? AND digest=?", (kind,digest)).fetchone()
+    if existing and existing[0] != owner:
+        current = db.execute("SELECT document FROM profiles WHERE id=?", (owner,)).fetchone()
+        has_contact = db.execute("SELECT 1 FROM login_contacts WHERE owner=?", (owner,)).fetchone()
+        if has_contact or (current and not json.loads(current[0]).get("onboardingPending", False)):
+            return "409 Conflict", {"error":"contact belongs to an existing account"}
+        db.execute("INSERT INTO login_devices VALUES(?,?) ON CONFLICT(device) DO UPDATE SET owner=excluded.owner",
+                   (device,existing[0]))
+    elif not existing:
+        if kind == "phone" and db.execute("SELECT 1 FROM contact_phones WHERE digest=? AND owner<>?",
+                                          (digest,owner)).fetchone():
+            return "409 Conflict", {"error":"link this phone from the existing profile"}
+        linked = db.execute("SELECT 1 FROM login_contacts WHERE owner=? AND kind=?", (owner,kind)).fetchone()
+        if linked:
+            return "409 Conflict", {"error":"this account already has a contact of this type"}
+        db.execute("INSERT INTO login_contacts VALUES(?,?,?)", (owner,kind,digest))
+    return "200 OK", {"verified":True}
+
 
 def handle(db, owner, path, method, raw, ip, card):
     if not isinstance(raw,dict): raise ValueError()

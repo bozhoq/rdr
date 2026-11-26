@@ -156,6 +156,9 @@ enum RiderCommunity {
 
     struct Registration: Decodable {
         let required: Bool
+        let verified: Bool?
+        let name: String?
+        let username: String?
     }
 
     static func register(name: String, username: String, publicProfile: Bool, statsPublic: Bool) async throws -> String {
@@ -608,6 +611,7 @@ struct RiderProfileView: View {
                             Toggle("Показывать день и месяц", isOn: $visibleBirth)
                         }
                     } label: { Label("День рождения", systemImage: "birthday.cake") }
+                    NavigationLink { RiderAccountAccessSettings() } label: { Label("Вход и восстановление", systemImage: "key") }
                     NavigationLink { RiderPhoneSettings() } label: { Label("Номер телефона", systemImage: "phone.fill") }
                 }
                 Section {
