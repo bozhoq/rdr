@@ -2813,7 +2813,7 @@ struct RiderTopsView: View {
         HStack(spacing: 6) {
             if score == .rank, let points = entry.points {
                 RiderRankBadge(rank: .forPoints(points), size: 28)
-                Text("\(points.formatted()) ПТС").monospacedDigit()
+                Text(riderPoints(points)).monospacedDigit().lineLimit(1).minimumScaleFactor(0.80)
             } else {
                 Text(metric(entry.value(for: score), unit: score.unit)).monospacedDigit()
             }

@@ -536,15 +536,15 @@ struct RiderProfileView: View {
                             } icon: {
                                 RiderRankBadge(rank: rank, size: 30)
                             }
-                            .badge(rank.threshold.formatted() + " ПТС")
+                            .badge(riderPoints(rank.threshold))
                         }
                     } footer: {
-                        Text("1 ПТС за минуту завершённой каталки и 5 ПТС за засчитанный прыжок от 2 м. За одну сессию учитываются до 8 часов и 100 прыжков. После S очки продолжают накапливаться. Новый сезон начинается 1 января по Москве.")
+                        Text("1 очко за минуту завершённой каталки и 5 очков за засчитанный прыжок от 2 м. За одну сессию учитываются до 8 часов и 100 прыжков. На уровне 5+ очки продолжают накапливаться. Новый сезон начинается 1 января по Москве.")
                     }
-                    Section("Ачивки сезона · \(progress.achievementPoints.formatted()) ПТС") {
+                    Section("Ачивки сезона · \(riderPoints(progress.achievementPoints))") {
                         ForEach(progress.achievements) { award in
                             Label(award.title, systemImage: award.unlocked ? "checkmark.seal.fill" : "lock")
-                                .badge("+\(award.seasonBonus) ПТС")
+                                .badge(riderPoints(award.seasonBonus, withPlus: true))
                                 .accessibilityValue(award.unlocked ? "Получена" : award.goal)
                         }
                     }
@@ -783,7 +783,7 @@ struct RiderProfileView: View {
         return Section("Видимость") {
             Toggle("Публичный профиль", isOn: Binding(get: { visible }, set: { updateVisibility(profile: $0) }))
             Toggle("Публичная статистика", isOn: Binding(get: { statsVisible }, set: { updateVisibility(stats: $0) }))
-            Text("Уровень, ПТС, рекорды, часы на воде и ачивки видны всем райдерам. Переключатель статистики открывает графики по ветру, спотам и комплектам.")
+            Text("Уровень, очки, рекорды, часы на воде и ачивки видны всем райдерам. Переключатель статистики открывает графики по ветру, спотам и комплектам.")
                 .font(.footnote).foregroundStyle(.secondary)
             if statsVisible && !visible {
                 Text("Статистика появится, когда откроешь профиль.").font(.footnote).foregroundStyle(.secondary)
@@ -1301,7 +1301,7 @@ struct RiderRankCard: View {
             HStack(spacing: 12) {
                 RiderRankBadge(rank: rank, size: 48)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("\(points.formatted()) ПТС")
+                    Text(riderPoints(points))
                         .font(.title3.bold().monospacedDigit()).foregroundStyle(.white)
                         .contentTransition(.numericText())
                     Text("Сезон \(String(year))").font(.caption.weight(.semibold))
@@ -1309,7 +1309,7 @@ struct RiderRankCard: View {
                 }
                 Spacer(minLength: 4)
                 if let next = rank.next {
-                    Text("До уровня \(next.rawValue)\n\((next.threshold - points).formatted()) ПТС")
+                    Text("До уровня \(next.rawValue)\n\(riderPoints(next.threshold - points))")
                         .multilineTextAlignment(.trailing)
                         .font(.caption.bold().monospacedDigit()).foregroundStyle(color)
                 } else {
@@ -1317,7 +1317,7 @@ struct RiderRankCard: View {
                 }
             }
             if rank == .s {
-                Label("ПТС копятся до конца сезона", systemImage: "infinity")
+                Label("Очки копятся до конца сезона", systemImage: "infinity")
                     .font(.caption.weight(.semibold)).foregroundStyle(color)
             } else {
                 ProgressView(value: Double(points - rank.threshold) / Double((rank.next?.threshold ?? rank.threshold + 1) - rank.threshold))

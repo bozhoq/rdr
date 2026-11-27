@@ -587,7 +587,7 @@ private struct RiderStorySlide: View {
                 }
                 RiderMentionSuggestions.forText($draft, editing: typing, limit: 1000)
                 HStack(spacing: 4) {
-                    TextField("Ответить автору…", text: $draft)
+                    TextField("Ответить...", text: $draft)
                         .focused($typing)
                         .submitLabel(.send)
                         .onSubmit(sendReply)

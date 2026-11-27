@@ -81,6 +81,22 @@ struct RiderPublicRide: Codable, Equatable, Identifiable {
     }
 }
 
+func riderPoints(_ points: Int, withPlus: Bool = false) -> String {
+    let magnitude = points.magnitude
+    let unit: String
+    if (11...14).contains(magnitude % 100) {
+        unit = "очков"
+    } else {
+        switch magnitude % 10 {
+        case 1: unit = "очко"
+        case 2...4: unit = "очка"
+        default: unit = "очков"
+        }
+    }
+    let sign = withPlus && points > 0 ? "+" : ""
+    return sign + points.formatted() + " " + unit
+}
+
 enum RiderRank: String, CaseIterable, Identifiable {
     case e = "1", d = "2", c = "3", b = "4", a = "5", s = "5+"
 
@@ -477,7 +493,7 @@ enum RiderTopMetric: String, CaseIterable, Identifiable {
     }
     var unit: String {
         switch self {
-        case .rank: return "ПТС"
+        case .rank: return "очки"
         case .airtime: return "с"
         case .height, .distance: return "м"
         }

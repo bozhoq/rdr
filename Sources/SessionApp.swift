@@ -658,7 +658,7 @@ private struct RecordingView: View {
                 Text("Вызов на каталку").font(.title.bold())
                 Text(mission.rule.title).font(.title2.weight(.semibold))
                 Text(mission.rule.goal).font(.body)
-                Text("+\(mission.rule.points) ПТС").font(.subheadline.monospacedDigit().bold())
+                Text(riderPoints(mission.rule.points, withPlus: true)).font(.subheadline.monospacedDigit().bold())
                     .padding(.horizontal, 12).padding(.vertical, 5)
                     .background(.white.opacity(0.15), in: Capsule())
                 Button("Вызов принят") { startingMission = nil }
@@ -1570,7 +1570,7 @@ struct RiderSecretAchievements: View {
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                         Spacer(minLength: 5)
-                        Text("+\(mission.rule.points) ПТС").font(.caption.bold().monospacedDigit())
+                        Text(riderPoints(mission.rule.points, withPlus: true)).font(.caption.bold().monospacedDigit())
                             .foregroundStyle(RiderTheme.accent)
                     }
                     .lagoonCard()
@@ -1624,7 +1624,7 @@ private struct RiderMissionProgress: View {
                     .lineLimit(1)
                 Spacer(minLength: 8)
                 if confirmed {
-                    Text("+\(mission.rule.points) ПТС")
+                    Text(riderPoints(mission.rule.points, withPlus: true))
                 } else if targetMet {
                     Text("После 15 мин записи")
                 } else if let value {
@@ -1666,7 +1666,7 @@ private struct RiderSessionFinish: View {
     static func shareText(session: SessionSummary, highlight: RiderSessionHighlight, unlocked: Bool) -> String {
         let success = session.mission.flatMap { $0.completed(RiderMission.Metrics(session)) ? $0 : nil }
         let parts = [highlight.title, highlight.detail,
-                     success.map { unlocked ? "\($0.rule.title) · +\($0.rule.points) ПТС" : $0.rule.title }]
+                     success.map { unlocked ? "\($0.rule.title) · \(riderPoints($0.rule.points, withPlus: true))" : $0.rule.title }]
         return parts.compactMap { $0 }.joined(separator: " · ") + " · Rider"
     }
 
@@ -1717,7 +1717,7 @@ private struct RiderSessionFinish: View {
                     }
                     Spacer(minLength: 4)
                     if unlocked {
-                        Text("+\(mission.rule.points) ПТС")
+                        Text(riderPoints(mission.rule.points, withPlus: true))
                             .font(.subheadline.bold().monospacedDigit())
                             .foregroundStyle(Color(red: 1, green: 0.87, blue: 0.55))
                     }
