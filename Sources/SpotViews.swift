@@ -50,7 +50,7 @@ struct SpotsView: View {
         }
         .scrollContentBackground(.hidden)
         .background(RiderTheme.canvas.ignoresSafeArea())
-        .navigationTitle("Спот")
+        .toolbar(.hidden, for: .navigationBar)
         .refreshable { await MainActor.run { forecastRefresh += 1 } }
         .task(id: request) {
             guard !request.spots.isEmpty else { favoriteForecasts = nil; return }
@@ -407,6 +407,7 @@ private struct SpotDetailView: View {
             }.padding(20)
         }
         .background(RiderTheme.canvas.ignoresSafeArea())
+        .toolbar(.visible, for: .navigationBar)
         .navigationTitle("Спот")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -700,6 +701,7 @@ private struct BestSpotsToday: View {
         }
         .scrollContentBackground(.hidden)
         .background(RiderTheme.canvas.ignoresSafeArea())
+        .toolbar(.visible, for: .navigationBar)
         .navigationTitle(day.title)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {

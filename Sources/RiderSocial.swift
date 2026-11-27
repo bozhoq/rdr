@@ -2620,8 +2620,6 @@ struct RiderTopsView: View {
             filters(spot: spot)
                 .listRowBackground(Color.clear)
                 .listRowInsets(EdgeInsets(top: 5, leading: 10, bottom: 5, trailing: 10))
-            RiderRankCard(progress: progress)
-                .listRowBackground(Color.clear)
             if let entries {
                 Section(isLocal ? (score == .rank ? "Мой результат" : "Мои рекорды") : "Топ-50") {
                     if isLocal {
@@ -2735,10 +2733,10 @@ struct RiderTopsView: View {
             let column = GridItem(.flexible(), spacing: 12, alignment: .leading)
             LazyVGrid(columns: textSize.isAccessibilitySize ? [column] : [column, column], alignment: .leading, spacing: 8) {
                 recordDetail("Кайт", value: entry.kite) { EquipmentGlyph(kind: .kite).rendered(lineWidth: 1.2) }
-                recordDetail("Доска", value: entry.board) { EquipmentGlyph(kind: .board).rendered(lineWidth: 1.2) }
                 recordDetail("Спот", value: entry.spot) {
                     Image(uiImage: RiderSpotIcon.image).resizable().scaledToFit()
                 }
+                recordDetail("Доска", value: entry.board) { EquipmentGlyph(kind: .board).rendered(lineWidth: 1.2) }
                 recordDetail("Ветер", value: wind.isEmpty ? nil : wind) {
                     Image(systemName: "wind")
                 }

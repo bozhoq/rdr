@@ -525,6 +525,9 @@ struct RiderProfileView: View {
             NavigationStack {
                 List {
                     let progress = social.progress(recorder.history, at: Date())
+                    RiderRankCard(progress: progress)
+                        .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
+                        .listRowBackground(Color.clear)
                     Section {
                         ForEach(RiderRank.allCases) { rank in
                             Label {
@@ -1156,14 +1159,16 @@ private struct RiderProfileRecords: View {
     }
 
     @ViewBuilder private var recordItems: some View {
-        record("Топ прыжок", value: metric(totals.height, unit: "м"), icon: "arrow.up.to.line")
-        record("Топ завис", value: metric(totals.airtime, unit: "с"), icon: "timer")
-        record("Топ дистанция", value: metric(distance, unit: "м"), icon: "arrow.left.and.right")
+        record("Топ прыжок", value: metric(totals.height, unit: "м")) { RiderJumpRecordIcon() }
+        record("Топ завис", value: metric(totals.airtime, unit: "с")) { Image(systemName: "timer") }
+        record("Топ дистанция", value: metric(distance, unit: "м")) { Image(systemName: "arrow.left.and.right") }
     }
 
-    private func record(_ title: String, value: String, icon: String) -> some View {
+    private func record<Icon: View>(_ title: String, value: String, @ViewBuilder icon: () -> Icon) -> some View {
         VStack(spacing: 3) {
-            Image(systemName: icon).font(.subheadline.bold()).foregroundStyle(RiderTheme.accent).accessibilityHidden(true)
+            icon().font(.subheadline.bold()).foregroundStyle(RiderTheme.accent)
+                .frame(height: 22)
+                .accessibilityHidden(true)
             Text(value).font(.headline.monospacedDigit())
             Text(title).font(.footnote.weight(.medium)).foregroundStyle(.secondary)
         }

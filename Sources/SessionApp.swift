@@ -511,16 +511,24 @@ private struct RecordingView: View {
         }
     }
 
+    private func conditionRow(_ title: String, value: String, selected: Bool) -> some View {
+        LabeledContent {
+            Text(value).foregroundStyle(selected ? Color.secondary : RiderTheme.accent)
+        } label: {
+            Text(title).foregroundStyle(RiderTheme.accent)
+        }
+        .frame(minHeight: 44)
+        .contentShape(.interaction, Rectangle())
+    }
+
+    private func conditionChoice(_ title: String, value: String, selected: Bool = false, action: @escaping () -> Void) -> some View {
+        Button(action: action) { conditionRow(title, value: value, selected: selected) }
+            .buttonStyle(.plain)
+    }
+
     private func conditionMenu<Options: View>(_ title: String, value: String?, @ViewBuilder options: () -> Options) -> some View {
         Menu(content: options) {
-            LabeledContent {
-                Text(value ?? "Выбрать")
-                    .foregroundStyle(value == nil ? RiderTheme.accent : Color.secondary)
-            } label: {
-                Text(title).foregroundStyle(RiderTheme.accent)
-            }
-            .frame(minHeight: 44)
-            .contentShape(.interaction, Rectangle())
+            conditionRow(title, value: value ?? "Выбрать", selected: value != nil)
         }
         .menuIndicator(.hidden)
     }
@@ -539,22 +547,28 @@ private struct RecordingView: View {
                     }.pickerStyle(.segmented).padding(.vertical, 12)
                     if recorder.automaticConditions {
                         if let chosen = recorder.automaticSpotOverride {
-                            Button(chosen) { choosingSpot = true }
+                            conditionChoice("Спот", value: chosen, selected: true) { choosingSpot = true }
                         } else if recorder.locating {
                             ProgressView("Получаем координаты…")
+                                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
                         } else if let fix = recorder.usableFix, let nearest = recorder.nearestSpot(to: fix) {
-                            LabeledContent("Спот", value: nearest.name)
+                            conditionRow("Спот", value: nearest.name, selected: true)
                         } else if recorder.attemptedLocation || recorder.authorization == .denied || recorder.authorization == .restricted {
-                            Text("Не удалось определить ближайший спот, пожалуйста, укажите спот самостоятельно")
-                            Button("Выбрать спот") { choosingSpot = true }
-                            Button("Добавить мой спот") { newGPSPoint = true }
+                            Text("Ближайший спот не найден")
+                                .font(.footnote).foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.vertical, 4)
+                            conditionChoice("Спот", value: "Выбрать") { choosingSpot = true }
+                            Divider()
+                            conditionChoice("Мой спот", value: "Добавить") { newGPSPoint = true }
                         } else {
-                            Button("Определить спот по GPS", action: recorder.locateSpot)
+                            conditionChoice("Спот", value: "Определить по GPS", action: recorder.locateSpot)
                         }
                     } else {
-                        Button { choosingSpot = true } label: {
-                            LabeledContent("Спот", value: recorder.draftSetup.spot.isEmpty ? "Выбрать" : recorder.draftSetup.spot)
-                        }.padding(.vertical, 10)
+                        let spot = recorder.draftSetup.spot
+                        conditionChoice("Спот", value: spot.isEmpty ? "Выбрать" : spot, selected: !spot.isEmpty) {
+                            choosingSpot = true
+                        }
                         Divider()
                         conditionMenu("Ветер", value: recorder.manualWind?.title) {
                             Picker("Ветер", selection: $recorder.manualWind) {
@@ -574,11 +588,10 @@ private struct RecordingView: View {
                         if !recorder.manualWindValid { Text("Укажите диапазон ветра.").font(.footnote) }
                     }
                     Divider()
-                    Button { showingPresets = true } label: {
-                        LabeledContent("Комплект", value: recorder.gearPresets.first(where: {
-                            $0.matches(recorder.draftSetup)
-                        })?.name ?? "Выбрать или сохранить")
-                    }.padding(.vertical, 11)
+                    let preset = recorder.gearPresets.first { $0.matches(recorder.draftSetup) }
+                    conditionChoice("Комплект", value: preset?.name ?? "Выбрать или сохранить", selected: preset != nil) {
+                        showingPresets = true
+                    }
                 }.lagoonCard()
 
                 VStack(alignment: .leading, spacing: 12) {
@@ -847,6 +860,34 @@ private struct RecordingView: View {
         } else if let settings = URL(string: UIApplication.openSettingsURLString) {
             Button("Открыть настройки GPS") { openURL(settings) }
         }
+    }
+}
+
+struct RiderJumpRecordIcon: View {
+    var body: some View {
+        Path { rocket in
+            rocket.move(to: CGPoint(x: 6.5, y: 1))
+            rocket.addQuadCurve(to: CGPoint(x: 9.2, y: 12.4), control: CGPoint(x: 11.3, y: 5.1))
+            rocket.addLine(to: CGPoint(x: 11.2, y: 14.5))
+            rocket.addLine(to: CGPoint(x: 8.2, y: 14))
+            rocket.addLine(to: CGPoint(x: 4.8, y: 14))
+            rocket.addLine(to: CGPoint(x: 1.8, y: 14.5))
+            rocket.addLine(to: CGPoint(x: 3.8, y: 12.4))
+            rocket.addQuadCurve(to: CGPoint(x: 6.5, y: 1), control: CGPoint(x: 1.7, y: 5.1))
+            rocket.closeSubpath()
+            rocket.addEllipse(in: CGRect(x: 5.4, y: 6.2, width: 2.2, height: 2.2))
+            rocket.move(to: CGPoint(x: 6.5, y: 16))
+            rocket.addLine(to: CGPoint(x: 6.5, y: 18))
+        }
+        .stroke(style: StrokeStyle(lineWidth: 1.3, lineCap: .round, lineJoin: .round))
+        .frame(width: 13, height: 18)
+        .rotationEffect(.degrees(38))
+        .offset(x: -4, y: 2)
+        .frame(width: 26, height: 22)
+        .overlay(alignment: .topTrailing) {
+            Image(systemName: "moon.fill").font(.system(size: 8, weight: .semibold))
+        }
+        .accessibilityHidden(true)
     }
 }
 
@@ -1250,9 +1291,9 @@ struct SessionDetail: View {
             Section {
                 let jumps = session.jumpAnalysis?.candidates.compactMap { session.liveEstimate(for: $0) } ?? []
                 HStack(alignment: .top, spacing: 4) {
-                    sessionRecord("Топ прыжок", icon: "arrow.up", value: jumps.compactMap(\.heightMeters).max(), unit: "м")
-                    sessionRecord("Топ дистанция", icon: "arrow.left.and.right", value: jumps.compactMap(\.distanceMeters).max(), unit: "м")
-                    sessionRecord("Топ завис", icon: "stopwatch", value: jumps.compactMap(\.reportedAirtime).max(), unit: "с")
+                    sessionRecord("Топ прыжок", value: jumps.compactMap(\.heightMeters).max(), unit: "м") { RiderJumpRecordIcon() }
+                    sessionRecord("Топ дистанция", value: jumps.compactMap(\.distanceMeters).max(), unit: "м") { Image(systemName: "arrow.left.and.right") }
+                    sessionRecord("Топ завис", value: jumps.compactMap(\.reportedAirtime).max(), unit: "с") { Image(systemName: "stopwatch") }
                 }.padding(.vertical, 4)
             }.listRowBackground(RiderTheme.surface)
             eventsSection
@@ -1301,9 +1342,9 @@ struct SessionDetail: View {
         .listRowBackground(RiderTheme.surface)
     }
 
-    private func sessionRecord(_ title: String, icon: String, value: Double?, unit: String) -> some View {
+    private func sessionRecord<Icon: View>(_ title: String, value: Double?, unit: String, @ViewBuilder icon: () -> Icon) -> some View {
         VStack(spacing: 5) {
-            Image(systemName: icon).foregroundStyle(RiderTheme.accent).accessibilityHidden(true)
+            icon().foregroundStyle(RiderTheme.accent).frame(height: 22).accessibilityHidden(true)
             Text(metric(value, unit: unit)).font(.headline.monospacedDigit()).lineLimit(1).minimumScaleFactor(0.7)
             Text(title).font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
         }
