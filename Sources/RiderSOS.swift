@@ -153,7 +153,11 @@ final class RiderSOSAppDelegate: NSObject, UIApplicationDelegate, UNUserNotifica
     private var receiverTask: Task<Void, Never>?
     private var requestingPermission = false
     private var announcedForeground: Set<UUID> = []
+    private var soundedForeground: Set<UUID> = []
     private var alarm: AVAudioPlayer?
+    private var alarmTask: Task<Void, Never>?
+    private var previousAudio: (category: AVAudioSession.Category, mode: AVAudioSession.Mode,
+                                options: AVAudioSession.CategoryOptions)?
     private let registeredKey = "rider.sos.registered"
 
     func open(_ selected: UUID? = nil) {
@@ -318,12 +322,13 @@ final class RiderSOSAppDelegate: NSObject, UIApplicationDelegate, UNUserNotifica
     func resetAccount() {
         receiverTask?.cancel()
         announcedForeground.removeAll()
+        soundedForeground.removeAll()
         receiverStatus = nil
         lastUpdate = .distantPast
         latestFix = nil
         token = nil
         inbox = nil
-        alarm?.stop()
+        stopAlarm()
     }
 
     func pollForeground() async {
@@ -331,26 +336,58 @@ final class RiderSOSAppDelegate: NSObject, UIApplicationDelegate, UNUserNotifica
         uploadLocationIfNeeded()
         await receiverTask?.value
         guard !Task.isCancelled, let items = try? await alerts(), !Task.isCancelled, RiderAlertKind.sos.enabled else { return }
-        announcedForeground.formIntersection(items.map(\.id))
+        let ids = items.map(\.id)
+        announcedForeground.formIntersection(ids)
+        soundedForeground.formIntersection(ids)
+        let pending = items.filter { $0.decision == nil }
+        let newSignals = pending.filter { !soundedForeground.contains($0.id) }
+        if !newSignals.isEmpty {
+            soundedForeground.formUnion(newSignals.map(\.id))
+            playAlarm()
+        }
         guard inbox == nil, !radarVisible,
-              let incoming = items.first(where: { $0.decision == nil && !announcedForeground.contains($0.id) }) else { return }
+              let incoming = pending.first(where: { !announcedForeground.contains($0.id) }) else { return }
         announcedForeground.insert(incoming.id)
         open(incoming.id)
-        playAlarm()
     }
 
     func playAlarm() {
         if RiderAlertKind.sound.enabled {
-            alarm?.stop()
+            stopAlarm()
             do {
+                let session = AVAudioSession.sharedInstance()
+                if session.category == .ambient || session.category == .soloAmbient {
+                    let settings = (session.category, session.mode, session.categoryOptions)
+                    try session.setCategory(.playback, mode: .default, options: .mixWithOthers)
+                    previousAudio = settings
+                }
                 let player = try AVAudioPlayer(data: Self.alarmAudio)
                 alarm = player
-                if !player.play() { AudioServicesPlaySystemSound(1007) }
+                guard player.play() else { throw CocoaError(.featureUnsupported) }
+                alarmTask = Task {
+                    do { try await Task.sleep(for: .seconds(player.duration + 0.15)) } catch { return }
+                    stopAlarm()
+                }
             } catch {
+                stopAlarm()
                 AudioServicesPlaySystemSound(1007)
             }
         }
         if RiderAlertKind.vibrate.enabled { UINotificationFeedbackGenerator().notificationOccurred(.warning) }
+    }
+
+    private func stopAlarm() {
+        alarmTask?.cancel()
+        alarmTask = nil
+        alarm?.stop()
+        alarm = nil
+        if let previousAudio {
+            self.previousAudio = nil
+            let session = AVAudioSession.sharedInstance()
+            if session.category == .playback && session.categoryOptions == .mixWithOthers {
+                try? session.setCategory(previousAudio.category, mode: previousAudio.mode, options: previousAudio.options)
+            }
+        }
     }
 
     private static let alarmAudio: Data = {

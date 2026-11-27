@@ -852,17 +852,9 @@ struct RiderProfileView: View {
     }
 
     private var posts: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Button { composing = true } label: {
-                Label("Добавить пост", systemImage: "plus").font(.subheadline.weight(.semibold))
-                    .frame(minHeight: 36)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.bordered)
-            .frame(maxWidth: .infinity, alignment: .trailing)
-            RiderProfilePublications(entries: remotePublications, isMine: true, name: name,
-                                     username: username, avatar: photo, selection: $publicationSection)
-        }
+        RiderProfilePublications(entries: remotePublications, isMine: true, name: name,
+                                 username: username, avatar: photo, selection: $publicationSection,
+                                 addPost: { composing = true })
     }
 
 }
@@ -892,14 +884,13 @@ private struct RiderProfilePublications: View {
     let username: String?
     let avatar: Data?
     @Binding var selection: RiderPublicationSection
+    var addPost: (() -> Void)?
 
     var body: some View {
         let posts = Entry.merged(remote: entries.filter { !social.deletedPosts.contains($0.id) },
                                  local: isMine ? social.posts : []).filter { $0.post.publicationSection == selection }
         VStack(alignment: .leading, spacing: 8) {
-            RiderSections(options: RiderPublicationSection.allCases, selection: $selection) { section in
-                Image(systemName: section.icon).accessibilityLabel(section.title)
-            }
+            publicationControls
             if posts.isEmpty {
                 Text(selection == .gallery ? "Пока нет фото и видео." : "Пока нет заметок.")
                     .font(.subheadline).foregroundStyle(.secondary)
@@ -927,6 +918,46 @@ private struct RiderProfilePublications: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    @ViewBuilder private var publicationControls: some View {
+        if let addPost {
+            HStack(spacing: 5) {
+                publicationTab(.gallery)
+                Button(action: addPost) {
+                    Image(systemName: "plus.app.fill")
+                        .font(.system(size: 25, weight: .medium))
+                        .foregroundStyle(RiderTheme.accent)
+                        .frame(width: 48, height: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Добавить пост")
+                .accessibilityHint(selection.title)
+                publicationTab(.journal)
+            }
+            .padding(4)
+            .background(RiderTheme.border, in: RoundedRectangle(cornerRadius: 13))
+        } else {
+            RiderSections(options: RiderPublicationSection.allCases, selection: $selection) { section in
+                Image(systemName: section.icon).accessibilityLabel(section.title)
+            }
+        }
+    }
+
+    private func publicationTab(_ section: RiderPublicationSection) -> some View {
+        Button {
+            selection = section
+        } label: {
+            Image(systemName: section.icon)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(selection == section ? RiderTheme.accent : .secondary)
+                .frame(maxWidth: .infinity, minHeight: 44)
+                .background(selection == section ? RiderTheme.surface : .clear, in: RoundedRectangle(cornerRadius: 9))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(section.title)
+        .accessibilityAddTraits(selection == section ? .isSelected : [])
+    }
 }
 
 private struct RiderProfileGallery: View {
