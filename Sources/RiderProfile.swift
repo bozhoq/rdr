@@ -710,8 +710,6 @@ struct RiderProfileView: View {
                     }
                 }
                 Spacer(minLength: 0)
-                Button { showingRanks = true } label: { RiderRankBadge(rank: rank, size: 43) }
-                    .buttonStyle(.plain).accessibilityLabel("Ранг \(rank.rawValue)")
                 Button {
                     draftName = name; draftBio = bio; draftPhoto = photo; editorPicker = nil
                     let saved = mine?.profile.birthday ?? birthDay
@@ -726,12 +724,22 @@ struct RiderProfileView: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("Изменить профиль")
             }
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 10) { followCounts }
-                VStack(alignment: .leading, spacing: 4) { followCounts }
+            HStack {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 10) { followCounts }
+                    VStack(alignment: .leading, spacing: 4) { followCounts }
+                }
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(RiderTheme.foam)
+                Spacer(minLength: 8)
+                Button { showingRanks = true } label: {
+                    RiderRankBadge(rank: rank, size: 38)
+                        .frame(minWidth: 44, minHeight: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Ранг \(rank.rawValue)")
             }
-            .font(.caption.monospacedDigit())
-            .foregroundStyle(RiderTheme.foam)
             if !bio.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 Text(bio).font(.subheadline).fixedSize(horizontal: false, vertical: true)
             }
@@ -1560,13 +1568,47 @@ struct RiderPublicProfileView: View {
                     if let tag = user.username { Text("@" + tag).font(.subheadline).foregroundStyle(RiderTheme.foam) }
                 }
                 Spacer(minLength: 0)
-                if let rank { RiderRankBadge(rank: rank, size: 43) }
+                if !isMine && user.publicProfile != false {
+                    HStack(spacing: 0) {
+                        Button {
+                            busy = true
+                            actionError = false
+                            Task {
+                                defer { busy = false }
+                                do {
+                                    try await RiderCommunity.follow(rider.id, enabled: !following)
+                                    social.follows[rider.id] = !following
+                                    await load(keepPageOnFailure: true)
+                                } catch { actionError = true }
+                            }
+                        } label: {
+                            RiderFollowIcon(following: following)
+                        }
+                        .disabled(busy)
+                        .accessibilityLabel(following ? "Отписаться" : "Подписаться")
+                        .accessibilityAddTraits(following ? .isSelected : [])
+                        NavigationLink {
+                            RiderThreadView(peer: RiderPerson(id: rider.id, name: user.name, username: user.username,
+                                                             avatar: user.avatar, premium: user.premium))
+                        } label: {
+                            RiderCompactAction(icon: "paperplane")
+                        }.accessibilityLabel("Написать")
+                    }
+                    .buttonStyle(.plain)
+                    .fixedSize(horizontal: true, vertical: false)
+                }
             }
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 10) { followCounts(rider) }
-                VStack(alignment: .leading, spacing: 0) { followCounts(rider) }
+            HStack {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 10) { followCounts(rider) }
+                    VStack(alignment: .leading, spacing: 0) { followCounts(rider) }
+                }
+                .font(.caption.monospacedDigit()).foregroundStyle(RiderTheme.foam)
+                Spacer(minLength: 8)
+                if let rank {
+                    RiderRankBadge(rank: rank, size: 38).frame(minWidth: 44, minHeight: 44)
+                }
             }
-            .font(.caption.monospacedDigit()).foregroundStyle(RiderTheme.foam)
             if let birth = user.birthday, birth.count == 5 {
                 let parts = birth.split(separator: "-")
                 if parts.count == 2 { Label("\(parts[1]).\(parts[0])", systemImage: "birthday.cake").font(.caption) }
@@ -1579,31 +1621,6 @@ struct RiderPublicProfileView: View {
                 if rank != nil {
                     Button { showingAchievements = true } label: { RiderCompactAction(icon: "medal") }
                         .accessibilityLabel("Ачивки")
-                }
-                if !isMine && user.publicProfile != false {
-                    Button {
-                        busy = true
-                        actionError = false
-                        Task {
-                            defer { busy = false }
-                            do {
-                                try await RiderCommunity.follow(rider.id, enabled: !following)
-                                social.follows[rider.id] = !following
-                                await load(keepPageOnFailure: true)
-                            } catch { actionError = true }
-                        }
-                    } label: {
-                        RiderFollowIcon(following: following)
-                    }
-                    .disabled(busy)
-                    .accessibilityLabel(following ? "Отписаться" : "Подписаться")
-                    .accessibilityAddTraits(following ? .isSelected : [])
-                    NavigationLink {
-                        RiderThreadView(peer: RiderPerson(id: rider.id, name: user.name, username: user.username,
-                                                         avatar: user.avatar, premium: user.premium))
-                    } label: {
-                        RiderCompactAction(icon: "paperplane")
-                    }.accessibilityLabel("Написать")
                 }
                 if let rides = page?.rides {
                     NavigationLink {

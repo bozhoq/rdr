@@ -2007,7 +2007,7 @@ struct RiderThreadView: View {
     @StateObject private var recorder = RiderChatRecorder()
     private var chatStyle = RiderChatStyle()
     @State private var conversation: RiderPerson?
-    @State private var messages: [RiderMessage] = []
+    @State private var messages: [RiderMessage]?
     @State private var messageRevision = 0
     @State private var visible = false
     @State private var sendingAt: Date?
@@ -2029,32 +2029,17 @@ struct RiderThreadView: View {
     private var text: String { draft.trimmingCharacters(in: .whitespacesAndNewlines) }
 
     var body: some View {
-        ScrollViewReader { scroll in
-            ScrollView {
-                LazyVStack(spacing: 9) {
-                    ForEach(messages) { message in bubble(message) }
-                    if let sendingAt {
-                        HStack {
-                            if let attachment { Text(attachment.contentType.hasPrefix("image/") ? "Фото" : attachment.contentType == "audio/mp4" ? "Голосовое" : "Кружочек") }
-                            if !text.isEmpty { Text(text) }
-                            RiderPostDate(date: sendingAt)
-                            receipt(delivered: false, read: false)
-                        }
-                        .font(.caption).padding(10)
-                        .background { chatStyle.bubble(mine: true) }
-                        .frame(maxWidth: .infinity, alignment: .trailing)
+        Group {
+            if let messages {
+                messageHistory(messages)
+            } else {
+                ScrollView {
+                    if error == nil {
+                        ProgressView().frame(maxWidth: .infinity).padding(20)
                     }
                 }
-                .padding(14)
+                .refreshable { await load() }
             }
-            .contentShape(Rectangle())
-            .simultaneousGesture(TapGesture().onEnded { composingText = false })
-            .scrollDismissesKeyboard(.interactively)
-            .defaultScrollAnchor(.bottom)
-            .onChange(of: messages.last?.id) { _, id in
-                if let id { scroll.scrollTo(id, anchor: .bottom) }
-            }
-            .refreshable { await load() }
         }
         .overlay {
             if let preview = recorder.preview, recorder.beganAt != nil {
@@ -2105,6 +2090,42 @@ struct RiderThreadView: View {
                 await load()
                 do { try await Task.sleep(for: .seconds(3)) } catch { break }
             }
+        }
+    }
+
+    private func messageHistory(_ messages: [RiderMessage]) -> some View {
+        ScrollViewReader { scroll in
+            ScrollView {
+                VStack(spacing: 0) {
+                    LazyVStack(spacing: 9) {
+                        ForEach(messages) { message in bubble(message) }
+                        if let sendingAt {
+                            HStack {
+                                if let attachment { Text(attachment.contentType.hasPrefix("image/") ? "Фото" : attachment.contentType == "audio/mp4" ? "Голосовое" : "Кружочек") }
+                                if !text.isEmpty { Text(text) }
+                                RiderPostDate(date: sendingAt)
+                                receipt(delivered: false, read: false)
+                            }
+                            .font(.caption).padding(10)
+                            .background { chatStyle.bubble(mine: true) }
+                            .frame(maxWidth: .infinity, alignment: .trailing)
+                        }
+                    }
+                    .padding(14)
+                    Color.clear.frame(height: 1).accessibilityHidden(true).id("threadBottom")
+                }
+            }
+            .contentShape(Rectangle())
+            .simultaneousGesture(TapGesture().onEnded { composingText = false })
+            .scrollDismissesKeyboard(.interactively)
+            .defaultScrollAnchor(.bottom)
+            .onChange(of: messages.last?.id) { _, _ in
+                scroll.scrollTo("threadBottom", anchor: .bottom)
+            }
+            .onChange(of: sendingAt != nil) { _, sending in
+                if sending { scroll.scrollTo("threadBottom", anchor: .bottom) }
+            }
+            .refreshable { await load() }
         }
     }
 
