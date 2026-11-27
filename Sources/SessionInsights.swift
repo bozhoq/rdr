@@ -53,6 +53,7 @@ struct RiderPublicRide: Codable, Equatable, Identifiable {
     var kite: String? = nil
     var board: String? = nil
     var windMS: Double? = nil
+    var windDirection: Double? = nil
     var heightSum: Double? = nil
 
     var date: Date { Date(timeIntervalSince1970: startedAt) }
@@ -74,6 +75,7 @@ struct RiderPublicRide: Codable, Equatable, Identifiable {
                             distance: jumps.compactMap(\.distanceMeters).filter { (0...100000).contains($0) }.max(),
                             spot: setup?.spot, kite: setup?.kiteTitle, board: setup?.boardTitle,
                             windMS: wind.flatMap { (0...150).contains($0) ? $0 : nil },
+                            windDirection: session.wind?.direction.flatMap { (0...360).contains($0) ? $0 : nil },
                             heightSum: heights.reduce(0, +))
             }
     }

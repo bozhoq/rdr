@@ -27,6 +27,7 @@ struct RiderStory: Decodable, Identifiable {
 }
 
 struct RiderStoriesStrip: View {
+    @ObservedObject var recorder: SessionRecorder
     @AppStorage("rider.profilePhoto") private var avatar = Data()
     @Environment(\.scenePhase) private var phase
     @State private var stories: [RiderStory] = []
@@ -45,26 +46,40 @@ struct RiderStoriesStrip: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Button {
-                expanded.toggle()
-            } label: {
-                HStack(spacing: 8) {
-                    let preview = stories.first { !$0.seen } ?? stories.first
-                    storyAvatar(photo: preview?.author.avatar ?? avatar, fresh: hasUnseen, size: 26)
-                    Text("Истории").font(.subheadline.weight(.semibold))
-                    Spacer()
-                    Image(systemName: expanded ? "chevron.up" : "chevron.down").font(.caption.weight(.semibold))
+            HStack(spacing: 6) {
+                Button {
+                    expanded.toggle()
+                } label: {
+                    HStack(spacing: 7) {
+                        let preview = stories.first { !$0.seen } ?? stories.first
+                        storyAvatar(photo: preview?.author.avatar ?? avatar, fresh: hasUnseen, size: 25)
+                        Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                            .font(.caption2.weight(.semibold))
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 8)
+                    .frame(maxWidth: .infinity, minHeight: 44)
+                    .background(RiderTheme.surface, in: RoundedRectangle(cornerRadius: 12))
+                    .contentShape(.interaction, Rectangle())
                 }
-                .frame(maxWidth: .infinity, minHeight: 44)
-                .contentShape(Rectangle())
+                .buttonStyle(.plain)
+                .accessibilityLabel("Истории")
+                .accessibilityValue(hasUnseen ? "Есть новые истории" : "Нет новых историй")
+                .accessibilityHint(expanded ? "Свернуть истории" : "Показать истории")
+
+                RiderPeopleEntry(recorder: recorder)
             }
-            .buttonStyle(.plain)
-            .accessibilityValue(hasUnseen ? "Есть новые истории" : "Нет новых историй")
-            .accessibilityHint(expanded ? "Свернуть истории" : "Показать истории")
 
             if expanded {
                 if failed {
-                    Button("Обновить истории") { Task { await load() } }.font(.caption)
+                    Button {
+                        Task { await load() }
+                    } label: {
+                        Text("Обновить истории").font(.caption)
+                            .frame(minHeight: 44)
+                            .contentShape(.interaction, Rectangle())
+                    }
+                    .padding(.horizontal, 8)
                 }
                 ScrollView(.horizontal) {
                     HStack(alignment: .top, spacing: 8) {
@@ -77,7 +92,8 @@ struct RiderStoriesStrip: View {
                                     }
                                 Text("Добавить").font(.caption2)
                             }
-                            .frame(width: 65, height: 66)
+                            .frame(width: 65)
+                            .frame(minHeight: 66)
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
@@ -91,21 +107,19 @@ struct RiderStoriesStrip: View {
                                     storyAvatar(photo: author.avatar ?? Data(), fresh: fresh, size: 44)
                                     Text(mine ? "Твои истории" : author.name).font(.caption2).lineLimit(1)
                                 }
-                                .frame(width: 72, height: 66)
+                                .frame(width: 72)
+                                .frame(minHeight: 66)
                                 .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
                             .accessibilityLabel(mine ? "Твои истории" : author.name + (fresh ? ", новые истории" : ", истории"))
                         }
                     }
-                    .padding(.horizontal, 2)
+                    .padding(.horizontal, 4)
                 }
                 .scrollIndicators(.hidden)
             }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 4)
-        .background(RiderTheme.surface, in: RoundedRectangle(cornerRadius: 15))
         .sheet(isPresented: $composing) {
             RiderStoryComposer { stories = $0; composing = false }
         }
@@ -198,6 +212,7 @@ private struct RiderStoryComposer: View {
                 }
                 TextField("Подпись", text: $caption, axis: .vertical).focused($typing).lineLimit(2...4)
                     .onChange(of: caption) { _, value in caption = String(value.prefix(250)) }
+                RiderMentionSuggestions.forText($caption, editing: typing, limit: 250)
                 if loading || publishing { ProgressView() }
                 if let error { Text(error).foregroundStyle(.red) }
             }
@@ -371,20 +386,13 @@ private struct RiderStorySlide: View {
     }
 
     var body: some View {
-        ZStack {
-            Color.black.ignoresSafeArea()
-            if let player {
-                VideoPlayer(player: player).allowsHitTesting(false)
-            } else if let image {
-                Image(uiImage: image).resizable().scaledToFit().allowsHitTesting(false)
-            }
-            if !ready && !failed { ProgressView().tint(.white).allowsHitTesting(false) }
-            if failed { Text("История недоступна").allowsHitTesting(false) }
-            storyControls
-                .allowsHitTesting(!changingLike && !sending && !deleting)
+        VStack(spacing: 0) {
+            header
+            media
+            footer
         }
-        .safeAreaInset(edge: .top, spacing: 0) { header }
-        .safeAreaInset(edge: .bottom, spacing: 0) { footer }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background { Color.black.ignoresSafeArea() }
         .foregroundStyle(.white)
         .tint(.white)
         .preferredColorScheme(.dark)
@@ -410,6 +418,22 @@ private struct RiderStorySlide: View {
         } message: {
             Text(error ?? "")
         }
+    }
+
+    private var media: some View {
+        ZStack {
+            if let player {
+                VideoPlayer(player: player).allowsHitTesting(false)
+            } else if let image {
+                Image(uiImage: image).resizable().scaledToFit().allowsHitTesting(false)
+            }
+            if !ready && !failed { ProgressView().tint(.white).allowsHitTesting(false) }
+            if failed { Text("История недоступна").allowsHitTesting(false) }
+            storyControls
+                .allowsHitTesting(!changingLike && !sending && !deleting)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .clipped()
     }
 
     private var storyControls: some View {
@@ -511,8 +535,8 @@ private struct RiderStorySlide: View {
 
     private var footer: some View {
         VStack(spacing: 8) {
-            if !story.caption.isEmpty {
-                Text(story.caption).font(.subheadline).multilineTextAlignment(.center)
+            if !typing && !story.caption.isEmpty {
+                RiderLinkedText(text: story.caption, linkTint: .cyan).font(.subheadline).multilineTextAlignment(.center)
                     .lineLimit(4)
                     .padding(10)
                     .background(.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
@@ -531,6 +555,7 @@ private struct RiderStorySlide: View {
                     Label("Ответ отправлен", systemImage: "checkmark")
                         .font(.caption).foregroundStyle(.white.opacity(0.8))
                 }
+                RiderMentionSuggestions.forText($draft, editing: typing, limit: 1000)
                 HStack(spacing: 4) {
                     TextField("Ответить автору…", text: $draft)
                         .focused($typing)

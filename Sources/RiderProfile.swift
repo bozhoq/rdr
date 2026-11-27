@@ -273,6 +273,10 @@ enum RiderCommunity {
         return data
     }
 
+    static func commentLikes(_ comment: UUID, for post: UUID, offset: Int) async throws -> RiderReaction {
+        try await decode("posts/\(post.uuidString.lowercased())/comments/\(comment.uuidString.lowercased())/like/\(offset)")
+    }
+
     static func shakas(for post: UUID, offset: Int) async throws -> RiderReaction {
         try await decode("posts/\(post.uuidString.lowercased())/shakas/\(offset)")
     }
@@ -694,7 +698,7 @@ struct RiderProfileView: View {
 
     private func profile(rank: RiderRank) -> some View {
         VStack(alignment: .leading, spacing: 13) {
-            HStack(spacing: 15) {
+            HStack(spacing: 9) {
                 PhotosPicker(selection: $picked, matching: .images) {
                     RiderAvatar(photo: photo, size: 62)
                         .overlay { Circle().strokeBorder(RiderTheme.foam.opacity(0.8), lineWidth: 2) }
@@ -702,44 +706,38 @@ struct RiderProfileView: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("Выбрать фото райдера")
                 .disabled(savingProfile)
-                VStack(alignment: .leading, spacing: 4) {
-                    let title = name.trimmingCharacters(in: .whitespacesAndNewlines)
-                    RiderName(title.isEmpty ? "Райдер" : title, premium: mine?.profile.premium).font(.title2.bold())
-                    if !username.isEmpty {
-                        Text("@" + username).font(.subheadline).foregroundStyle(RiderTheme.foam)
+                let title = name.trimmingCharacters(in: .whitespacesAndNewlines)
+                RiderProfileTitle(name: title.isEmpty ? "Райдер" : title, username: username, premium: mine?.profile.premium)
+                HStack(spacing: 0) {
+                    Button { showingRanks = true } label: {
+                        RiderRankBadge(rank: rank, size: 32)
+                            .frame(minWidth: 44, minHeight: 44)
+                            .contentShape(Rectangle())
                     }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Ранг \(rank.rawValue)")
+                    Button {
+                        draftName = name; draftBio = bio; draftPhoto = photo; editorPicker = nil
+                        let saved = mine?.profile.birthday ?? birthDay
+                        hasBirth = !saved.isEmpty; draftBirth = Self.birthFormat.date(from: saved) ?? Date()
+                        visibleBirth = mine?.profile.showBirthday ?? birthVisible
+                        draftUsername = username
+                        profileError = nil
+                        editing = true
+                    } label: {
+                        RiderCompactAction(icon: "pencil")
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Изменить профиль")
                 }
-                Spacer(minLength: 0)
-                Button {
-                    draftName = name; draftBio = bio; draftPhoto = photo; editorPicker = nil
-                    let saved = mine?.profile.birthday ?? birthDay
-                    hasBirth = !saved.isEmpty; draftBirth = Self.birthFormat.date(from: saved) ?? Date()
-                    visibleBirth = mine?.profile.showBirthday ?? birthVisible
-                    draftUsername = username
-                    profileError = nil
-                    editing = true
-                } label: {
-                    RiderCompactAction(icon: "pencil")
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Изменить профиль")
+                .fixedSize(horizontal: true, vertical: false)
             }
-            HStack {
-                ViewThatFits(in: .horizontal) {
-                    HStack(spacing: 10) { followCounts }
-                    VStack(alignment: .leading, spacing: 4) { followCounts }
-                }
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(RiderTheme.foam)
-                Spacer(minLength: 8)
-                Button { showingRanks = true } label: {
-                    RiderRankBadge(rank: rank, size: 38)
-                        .frame(minWidth: 44, minHeight: 44)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Ранг \(rank.rawValue)")
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 10) { followCounts }
+                VStack(alignment: .leading, spacing: 4) { followCounts }
             }
+            .font(.caption.monospacedDigit())
+            .foregroundStyle(RiderTheme.foam)
             if !bio.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 Text(bio).font(.subheadline).fixedSize(horizontal: false, vertical: true)
             }
@@ -938,11 +936,8 @@ private struct RiderProfilePublications: View {
                         Button {
                             gallery = GallerySelection(initial: item.id, posts: posts)
                         } label: {
-                            RiderTheme.surface
-                                .aspectRatio(1, contentMode: .fit)
-                                .overlay { RiderPostSquare(post: item.post).allowsHitTesting(false) }
-                                .clipped()
-                                .contentShape(Rectangle())
+                            RiderPostSquare(post: item.post)
+                                .contentShape(.interaction, Rectangle())
                         }
                         .buttonStyle(.plain)
                         .accessibilityLabel(item.post.deletionDescription)
@@ -1026,7 +1021,6 @@ private struct RiderProfileGallery: View {
 
     private struct Detail: Identifiable {
         let item: RiderProfilePublications.Entry
-        let comments: Bool
         var id: UUID { item.id }
     }
 
@@ -1078,7 +1072,7 @@ private struct RiderProfileGallery: View {
             NavigationStack {
                 RiderPostDetail(original: item.post, author: item.remote?.author ?? name,
                                 username: item.remote?.username ?? username, avatar: item.remote?.avatar ?? avatar,
-                                editable: isMine && item.post.sourceID == nil, openComments: request.comments, entry: item.remote)
+                                editable: isMine && item.post.sourceID == nil, entry: item.remote)
             }
         }
     }
@@ -1090,7 +1084,7 @@ private struct RiderProfileGallery: View {
                 Menu {
                     if post.published != true && RiderCommunity.endpoint != nil {
                         Button("Опубликовать", systemImage: "arrow.up.circle") {
-                            detail = Detail(item: item, comments: false)
+                            detail = Detail(item: item)
                         }
                     }
                     Button("Удалить", systemImage: "trash", role: .destructive) { deleting = post }
@@ -1103,7 +1097,7 @@ private struct RiderProfileGallery: View {
             }
             RiderFeedCard(post: post, author: item.remote?.author ?? name, username: item.remote?.username ?? username,
                           avatar: item.remote?.avatar ?? avatar, editable: isMine && item.post.sourceID == nil,
-                          entry: item.remote, onComments: { detail = Detail(item: item, comments: true) },
+                          entry: item.remote, opensPost: false,
                           onConversation: { conversation = $0 })
         }
     }
@@ -1428,28 +1422,26 @@ private struct RiderFollowList: View {
     @State private var failed = false
     @State private var search = ""
 
+    private var query: String { RiderSearch.query(search) }
+
     var body: some View {
         List {
-            if let people {
-                if people.isEmpty {
-                    ContentUnavailableView(kind == .followers ? "Пока нет подписчиков" : "Пока нет подписок",
-                                           systemImage: "person.2")
-                }
-                let matches = people.filter { search.isEmpty || $0.name.localizedCaseInsensitiveContains(search) || $0.handle.localizedCaseInsensitiveContains(search) }
-                if !search.isEmpty && matches.isEmpty { Text("Никого не найдено").foregroundStyle(.secondary) }
-                ForEach(matches) { person in
-                    NavigationLink {
-                        RiderPublicProfileView(id: person.id)
-                    } label: {
-                        RiderPostHeader(author: person.name, username: person.username, avatar: person.avatar, premium: person.premium)
-                            .padding(.vertical, 4)
+            Section(kind.title) {
+                if let people {
+                    let matches = people.filter { RiderSearch.matches($0, query: query) }
+                    if matches.isEmpty {
+                        Text(query.isEmpty
+                             ? (kind == .followers ? "Пока нет подписчиков" : "Пока нет подписок")
+                             : "Ничего не найдено").foregroundStyle(.secondary)
                     }
+                    ForEach(matches) { riderRow($0) }
+                } else if failed {
+                    Button("Повторить загрузку") { Task { await load() } }
+                } else {
+                    ProgressView()
                 }
-            } else if failed {
-                Button("Повторить загрузку") { Task { await load() } }
-            } else {
-                ProgressView()
             }
+            RiderGlobalSearchSection(query: query, excluding: Set((people ?? []).map(\.id))) { riderRow($0) }
         }
         .navigationTitle(kind.title)
         .navigationBarTitleDisplayMode(.inline)
@@ -1460,6 +1452,13 @@ private struct RiderFollowList: View {
         .refreshable { await load() }
     }
 
+    private func riderRow(_ person: RiderPerson) -> some View {
+        NavigationLink { RiderPublicProfileView(id: person.id) } label: {
+            RiderPostHeader(author: person.name, username: person.username, avatar: person.avatar, premium: person.premium)
+                .padding(.vertical, 4)
+        }
+    }
+
     @MainActor private func load() async {
         do {
             let result: [RiderPerson] = try await RiderCommunity.decode("riders/\(id)/\(kind.rawValue)")
@@ -1467,6 +1466,30 @@ private struct RiderFollowList: View {
         } catch {
             if !Task.isCancelled { people = nil; failed = true }
         }
+    }
+}
+
+private struct RiderProfileTitle: View {
+    let name: String
+    let username: String?
+    let premium: Bool?
+    @Environment(\.dynamicTypeSize) private var textSize
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            RiderName(name, premium: premium)
+                .font(.title2.bold())
+                .lineLimit(textSize.isAccessibilitySize ? 2 : 1)
+                .minimumScaleFactor(0.62)
+            if let username, !username.isEmpty {
+                Text("@" + username)
+                    .font(.subheadline)
+                    .foregroundStyle(RiderTheme.foam)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.65)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -1558,57 +1581,21 @@ struct RiderPublicProfileView: View {
 
     private func profile(_ rider: RemoteRider, isMine: Bool, rank: RiderRank?) -> some View {
         let user = rider.profile
-        let following = social.follows[rider.id] ?? rider.following
-        return VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 15) {
-                RiderAvatar(photo: user.avatar ?? Data(), size: 62)
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 6) {
+                RiderAvatar(photo: user.avatar ?? Data(), size: 50)
                     .overlay { Circle().strokeBorder(RiderTheme.foam.opacity(0.8), lineWidth: 2) }
-                VStack(alignment: .leading, spacing: 4) {
-                    RiderName(user.name, premium: user.premium).font(.title2.bold())
-                    if let tag = user.username { Text("@" + tag).font(.subheadline).foregroundStyle(RiderTheme.foam) }
-                }
-                Spacer(minLength: 0)
-                if !isMine && user.publicProfile != false {
-                    HStack(spacing: 0) {
-                        Button {
-                            busy = true
-                            actionError = false
-                            Task {
-                                defer { busy = false }
-                                do {
-                                    try await RiderCommunity.follow(rider.id, enabled: !following)
-                                    social.follows[rider.id] = !following
-                                    await load(keepPageOnFailure: true)
-                                } catch { actionError = true }
-                            }
-                        } label: {
-                            RiderFollowIcon(following: following)
-                        }
-                        .disabled(busy)
-                        .accessibilityLabel(following ? "Отписаться" : "Подписаться")
-                        .accessibilityAddTraits(following ? .isSelected : [])
-                        NavigationLink {
-                            RiderThreadView(peer: RiderPerson(id: rider.id, name: user.name, username: user.username,
-                                                             avatar: user.avatar, premium: user.premium))
-                        } label: {
-                            RiderCompactAction(icon: "paperplane")
-                        }.accessibilityLabel("Написать")
-                    }
-                    .buttonStyle(.plain)
-                    .fixedSize(horizontal: true, vertical: false)
+                RiderProfileTitle(name: user.name, username: user.username, premium: user.premium)
+                if rank != nil || (!isMine && user.publicProfile != false) {
+                    profileActions(rider, isMine: isMine, rank: rank)
                 }
             }
-            HStack {
-                ViewThatFits(in: .horizontal) {
-                    HStack(spacing: 10) { followCounts(rider) }
-                    VStack(alignment: .leading, spacing: 0) { followCounts(rider) }
-                }
-                .font(.caption.monospacedDigit()).foregroundStyle(RiderTheme.foam)
-                Spacer(minLength: 8)
-                if let rank {
-                    RiderRankBadge(rank: rank, size: 38).frame(minWidth: 44, minHeight: 44)
-                }
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 10) { followCounts(rider) }
+                VStack(alignment: .leading, spacing: 0) { followCounts(rider) }
             }
+            .font(.caption.monospacedDigit())
+            .foregroundStyle(RiderTheme.foam)
             if let birth = user.birthday, birth.count == 5 {
                 let parts = birth.split(separator: "-")
                 if parts.count == 2 { Label("\(parts[1]).\(parts[0])", systemImage: "birthday.cake").font(.caption) }
@@ -1652,6 +1639,44 @@ struct RiderPublicProfileView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RiderTheme.lagoon, in: RoundedRectangle(cornerRadius: 24))
         .tint(RiderTheme.foam)
+    }
+
+    private func profileActions(_ rider: RemoteRider, isMine: Bool, rank: RiderRank?) -> some View {
+        let user = rider.profile
+        let following = social.follows[rider.id] ?? rider.following
+        return HStack(spacing: 0) {
+            if let rank {
+                RiderRankBadge(rank: rank, size: 32).frame(width: 44, height: 44)
+            }
+            if !isMine && user.publicProfile != false {
+                Button {
+                    busy = true
+                    actionError = false
+                    Task {
+                        defer { busy = false }
+                        do {
+                            try await RiderCommunity.follow(rider.id, enabled: !following)
+                            social.follows[rider.id] = !following
+                            await load(keepPageOnFailure: true)
+                        } catch { actionError = true }
+                    }
+                } label: {
+                    RiderFollowIcon(following: following)
+                }
+                .disabled(busy)
+                .accessibilityLabel(following ? "Отписаться" : "Подписаться")
+                .accessibilityAddTraits(following ? .isSelected : [])
+                NavigationLink {
+                    RiderThreadView(peer: RiderPerson(id: rider.id, name: user.name, username: user.username,
+                                                     avatar: user.avatar, premium: user.premium))
+                } label: {
+                    RiderCompactAction(icon: "paperplane")
+                }
+                .accessibilityLabel("Написать")
+            }
+        }
+        .buttonStyle(.plain)
+        .fixedSize(horizontal: true, vertical: false)
     }
 
     @ViewBuilder private func followCounts(_ rider: RemoteRider) -> some View {

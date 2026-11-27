@@ -134,18 +134,42 @@ def directory(db, owner, raw, card):
     query = raw.get("query", "")
     if not isinstance(query, str) or len(query) > 100:
         raise ValueError()
-    q = folded(query.lstrip("@"))
+    q = folded(query.strip().lstrip("@"))
+    mentions = raw.get("mentions") is True
+    if mentions and not q:
+        return {"people": [], "nearby": [], "following": [], "followers": []}
     if q:
         db.create_function("fold", 1, lambda s: folded(s or ""), deterministic=True)
-        rows = db.execute("""WITH candidates AS (
+        matches = """WITH candidates AS (
           SELECT id,fold(json_extract(document,'$.name')) AS n,fold(json_extract(document,'$.username')) AS u
-          FROM public_profiles WHERE id<>?)
-          SELECT p.id,p.document FROM candidates c JOIN profiles p ON p.id=c.id
-          WHERE instr(c.u,?) OR instr(c.n,?)
-          ORDER BY CASE WHEN c.u=? THEN 0 WHEN c.n=? THEN 1 WHEN instr(c.u,?)=1 THEN 2
-                        WHEN instr(c.n,?)=1 THEN 3 ELSE 4 END,c.u,c.id LIMIT 40""",
-                          (owner,q,q,q,q,q,q))
-        return {"people":[card(*row) for row in rows], "nearby":[]}
+          FROM public_profiles WHERE id<>:owner
+        ), matches AS (
+          SELECT id,u,CASE WHEN u=:q THEN 0 WHEN n=:q THEN 1 WHEN instr(u,:q)=1 THEN 2
+                           WHEN instr(n,:q)=1 THEN 3 ELSE 4 END AS relevance
+          FROM candidates WHERE instr(u,:q) OR instr(n,:q)
+        )"""
+        params = {"owner": owner, "q": q}
+        if not mentions:
+            rows = db.execute(matches + """
+                SELECT p.id,p.document FROM matches m JOIN profiles p ON p.id=m.id
+                ORDER BY m.relevance,m.u,m.id LIMIT 40""", params)
+            return {"people": [card(*row) for row in rows], "nearby": []}
+
+        groups = {"people": [], "nearby": [], "following": [], "followers": []}
+        rows = db.execute(matches + """, relations AS (
+            SELECT m.*, CASE WHEN EXISTS(SELECT 1 FROM follows WHERE owner=:owner AND target=m.id) THEN 'following'
+                             WHEN EXISTS(SELECT 1 FROM follows WHERE owner=m.id AND target=:owner) THEN 'followers'
+                             ELSE 'people' END AS relation
+            FROM matches m WHERE m.u <> ''
+        ), ranked AS (
+            SELECT id,relation,row_number() OVER (PARTITION BY relation ORDER BY relevance,u,id) AS position
+            FROM relations
+        )
+        SELECT p.id,p.document,r.relation FROM ranked r JOIN profiles p ON p.id=r.id
+        WHERE r.position <= 5 ORDER BY r.relation,r.position""", params)
+        for person_id, document, relation in rows:
+            groups[relation].append(card(person_id, document))
+        return groups
     # Overlap between accounts the viewer follows and their subscriptions.
     rows = db.execute("""SELECT p.id,p.document FROM public_profiles p WHERE p.id<>?
         AND NOT EXISTS(SELECT 1 FROM follows WHERE owner=? AND target=p.id)

@@ -205,6 +205,29 @@ private struct Tabs: View {
         }.withRenderingMode(.alwaysOriginal)
     }
 
+    private static let spotIcon: UIImage = {
+        UIGraphicsImageRenderer(size: CGSize(width: 27, height: 27)).image { renderer in
+            let context = renderer.cgContext
+            context.setStrokeColor(UIColor.black.cgColor)
+            context.setLineWidth(1.7)
+            context.setLineCap(.round)
+            context.strokeEllipse(in: CGRect(x: 4.5, y: 19, width: 18, height: 5))
+            context.move(to: CGPoint(x: 12.5, y: 21))
+            context.addQuadCurve(to: CGPoint(x: 14.8, y: 8.5), control: CGPoint(x: 12.4, y: 14))
+            context.move(to: CGPoint(x: 6.5, y: 8))
+            context.addQuadCurve(to: CGPoint(x: 14.8, y: 8.5), control: CGPoint(x: 9.5, y: 4))
+            context.addQuadCurve(to: CGPoint(x: 20.8, y: 5.5), control: CGPoint(x: 16.3, y: 4.2))
+            context.move(to: CGPoint(x: 7.5, y: 13))
+            context.addQuadCurve(to: CGPoint(x: 14.8, y: 8.5), control: CGPoint(x: 10, y: 8.3))
+            context.addQuadCurve(to: CGPoint(x: 22.5, y: 12), control: CGPoint(x: 20, y: 7.6))
+            context.move(to: CGPoint(x: 14.8, y: 8.5))
+            context.addQuadCurve(to: CGPoint(x: 12.2, y: 3.5), control: CGPoint(x: 15, y: 4.8))
+            context.move(to: CGPoint(x: 14.8, y: 8.5))
+            context.addQuadCurve(to: CGPoint(x: 18.3, y: 14.2), control: CGPoint(x: 17.6, y: 9.7))
+            context.strokePath()
+        }.withRenderingMode(.alwaysTemplate)
+    }()
+
     private static let rideIcon: UIImage = {
         let size = CGSize(width: 31, height: 25)
         return UIGraphicsImageRenderer(size: size).image { renderer in
@@ -287,7 +310,7 @@ private struct Tabs: View {
             NavigationStack {
                 SpotsView(recorder: recorder) { selectedTab = .record }
             }
-            .tabItem { Label("Спот", systemImage: "mappin.and.ellipse") }
+            .tabItem { Label { Text("Спот") } icon: { Image(uiImage: Self.spotIcon) } }
             .tag(Tab.spot)
 
             NavigationStack {
@@ -514,7 +537,9 @@ private struct RecordingView: View {
     private var preparation: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
-                RDRWordmark().frame(maxWidth: .infinity)
+                RDRWordmark()
+                    .frame(maxWidth: .infinity)
+                    .overlay(alignment: .trailing) { RiderSOSStatusButton(recorder: recorder) }
 
                 VStack(spacing: 0) {
                     Picker("Спот и ветер", selection: $recorder.automaticConditions) {
@@ -540,17 +565,25 @@ private struct RecordingView: View {
                             LabeledContent("Спот", value: recorder.draftSetup.spot.isEmpty ? "Выбрать" : recorder.draftSetup.spot)
                         }.padding(.vertical, 10)
                         Divider()
-                        Picker("Ветер", selection: $recorder.manualWind) {
-                            Text("Не указан").tag(ManualWindRange?.none)
-                            ForEach(ManualWindRange.allCases) { range in Text(range.title).tag(Optional(range)) }
-                        }.pickerStyle(.menu)
-                        Picker("Откуда дует", selection: $recorder.manualDirection) {
-                            Text("Не указано").tag(Int?.none)
-                            ForEach(0..<8, id: \.self) { i in
-                                let bearing = Double(i * 45)
-                                Text(SpotForecast.compass(bearing) + " " + SpotForecast.windArrow(bearing)).tag(Optional(i * 45))
+                        LabeledContent("Ветер") {
+                            Picker("Ветер", selection: $recorder.manualWind) {
+                                Text("Не указан").tag(ManualWindRange?.none)
+                                ForEach(ManualWindRange.allCases) { range in Text(range.title).tag(Optional(range)) }
                             }
-                        }.pickerStyle(.menu)
+                            .labelsHidden()
+                            .pickerStyle(.menu)
+                        }
+                        LabeledContent("Направление ветра") {
+                            Picker("Направление ветра", selection: $recorder.manualDirection) {
+                                Text("Не указано").tag(Int?.none)
+                                ForEach(0..<8, id: \.self) { i in
+                                    let bearing = Double(i * 45)
+                                    Text(SpotForecast.compass(bearing) + " " + SpotForecast.windArrow(bearing)).tag(Optional(i * 45))
+                                }
+                            }
+                            .labelsHidden()
+                            .pickerStyle(.menu)
+                        }
                         if !recorder.manualWindValid { Text("Укажите диапазон ветра.").font(.footnote) }
                     }
                     Divider()
@@ -588,8 +621,6 @@ private struct RecordingView: View {
                 } label: {
                     Label("Калибровать датчики", systemImage: "scope").frame(maxWidth: .infinity)
                 }.buttonStyle(.bordered).disabled(device == .watch)
-
-                RiderSOSReadiness(recorder: recorder).lagoonCard()
 
                 if !recorder.hasRecordingSensors { Text("Датчики записи пока недоступны.").foregroundStyle(.secondary) }
                 if recorder.analyzingSessionID != nil { ProgressView("Разбираем сохранённую сессию…") }
@@ -890,7 +921,7 @@ private struct StopRecordingSlider: View {
 
                     .offset(x: min(travel, max(0, dragOffset)))
 
-                    .gesture(DragGesture(minimumDistance: 8)
+                    .gesture(DragGesture(minimumDistance: 8, coordinateSpace: .global)
 
                         .updating($dragOffset) { value, state, _ in state = max(0, value.translation.width) }
 

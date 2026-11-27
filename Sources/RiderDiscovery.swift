@@ -6,6 +6,8 @@ import CryptoKit
 struct RiderDirectory: Decodable {
     var people: [RiderPerson]
     var nearby: [RiderPerson]
+    var following: [RiderPerson]? = nil
+    var followers: [RiderPerson]? = nil
 }
 struct RiderPhoneStatus: Decodable {
     let verified: Bool
@@ -16,9 +18,157 @@ private struct DirectoryInput: Encodable {
     var query = ""
     var lat: Double?
     var lon: Double?
+    var mentions: Bool? = nil
 }
 private func directory(_ input: DirectoryInput) async throws -> RiderDirectory {
     try await RiderCommunity.decode("people/search", method: "POST", body: JSONEncoder().encode(input))
+}
+
+enum RiderSearch {
+    static func query(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return String(trimmed.drop(while: { $0 == "@" }).prefix(100))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    static func matches(_ rider: RiderPerson, query: String) -> Bool {
+        query.isEmpty || rider.name.localizedStandardContains(query) ||
+            rider.username?.localizedStandardContains(query) == true
+    }
+}
+
+struct RiderGlobalSearchSection<Row: View>: View {
+    let query: String
+    let excluding: Set<String>
+    @ViewBuilder let row: (RiderPerson) -> Row
+    @State private var response: (query: String, people: [RiderPerson])?
+    @State private var failedQuery: String?
+
+    var body: some View {
+        if !query.isEmpty {
+            Section("Глобальный поиск") {
+                if response?.query == query, let response {
+                    let people = response.people.filter { !excluding.contains($0.id) }
+                    if people.isEmpty {
+                        Text("Других совпадений нет").foregroundStyle(.secondary)
+                    } else {
+                        Text("Возможно, вы искали:").font(.subheadline).foregroundStyle(.secondary)
+                        ForEach(people) { row($0) }
+                    }
+                } else if failedQuery == query {
+                    Button("Повторить поиск") { Task { await load(query) } }
+                } else {
+                    ProgressView()
+                }
+            }
+            .task(id: query) { await load(query) }
+        }
+    }
+
+    @MainActor private func load(_ query: String) async {
+        failedQuery = nil
+        do {
+            try await Task.sleep(for: .milliseconds(250))
+            let result = try await directory(DirectoryInput(query: query))
+            try Task.checkCancellation()
+            response = (query, result.people)
+        } catch {
+            if !Task.isCancelled { failedQuery = query }
+        }
+    }
+}
+
+struct RiderMentionSuggestions: View {
+    @Binding private var text: String
+    let limit: Int
+    @State private var result: (query: String, page: RiderDirectory)?
+    @State private var failedQuery: String?
+
+    private struct SuggestionGroup: Identifiable {
+        let title: String
+        let people: [RiderPerson]
+        var id: String { title }
+    }
+
+    private static let pattern = #"(?<![A-Za-z0-9_.+@])@[A-Za-z0-9_]{1,24}\z"#
+    private static func token(in text: String) -> Range<String.Index>? {
+        text.range(of: pattern, options: .regularExpression)
+    }
+
+    @ViewBuilder static func forText(_ text: Binding<String>, editing: Bool, limit: Int) -> some View {
+        if editing && token(in: text.wrappedValue) != nil {
+            RiderMentionSuggestions(text: text, limit: limit)
+        }
+    }
+
+    private var token: Range<String.Index>? { Self.token(in: text) }
+    private var query: String? { token.map { String(text[$0].dropFirst()).lowercased() } }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            if let query, let result, result.query == query {
+                let groups = [
+                    SuggestionGroup(title: "Подписки", people: result.page.following ?? []),
+                    SuggestionGroup(title: "Подписчики", people: result.page.followers ?? []),
+                    SuggestionGroup(title: "Глобальный поиск", people: result.page.people)
+                ].filter { !$0.people.isEmpty }
+                if groups.isEmpty {
+                    Text("Нет совпадений").font(.caption).foregroundStyle(.secondary)
+                } else {
+                    Text("Возможно, вы искали:").font(.caption.weight(.semibold))
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 3) {
+                            ForEach(groups) { group in
+                                Text(group.title).font(.caption2).foregroundStyle(.secondary)
+                                ForEach(group.people) { person in candidate(person, query: query) }
+                            }
+                        }
+                    }
+                    .scrollBounceBehavior(.basedOnSize)
+                    .frame(maxHeight: 116)
+                }
+            } else if let query, failedQuery == query {
+                Text("Подсказки недоступны").font(.caption).foregroundStyle(.secondary)
+            } else {
+                ProgressView().controlSize(.small)
+            }
+        }
+        .padding(8)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+        .task(id: query) {
+            guard let query else { return }
+            failedQuery = nil
+            do {
+                try await Task.sleep(for: .milliseconds(200))
+                let page = try await directory(DirectoryInput(query: query, mentions: true))
+                try Task.checkCancellation()
+                result = (query, page)
+            } catch {
+                if !Task.isCancelled { failedQuery = query }
+            }
+        }
+    }
+
+    private func candidate(_ person: RiderPerson, query: String) -> some View {
+        Button {
+            guard self.query == query, let token, let username = person.username else { return }
+            var updated = text
+            updated.replaceSubrange(token, with: "@" + username + " ")
+            if updated.count <= limit { text = updated }
+        } label: {
+            HStack(spacing: 6) {
+                RiderAvatar(photo: person.avatar ?? Data(), size: 21).accessibilityHidden(true)
+                Text(person.handle).fontWeight(.semibold)
+                Text(person.name).foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+            }
+            .font(.caption)
+            .lineLimit(1)
+            .frame(minHeight: 44)
+            .contentShape(.interaction, Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
 }
 
 private enum ContactNumbers {
@@ -68,31 +218,20 @@ private enum ContactNumbers {
 
 struct RiderPeopleEntry: View {
     @ObservedObject var recorder: SessionRecorder
-    @State private var suggested: [RiderPerson] = []
+
     var body: some View {
-        NavigationLink { RiderPeopleView(recorder: recorder) } label: {
-            HStack(spacing: 10) {
-                Image(systemName: "magnifyingglass").foregroundStyle(RiderTheme.accent)
-                VStack(alignment: .leading) {
-                    Text("Найти райдеров").font(.headline)
-                    Text("Ник, @юзернейм или контакты").font(.caption).foregroundStyle(.secondary)
-                }
-                Spacer()
-                HStack(spacing: -7) {
-                    ForEach(suggested.prefix(3)) { rider in
-                        RiderAvatar(photo: rider.avatar ?? Data(), size: 28)
-                            .overlay { Circle().strokeBorder(RiderTheme.surface, lineWidth: 2) }
-                    }
-                }.allowsHitTesting(false).accessibilityHidden(true)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .lagoonCard()
-            .contentShape(Rectangle())
+        NavigationLink {
+            RiderPeopleView(recorder: recorder)
+        } label: {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(RiderTheme.accent)
+                .frame(width: 44, height: 44)
+                .background(RiderTheme.surface, in: RoundedRectangle(cornerRadius: 12))
+                .contentShape(.interaction, Rectangle())
         }
         .buttonStyle(.plain)
-        .task {
-            if let page = try? await directory(DirectoryInput()) { suggested = page.people }
-        }
+        .accessibilityLabel("Найти райдеров")
     }
 }
 
@@ -122,6 +261,8 @@ private struct RiderPeopleView: View {
                 Button("Повторить поиск") { Task { await load() } }
             }
             if input.isEmpty {
+                Text("Публичный профиль можно найти по нику или @юзернейму. По номеру находятся райдеры, разрешившие такой поиск.")
+                    .font(.footnote).foregroundStyle(.secondary)
                 Section("Знакомые") {
                     if phone?.verified == true {
                         if let friends { rows(friends); if friends.isEmpty { Text("Совпадений пока нет").foregroundStyle(.secondary) } }
@@ -149,13 +290,14 @@ private struct RiderPeopleView: View {
                 }
             }
             if let page {
-                Section(input.isEmpty ? "Рекомендованные райдеры" : "Результаты") {
+                Section(input.isEmpty ? "Рекомендованные райдеры" : isNumber ? "По номеру" : "Глобальный поиск") {
                     rows(page.people)
                     if page.people.isEmpty { Text("Никого не найдено").foregroundStyle(.secondary) }
                 }
             } else if error == nil { ProgressView() }
         }
-        .navigationTitle("Райдеры").navigationBarTitleDisplayMode(.inline)
+        .navigationTitle("Найти райдеров").navigationBarTitleDisplayMode(.inline)
+        .toolbar(.visible, for: .navigationBar)
         .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Ник, @юзернейм или номер")
         .task(id: searchKey) { await load() }
         .task {

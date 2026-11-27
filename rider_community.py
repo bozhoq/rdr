@@ -511,7 +511,7 @@ def public_ride_rows(items):
                     raise ValueError("invalid analytics label")
                 if value.strip():
                     ride[field] = value.strip()
-        for field, upper in (("windMS", 150), ("heightSum", 100 * item["jumps"])):
+        for field, upper in (("windMS", 150), ("windDirection", 360), ("heightSum", 100 * item["jumps"])):
             if item.get(field) is not None:
                 if not number(item[field], 0, upper):
                     raise ValueError("invalid ride measurement")
@@ -604,6 +604,14 @@ def reactions(db, post_id, owner, limit=3, offset=0):
     recent = db.execute("""SELECT r.id,r.document FROM shakas s JOIN public_profiles r ON r.id=s.owner
         WHERE s.post=? ORDER BY s.created_at DESC,s.owner LIMIT ? OFFSET ?""", (post_id, limit, offset))
     return {"total": count, "mine": bool(mine), "people": [rider_card(*row) for row in recent]}
+
+
+def comment_reactors(db, comment_id, owner, offset):
+    visible = "FROM comment_likes l JOIN public_profiles p ON p.id=l.owner WHERE l.comment=?"
+    count, mine = db.execute("SELECT count(*),max(l.owner=?) " + visible, (owner, comment_id)).fetchone()
+    rows = db.execute("SELECT p.id,p.document " + visible + " ORDER BY l.rowid DESC LIMIT 50 OFFSET ?",
+                      (comment_id, offset))
+    return {"total": count, "mine": bool(mine), "people": [rider_card(*row) for row in rows]}
 
 
 def feed(db, owner, mode, post_id=None):
@@ -908,7 +916,7 @@ def application(env, start_response):
     direct_path = re.fullmatch(r"/messages/([0-9a-f]{64})(?:/([a-fA-F0-9-]{36}))?", path)
     media_path = re.fullmatch(r"/posts/([a-fA-F0-9-]{36})/(photo|video)", path)
     comment_path = re.fullmatch(r"/posts/([a-fA-F0-9-]{36})/comments(?:/([a-fA-F0-9-]{36}))?", path)
-    comment_reaction = re.fullmatch(r"/posts/([a-fA-F0-9-]{36})/comments/([a-fA-F0-9-]{36})/like", path)
+    comment_reaction = re.fullmatch(r"/posts/([a-fA-F0-9-]{36})/comments/([a-fA-F0-9-]{36})/like(?:/([0-9]{1,9}))?", path)
     if method in ("GET", "HEAD") and media_path:
         try:
             post_id = identifier(media_path[1])
@@ -1450,14 +1458,18 @@ def application(env, start_response):
                 if not db.execute("SELECT 1 FROM posts p JOIN public_profiles r ON r.id=p.owner WHERE p.id=?", (source,)).fetchone():
                     return send("404 Not Found", {"error": "unknown post"})
                 return send("200 OK", reactions(db, source, owner, 50, int(reactors[2])))
-            elif comment_reaction and method in ("PUT", "DELETE"):
-                post, comment = map(identifier, comment_reaction.groups())
-                db.execute("BEGIN IMMEDIATE")
+            elif comment_reaction and ((method == "GET" and comment_reaction[3] is not None) or
+                                       (method in ("PUT", "DELETE") and comment_reaction[3] is None)):
+                post, comment = identifier(comment_reaction[1]), identifier(comment_reaction[2])
+                if method != "GET":
+                    db.execute("BEGIN IMMEDIATE")
                 visible = db.execute("""SELECT 1 FROM post_comments c JOIN public_profiles author ON author.id=c.author
                     JOIN posts s ON s.id=c.post JOIN public_profiles p ON p.id=s.owner
                     WHERE c.id=? AND c.post=?""", (comment, post)).fetchone()
                 if not visible:
                     return send("404 Not Found", {"error": "unknown comment"})
+                if method == "GET":
+                    return send("200 OK", comment_reactors(db, comment, owner, int(comment_reaction[3])))
                 if not db.execute("SELECT 1 FROM public_profiles WHERE id=?", (owner,)).fetchone():
                     return send("403 Forbidden", {"error": "publish a profile first"})
                 if method == "PUT":

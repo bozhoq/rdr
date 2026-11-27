@@ -53,7 +53,7 @@ private func riderHandle(_ username: String?, or name: String) -> String {
 }
 
 /// Keep explicit mentions tappable without adding text to the caption.
-private struct RiderLinkedText: View {
+struct RiderLinkedText: View {
     let text: String
     var author: String? = nil
     var authorID: String? = nil
@@ -420,25 +420,42 @@ final class RiderSocialStore: ObservableObject {
 struct RiderSections<Option: Identifiable & Equatable, Label: View>: View {
     let options: [Option]
     @Binding var selection: Option
+    var compact = false
     @ViewBuilder var label: (Option) -> Label
+    @Environment(\.dynamicTypeSize) private var textSize
 
     var body: some View {
-        HStack(spacing: 4) {
+        let layout = compact && textSize.isAccessibilitySize
+            ? AnyLayout(VStackLayout(spacing: 0)) : AnyLayout(HStackLayout(spacing: 4))
+        layout {
             ForEach(options) { option in
                 let selected = option == selection
                 Button { selection = option } label: {
                     label(option)
-                        .font(.subheadline.weight(.semibold))
+                        .font((compact ? Font.caption : Font.subheadline).weight(.semibold))
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 4)
                         .frame(maxWidth: .infinity, minHeight: 44)
-                        .background(selected ? RiderTheme.surface : .clear, in: RoundedRectangle(cornerRadius: 9))
-                        .contentShape(Rectangle())
+                        .background {
+                            RoundedRectangle(cornerRadius: 9)
+                                .fill(selected ? RiderTheme.surface : Color.clear)
+                                .padding(.vertical, compact ? 5 : 0)
+                                .allowsHitTesting(false)
+                        }
+                        .contentShape(.interaction, Rectangle())
                 }
                 .buttonStyle(.plain)
                 .accessibilityAddTraits(selected ? .isSelected : [])
             }
         }
-        .padding(3)
-        .background(RiderTheme.border, in: RoundedRectangle(cornerRadius: 12))
+        .padding(.horizontal, 3)
+        .padding(.vertical, compact ? 0 : 3)
+        .background {
+            RoundedRectangle(cornerRadius: 12).fill(RiderTheme.border)
+                .padding(.vertical, compact ? 2 : 0)
+                .allowsHitTesting(false)
+        }
     }
 }
 
@@ -469,40 +486,43 @@ struct RiderPostSquare: View {
     @State private var localImage: UIImage?
 
     var body: some View {
-        GeometryReader { bounds in
-            Group {
-                if let data = post.photo, let loaded = UIImage(data: data) {
-                    Image(uiImage: loaded).resizable().scaledToFill()
-                } else if RiderCommunity.usesLANTrust {
-                    if let localImage { Image(uiImage: localImage).resizable().scaledToFill() }
-                    else { placeholder }
-                } else {
-                    AsyncImage(url: post.remotePhoto) { phase in
-                        if let photo = phase.image { photo.resizable().scaledToFill() }
-                        else { placeholder }
+        RiderTheme.surface
+            .aspectRatio(1, contentMode: .fit)
+            .overlay {
+                GeometryReader { bounds in
+                    Group {
+                        if let data = post.photo, let loaded = UIImage(data: data) {
+                            Image(uiImage: loaded).resizable().scaledToFill()
+                        } else if RiderCommunity.usesLANTrust {
+                            if let localImage { Image(uiImage: localImage).resizable().scaledToFill() }
+                            else { placeholder }
+                        } else {
+                            AsyncImage(url: post.remotePhoto) { phase in
+                                if let photo = phase.image { photo.resizable().scaledToFill() }
+                                else { placeholder }
+                            }
+                        }
                     }
+                    .frame(width: bounds.size.width, height: bounds.size.width)
+                    .clipped()
+                }
+                .allowsHitTesting(false)
+            }
+            .clipped()
+            .contentShape(.interaction, Rectangle())
+            .overlay(alignment: .topTrailing) {
+                if post.isVideo {
+                    Image(systemName: "play.rectangle.fill").padding(8).foregroundStyle(.white)
+                        .background(.black.opacity(0.5), in: Capsule()).padding(8)
+                        .allowsHitTesting(false).accessibilityHidden(true)
                 }
             }
-            .frame(width: bounds.size.width, height: bounds.size.width)
-            .clipped()
-        }
-        .aspectRatio(1, contentMode: .fit)
-        .background(RiderTheme.surface)
-        .clipped()
-        .contentShape(Rectangle())
-        .overlay(alignment: .topTrailing) {
-            if post.isVideo {
-                Image(systemName: "play.rectangle.fill").padding(8).foregroundStyle(.white)
-                    .background(.black.opacity(0.5), in: Capsule()).padding(8)
-                    .allowsHitTesting(false).accessibilityHidden(true)
+            .accessibilityLabel(post.caption.isEmpty ? (post.isVideo ? "Видео публикации" : "Фото публикации") : post.caption)
+            .task(id: post.remotePhoto) {
+                guard RiderCommunity.usesLANTrust, post.photo == nil, let url = post.remotePhoto else { return }
+                localImage = nil
+                if let data = await RiderCommunity.localPhoto(url), !Task.isCancelled { localImage = UIImage(data: data) }
             }
-        }
-        .accessibilityLabel(post.caption.isEmpty ? (post.isVideo ? "Видео публикации" : "Фото публикации") : post.caption)
-        .task(id: post.remotePhoto) {
-            guard RiderCommunity.usesLANTrust, post.photo == nil, let url = post.remotePhoto else { return }
-            localImage = nil
-            if let data = await RiderCommunity.localPhoto(url), !Task.isCancelled { localImage = UIImage(data: data) }
-        }
     }
 
     private var placeholder: some View {
@@ -577,27 +597,15 @@ struct RiderPostDetail: View {
     }
 
     var body: some View {
-        ScrollViewReader { scroll in
-            ScrollView {
-                VStack(spacing: 10) {
-                    VStack(alignment: .leading, spacing: 14) {
-                        RiderFeedCard(post: post, author: author, username: username, avatar: avatar,
-                                      editable: editable, entry: entry, onComments: {
-                            withAnimation(.easeInOut(duration: 0.25)) { scroll.scrollTo("post-comments", anchor: .top) }
-                        }, onConversation: { conversation = $0 }, embedded: true)
-                        Divider()
-                        commentsSection.id("post-comments")
-                    }.lagoonCard()
-                    if editable { publishingControls }
-                }
-                .padding(16)
+        ScrollView {
+            VStack(spacing: 10) {
+                RiderFeedCard(post: post, author: author, username: username, avatar: avatar,
+                              editable: editable, entry: entry, opensPost: false, openComments: openComments,
+                              onConversation: { conversation = $0 }, embedded: true)
+                    .lagoonCard()
+                if editable { publishingControls }
             }
-            .scrollDismissesKeyboard(.interactively)
-            .task {
-                guard openComments else { return }
-                await Task.yield()
-                scroll.scrollTo("post-comments", anchor: .top)
-            }
+            .padding(16)
         }
         .background(RiderTheme.canvas.ignoresSafeArea())
         .navigationTitle("Публикация")
@@ -636,18 +644,6 @@ struct RiderPostDetail: View {
                 if let error { Text(error).font(.footnote).foregroundStyle(.secondary) }
             }
             .lagoonCard()
-        }
-    }
-
-    @ViewBuilder private var commentsSection: some View {
-        if RiderCommunity.endpoint != nil && (!editable || post.published == true) {
-            RiderCommentsView(postID: post.contentID)
-        } else {
-            VStack(alignment: .leading, spacing: 7) {
-                Text("Комментарии").font(.headline)
-                Text("Комментарии откроются после публикации поста в общей ленте.")
-                    .font(.footnote).foregroundStyle(.secondary)
-            }
         }
     }
 
@@ -726,14 +722,101 @@ struct RiderPostHeader: View {
     }
 }
 
+private struct RiderReactionPress: PrimitiveButtonStyle {
+    @Environment(\.isEnabled) private var enabled
+    let showNames: () -> Void
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .contentShape(Rectangle())
+            .gesture(LongPressGesture().exclusively(before: TapGesture()).onEnded { result in
+                guard enabled else { return }
+                switch result {
+                case .first: showNames()
+                case .second: configuration.trigger()
+                }
+            })
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction { if enabled { configuration.trigger() } }
+            .accessibilityAction(named: Text("Посмотреть реакции")) { if enabled { showNames() } }
+    }
+}
+
+private struct RiderReactionList: View {
+    let title: String
+    let preview: RiderReaction?
+    let fetch: ((Int) async throws -> RiderReaction)?
+    @Environment(\.dismiss) private var dismiss
+    @State private var loaded: RiderReaction?
+    @State private var offset = 0
+    @State private var loading = false
+    @State private var failed = false
+    @State private var hasMore = false
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if let page = loaded ?? preview {
+                    ForEach(page.people) { rider in
+                        if rider.id == "local" { row(rider) }
+                        else {
+                            NavigationLink { RiderPublicProfileView(id: rider.id) } label: { row(rider) }
+                        }
+                    }
+                    if page.total == 0 && (loaded != nil || fetch == nil) {
+                        Text("Реакций пока нет").foregroundStyle(.secondary)
+                    }
+                }
+                if loading {
+                    ProgressView()
+                } else if failed {
+                    Button("Повторить загрузку") { Task { await load() } }
+                } else if hasMore {
+                    Button("Показать ещё") { Task { await load() } }
+                }
+            }
+            .navigationTitle(title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Готово") { dismiss() } } }
+        }
+        .presentationDetents([.medium, .large])
+        .task { if loaded == nil { await load() } }
+    }
+
+    private func row(_ rider: RiderPerson) -> some View {
+        RiderPostHeader(author: rider.name, username: rider.username, avatar: rider.avatar, premium: rider.premium)
+    }
+
+    @MainActor private func load() async {
+        guard let fetch, !loading else { return }
+        loading = true
+        failed = false
+        defer { loading = false }
+        do {
+            let page = try await fetch(offset)
+            try Task.checkCancellation()
+            let previous = loaded?.people ?? []
+            let ids = Set(previous.map(\.id))
+            offset += page.people.count
+            hasMore = !page.people.isEmpty && offset < page.total
+            loaded = RiderReaction(total: page.total, mine: page.mine, people: previous + page.people.filter { !ids.contains($0.id) })
+        } catch {
+            if !Task.isCancelled { failed = true }
+        }
+    }
+}
+
 private struct RiderCommentsView: View {
     @EnvironmentObject private var social: RiderSocialStore
+    @Environment(\.dismiss) private var dismiss
     let postID: UUID
     @State private var comments: [RiderComment]?
     @State private var loading = false
     @State private var sending = false
     @State private var draft = ""
     @State private var replying: RiderComment?
+    @State private var viewedLikes: RiderComment?
+    @State private var detent = PresentationDetent.fraction(0.55)
     @FocusState private var composing: Bool
     @State private var draftID = UUID()
     @State private var error: String?
@@ -741,20 +824,49 @@ private struct RiderCommentsView: View {
     private var trimmed: String { draft.trimmingCharacters(in: .whitespacesAndNewlines) }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Комментарии").font(.subheadline.weight(.semibold)).accessibilityAddTraits(.isHeader)
-            if let comments {
-                if comments.isEmpty {
-                    Text("Пока нет комментариев").font(.subheadline).foregroundStyle(.secondary)
+        NavigationStack {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 12) {
+                    if let comments {
+                        if comments.isEmpty {
+                            Text("Пока нет комментариев").font(.subheadline).foregroundStyle(.secondary)
+                        }
+                        ForEach(comments) { comment in
+                            commentRow(comment).padding(.leading, comment.replyTo == nil ? 0 : 20)
+                        }
+                    } else if loading {
+                        ProgressView("Загружаем комментарии")
+                    } else if error != nil {
+                        Button("Обновить комментарии") { Task { await load() } }
+                    }
                 }
-                ForEach(comments) { comment in
-                    commentRow(comment).padding(.leading, comment.replyTo == nil ? 0 : 20)
-                }
-            } else if loading {
-                ProgressView("Загружаем комментарии")
-            } else if error != nil {
-                Button("Обновить комментарии") { Task { await load() } }
+                .padding(16)
             }
+            .scrollDismissesKeyboard(.interactively)
+            .safeAreaInset(edge: .bottom, spacing: 0) { editor }
+            .navigationTitle("Комментарии")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Готово") { dismiss() }
+                }
+            }
+            .sheet(item: $viewedLikes) { comment in
+                RiderReactionList(title: "Лайки", preview: nil, fetch: { offset in
+                    try await RiderCommunity.commentLikes(comment.id, for: postID, offset: offset)
+                })
+            }
+        }
+        .presentationDetents([.fraction(0.55), .large], selection: $detent)
+        .presentationDragIndicator(.visible)
+        .onChange(of: composing) { _, editing in
+            if editing { detent = .large }
+        }
+        .task(id: postID) { await load() }
+    }
+
+    private var editor: some View {
+        VStack(alignment: .leading, spacing: 8) {
             if let error { Text(error).font(.footnote).foregroundStyle(.secondary) }
             if let replying {
                 HStack {
@@ -763,6 +875,7 @@ private struct RiderCommentsView: View {
                     Button("Отмена") { self.replying = nil; draftID = UUID() }
                 }.disabled(sending)
             }
+            RiderMentionSuggestions.forText($draft, editing: composing, limit: 500)
             HStack(alignment: .bottom, spacing: 8) {
                 TextField("Написать комментарий", text: $draft, axis: .vertical)
                     .focused($composing).disabled(sending)
@@ -773,15 +886,17 @@ private struct RiderCommentsView: View {
                     }
                 Button(action: submit) {
                     Image(systemName: "arrow.up").font(.body.bold())
-                        .frame(width: 32, height: 32)
+                        .frame(minWidth: 44, minHeight: 44)
+                        .contentShape(.interaction, Rectangle())
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(trimmed.isEmpty || loading || sending)
                 .accessibilityLabel("Отправить комментарий")
             }
         }
-        .padding(.leading, 12)
-        .task(id: postID) { await load() }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(.bar)
     }
 
     private func commentRow(_ comment: RiderComment) -> some View {
@@ -816,13 +931,31 @@ private struct RiderCommentsView: View {
                     RiderLinkedText(text: "В ответ @" + recipient).font(.caption2).foregroundStyle(.secondary)
                 }
                 RiderLinkedText(text: comment.text).font(.subheadline)
-                HStack(spacing: 10) {
-                    RiderPostDate(date: comment.date)
-                    Button("Ответить") { beginReply(comment) }.font(.caption).disabled(sending)
-                    Spacer(minLength: 5)
-                    likeButton(comment)
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 8) {
+                        RiderPostDate(date: comment.date)
+                        commentActions(comment)
+                    }
+                    VStack(alignment: .leading, spacing: 0) {
+                        RiderPostDate(date: comment.date)
+                        commentActions(comment)
+                    }
                 }
             }
+        }
+    }
+
+    private func commentActions(_ comment: RiderComment) -> some View {
+        HStack(spacing: 8) {
+            Button { beginReply(comment) } label: {
+                Text("Ответить").font(.caption)
+                    .frame(minWidth: 44, minHeight: 44)
+                    .contentShape(.interaction, Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(sending)
+            Spacer(minLength: 0)
+            likeButton(comment)
         }
     }
 
@@ -831,9 +964,11 @@ private struct RiderCommentsView: View {
             change { try await RiderCommunity.likeComment(comment.id, for: postID, enabled: comment.liked != true) }
         } label: {
             Label((comment.likes ?? 0).formatted(), systemImage: comment.liked == true ? "heart.fill" : "heart")
-                .font(.caption).foregroundStyle(RiderTheme.accent).padding(.vertical, 6)
+                .font(.caption).foregroundStyle(RiderTheme.accent)
+                .padding(.horizontal, 4)
+                .frame(minWidth: 44, minHeight: 44)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(RiderReactionPress { viewedLikes = comment })
         .disabled(sending || loading)
         .accessibilityLabel(comment.liked == true ? "Убрать лайк" : "Лайк комментарию")
         .accessibilityValue((comment.likes ?? 0).formatted())
@@ -973,6 +1108,7 @@ struct RiderPostComposer: View {
                 TextField("Текст публикации", text: $caption, axis: .vertical)
                     .focused($captionFocused).lineLimit(3...7)
                     .onChange(of: caption) { _, value in if value.count > 800 { caption = String(value.prefix(800)) } }
+                RiderMentionSuggestions.forText($caption, editing: captionFocused, limit: 800)
                 if photo == nil && section == .gallery && !trimmed.isEmpty {
                     Text("Пост с одним текстом появится на стене. Упоминание начинается с @юзернейма.").font(.footnote).foregroundStyle(.secondary)
                 }
@@ -1144,6 +1280,11 @@ private struct RiderPostLocationChoice: View {
     }
 }
 
+private struct RiderFeedTopPreference: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+}
+
 struct RiderFeedView: View {
     @ObservedObject var recorder: SessionRecorder
     @EnvironmentObject private var social: RiderSocialStore
@@ -1154,6 +1295,9 @@ struct RiderFeedView: View {
     @State private var conversation: RiderPerson?
     @State private var entries: [RiderFeedEntry]?
     @State private var storiesExpanded = false
+    @State private var feedTop: CGFloat = 0
+    @State private var storiesOpenedAt: CGFloat = 0
+    @Namespace private var feedViewport
     @State private var loadedFeed: Feed?
     @State private var failed = false
 
@@ -1168,10 +1312,9 @@ struct RiderFeedView: View {
         return ScrollView {
             VStack(alignment: .leading, spacing: 10) {
                 if RiderCommunity.endpoint != nil {
-                    RiderStoriesStrip(expanded: $storiesExpanded)
-                    RiderPeopleEntry(recorder: recorder)
+                    RiderStoriesStrip(recorder: recorder, expanded: $storiesExpanded)
                 }
-                RiderSections(options: Feed.allCases, selection: $selection) { Text($0.title) }
+                RiderSections(options: Feed.allCases, selection: $selection, compact: true) { Text($0.title) }
                 if RiderCommunity.endpoint == nil {
                     Text("Общая лента появится после подключения сервера Rider.").foregroundStyle(.secondary)
                     if !social.posts.isEmpty {
@@ -1195,13 +1338,29 @@ struct RiderFeedView: View {
                 } else {
                     ProgressView("Загружаем ленту")
                 }
-            }.padding(.horizontal, 12).padding(.vertical, 8)
-        }
-        .simultaneousGesture(DragGesture(minimumDistance: 24).onEnded { motion in
-            if abs(motion.translation.height) > abs(motion.translation.width) {
-                storiesExpanded = false
             }
-        })
+            .padding(.horizontal, 12).padding(.vertical, 6)
+            .background(alignment: .top) {
+                GeometryReader { geometry in
+                    Color.clear.preference(key: RiderFeedTopPreference.self,
+                                           value: geometry.frame(in: .named(feedViewport)).minY.rounded())
+                }
+                .frame(height: 0)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+            }
+        }
+        .coordinateSpace(name: feedViewport)
+        .onChange(of: storiesExpanded) { _, expanded in
+            if expanded { storiesOpenedAt = feedTop }
+        }
+        .onPreferenceChange(RiderFeedTopPreference.self) { [topPosition = $feedTop, expanded = $storiesExpanded,
+                                                             openedAt = $storiesOpenedAt] top in
+            topPosition.wrappedValue = top
+            if expanded.wrappedValue && abs(top - openedAt.wrappedValue) > 28 {
+                expanded.wrappedValue = false
+            }
+        }
         .toolbar(.hidden, for: .navigationBar)
         .scrollContentBackground(.hidden).background(RiderTheme.canvas)
         .navigationDestination(item: $conversation) { RiderThreadView(peer: $0) }
@@ -1232,7 +1391,8 @@ struct RiderFeedCard: View {
     let avatar: Data?
     var editable = false
     var entry: RiderFeedEntry?
-    var onComments: (() -> Void)?
+    var opensPost = true
+    var openComments = false
     var onConversation: ((RiderPerson) -> Void)?
     var embedded = false
     @State private var pendingConversation: RiderPerson?
@@ -1241,11 +1401,9 @@ struct RiderFeedCard: View {
     @State private var changingRepost = false
     @State private var sharing = false
     @State private var showingReactions = false
-    @State private var fullReaction: RiderReaction?
-    @State private var reactionListBusy = false
-    @State private var reactionListError = false
     @State private var showingVideo = false
-    @State private var showingJournalComments = false
+    @State private var showingComments = false
+    @State private var didOpenComments = false
     @State private var confirmingJournalDelete = false
     @State private var updatingJournal = false
     @State private var error: String?
@@ -1280,26 +1438,18 @@ struct RiderFeedCard: View {
         .listRowBackground(Color.clear)
         .sheet(isPresented: $sharing, onDismiss: openSentConversation) { shareMenu }
         .sheet(isPresented: $showingReactions) { reactionsSheet }
-        .sheet(isPresented: $showingJournalComments) {
-            NavigationStack {
-                ScrollView {
-                    RiderCommentsView(postID: post.contentID).padding()
-                }
-                .scrollDismissesKeyboard(.interactively)
-                .navigationTitle("Комментарии")
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .confirmationAction) {
-                        Button("Готово") { showingJournalComments = false }
-                    }
-                }
-            }
-        }
+        .sheet(isPresented: $showingComments) { RiderCommentsView(postID: post.contentID) }
         .fullScreenCover(isPresented: $showingVideo) { RiderClipPlayer(post: post) }
         .confirmationDialog("Удалить заметку?", isPresented: $confirmingJournalDelete, titleVisibility: .visible) {
             Button("Удалить", role: .destructive) { updateJournal(deleting: true) }
         }
-        .task(id: post.publicURL) { await loadInitialReaction() }
+        .task(id: post.publicURL) {
+            if openComments, !didOpenComments, post.publicURL != nil {
+                didOpenComments = true
+                showingComments = true
+            }
+            await loadInitialReaction()
+        }
     }
 
     private var content: some View {
@@ -1315,7 +1465,7 @@ struct RiderFeedCard: View {
                 } else if post.isVideo {
                     Button { showingVideo = true } label: { postPhoto }
                         .buttonStyle(.plain).accessibilityLabel("Смотреть видео")
-                } else if onComments != nil {
+                } else if !opensPost {
                     postPhoto
                 } else {
                     NavigationLink { detail() } label: { postPhoto }
@@ -1327,14 +1477,23 @@ struct RiderFeedCard: View {
             }
 
             if post.publicationSection == .journal { caption }
-            HStack(spacing: 8) {
+            if post.equipment != nil {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 8) {
+                        actions.fixedSize(horizontal: true, vertical: false)
+                        RiderPostEquipmentTag(equipment: post.equipment)
+                    }
+                    VStack(alignment: .leading, spacing: 4) {
+                        actions
+                        RiderPostEquipmentTag(equipment: post.equipment)
+                    }
+                }
+            } else {
                 actions
-                Spacer(minLength: 0)
-                RiderPostEquipmentTag(equipment: post.equipment)
             }
             if reaction.total > 0 { reactionSummary }
             if post.publicationSection == .gallery { caption }
-            if onComments == nil, let preview = commentSummary?.preview {
+            if opensPost, let preview = commentSummary?.preview {
                 RiderLinkedText(text: preview.text, author: riderHandle(preview.username, or: preview.author), authorID: preview.username)
                     .font(.caption).lineLimit(2)
             }
@@ -1430,21 +1589,13 @@ struct RiderFeedCard: View {
                 .frame(minWidth: 48, minHeight: 44)
                 .contentShape(Rectangle())
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(RiderReactionPress { showingReactions = true })
             .disabled(changingReaction)
             .accessibilityLabel(reaction.mine ? "Убрать шаку" : "Поставить шаку")
             .accessibilityValue(reaction.total.formatted())
             .accessibilityAddTraits(reaction.mine ? .isSelected : [])
-            Group {
-                if let onComments {
-                    Button(action: onComments) { commentIcon }
-                } else if post.publicationSection == .journal {
-                    Button { showingJournalComments = true } label: { commentIcon }
-                        .disabled(post.publicURL == nil)
-                } else {
-                    NavigationLink { detail(comments: true) } label: { commentIcon }
-                }
-            }
+            Button { showingComments = true } label: { commentIcon }
+            .disabled(post.publicURL == nil)
             .buttonStyle(.borderless)
             .accessibilityLabel("Комментарии")
             .accessibilityValue((commentSummary?.total ?? 0).formatted())
@@ -1488,55 +1639,9 @@ struct RiderFeedCard: View {
     }
 
     private var reactionsSheet: some View {
-        NavigationStack {
-            List {
-                Label {
-                    Text("Реакций: \(fullReaction?.total ?? reaction.total)").font(.headline)
-                } icon: {
-                    RiderShakaIcon(selected: false)
-                }
-                ForEach(fullReaction?.people ?? reaction.people) { rider in
-                    if rider.id == "local" {
-                        RiderPostHeader(author: rider.name, username: rider.username, avatar: rider.avatar, premium: rider.premium)
-                    } else {
-                        NavigationLink { RiderPublicProfileView(id: rider.id) } label: {
-                            RiderPostHeader(author: rider.name, username: rider.username, avatar: rider.avatar, premium: rider.premium)
-                        }
-                    }
-                }
-            }
-            .safeAreaInset(edge: .bottom) {
-                if reactionListBusy {
-                    ProgressView().padding()
-                } else if reactionListError {
-                    Button("Повторить загрузку") { Task { await loadReactions(reset: fullReaction == nil) } }.padding()
-                } else if let fullReaction, fullReaction.people.count < fullReaction.total {
-                    Button("Показать ещё") { Task { await loadReactions(reset: false) } }.padding()
-                }
-            }
-            .task { await loadReactions(reset: true) }
-            .navigationTitle("Шака")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Готово") { showingReactions = false } } }
-        }
-        .presentationDetents([.medium, .large])
-    }
-
-    @MainActor private func loadReactions(reset: Bool) async {
-        if reset { fullReaction = nil }
-        guard post.publicURL != nil, !reactionListBusy else { return }
-        reactionListBusy = true
-        reactionListError = false
-        defer { reactionListBusy = false }
-        do {
-            let previous = fullReaction?.people ?? []
-            let page = try await RiderCommunity.shakas(for: post.contentID, offset: previous.count)
-            let existing = Set(previous.map(\.id))
-            fullReaction = RiderReaction(total: page.total, mine: page.mine,
-                                         people: previous + page.people.filter { !existing.contains($0.id) })
-        } catch {
-            if !Task.isCancelled { reactionListError = true }
-        }
+        RiderReactionList(title: "Шака", preview: reaction, fetch: post.publicURL == nil ? nil : { offset in
+            try await RiderCommunity.shakas(for: post.contentID, offset: offset)
+        })
     }
 
     private var shareMenu: some View {
@@ -1578,9 +1683,9 @@ struct RiderFeedCard: View {
         }
     }
 
-    private func detail(comments: Bool = false) -> some View {
+    private func detail() -> some View {
         RiderPostDetail(original: post, author: author, username: username, avatar: avatar,
-                        editable: editable, openComments: comments, entry: entry)
+                        editable: editable, entry: entry)
     }
 
     private func toggleShaka() {
@@ -1704,6 +1809,8 @@ private struct RiderPostEquipmentTag: View {
                     .padding(.horizontal, 9).padding(.vertical, 7)
                     .foregroundStyle(RiderTheme.accent)
                     .background(RiderTheme.canvas, in: Capsule())
+                    .frame(minHeight: 44)
+                    .contentShape(.interaction, Rectangle())
             }
             .buttonStyle(.borderless)
             .accessibilityLabel("Кайт-комплект \(equipment.name)")
@@ -1903,6 +2010,7 @@ struct RiderInboxView: View {
     @State private var search = ""
 
     private var choosingRecipient: Bool { shared != nil || composing }
+    private var query: String { RiderSearch.query(search) }
 
     var body: some View {
         List {
@@ -1916,11 +2024,18 @@ struct RiderInboxView: View {
                 }
                 if let sendError { Text(sendError).font(.footnote).foregroundStyle(.secondary) }
                 if sending { ProgressView("Отправляем пост") }
-                recipientRows(people)
+                Section(query.isEmpty ? "" : choosingRecipient ? "Получатели" : "Переписки") {
+                    let matches = people.filter { RiderSearch.matches($0, query: query) }
+                    if !query.isEmpty && matches.isEmpty { Text("Ничего не найдено").foregroundStyle(.secondary) }
+                    ForEach(matches) { recipientRow($0) }
+                }
             } else if failed {
                 Button("Повторить загрузку") { Task { await load() } }
             } else {
                 ProgressView()
+            }
+            if RiderCommunity.endpoint != nil {
+                RiderGlobalSearchSection(query: query, excluding: Set((people ?? []).map(\.id))) { recipientRow($0) }
             }
         }
         .scrollContentBackground(.hidden)
@@ -1942,18 +2057,12 @@ struct RiderInboxView: View {
         .refreshable { await load() }
     }
 
-    private func recipientRows(_ people: [RiderPerson]) -> some View {
-        let filtered = people.filter { rider in
-            search.isEmpty || rider.name.localizedCaseInsensitiveContains(search)
-                || rider.handle.localizedCaseInsensitiveContains(search)
-        }
-        return ForEach(filtered) { rider in
-            if let shared {
-                Button { send(shared, to: rider) } label: { personRow(rider) }
-                    .buttonStyle(.plain).disabled(sending)
-            } else {
-                NavigationLink { RiderThreadView(peer: rider) } label: { personRow(rider) }
-            }
+    @ViewBuilder private func recipientRow(_ rider: RiderPerson) -> some View {
+        if let shared {
+            Button { send(shared, to: rider) } label: { personRow(rider) }
+                .buttonStyle(.plain).disabled(sending)
+        } else {
+            NavigationLink { RiderThreadView(peer: rider) } label: { personRow(rider) }
         }
     }
 
@@ -2029,7 +2138,7 @@ struct RiderThreadView: View {
     private var text: String { draft.trimmingCharacters(in: .whitespacesAndNewlines) }
 
     var body: some View {
-        Group {
+        ZStack {
             if let messages {
                 messageHistory(messages)
             } else {
@@ -2065,8 +2174,11 @@ struct RiderThreadView: View {
                 NavigationLink { RiderPublicProfileView(id: peer.id) } label: {
                     HStack(spacing: 7) {
                         RiderAvatar(photo: peer.avatar ?? Data(), size: 30).accessibilityHidden(true)
-                        RiderName(peer.handle, premium: peer.premium).font(.subheadline.bold()).lineLimit(1)
+                        RiderName(peer.handle, premium: peer.premium)
+                            .font(.subheadline.bold()).lineLimit(1).minimumScaleFactor(0.75)
                     }
+                    .frame(minHeight: 44)
+                    .contentShape(.interaction, Rectangle())
                 }.buttonStyle(.plain)
             }
         }
@@ -2097,36 +2209,49 @@ struct RiderThreadView: View {
         ScrollViewReader { scroll in
             ScrollView {
                 VStack(spacing: 0) {
+                    Color.clear
+                        .frame(height: 1)
+                        .accessibilityHidden(true)
+                        .id("threadLatest")
+                    // The newest bubbles are measured first, even if older attachments have variable heights.
                     LazyVStack(spacing: 9) {
-                        ForEach(messages) { message in bubble(message) }
                         if let sendingAt {
-                            HStack {
-                                if let attachment { Text(attachment.contentType.hasPrefix("image/") ? "Фото" : attachment.contentType == "audio/mp4" ? "Голосовое" : "Кружочек") }
-                                if !text.isEmpty { Text(text) }
-                                RiderPostDate(date: sendingAt)
-                                receipt(delivered: false, read: false)
-                            }
-                            .font(.caption).padding(10)
-                            .background { chatStyle.bubble(mine: true) }
-                            .frame(maxWidth: .infinity, alignment: .trailing)
+                            sendingBubble(at: sendingAt)
+                                .scaleEffect(x: 1, y: -1)
+                        }
+                        ForEach(messages.reversed()) { message in
+                            bubble(message)
+                                .scaleEffect(x: 1, y: -1)
                         }
                     }
                     .padding(14)
-                    Color.clear.frame(height: 1).accessibilityHidden(true).id("threadBottom")
                 }
             }
-            .contentShape(Rectangle())
-            .simultaneousGesture(TapGesture().onEnded { composingText = false })
-            .scrollDismissesKeyboard(.interactively)
-            .defaultScrollAnchor(.bottom)
+            .scaleEffect(x: 1, y: -1)
+            .scrollIndicators(.hidden)
+            .scrollDismissesKeyboard(.immediately)
             .onChange(of: messages.last?.id) { _, _ in
-                scroll.scrollTo("threadBottom", anchor: .bottom)
+                scroll.scrollTo("threadLatest", anchor: .top)
             }
             .onChange(of: sendingAt != nil) { _, sending in
-                if sending { scroll.scrollTo("threadBottom", anchor: .bottom) }
+                if sending { scroll.scrollTo("threadLatest", anchor: .top) }
             }
             .refreshable { await load() }
         }
+    }
+
+    private func sendingBubble(at date: Date) -> some View {
+        HStack {
+            if let attachment {
+                Text(attachment.contentType.hasPrefix("image/") ? "Фото" : attachment.contentType == "audio/mp4" ? "Голосовое" : "Кружочек")
+            }
+            if !text.isEmpty { Text(text) }
+            RiderPostDate(date: date)
+            receipt(delivered: false, read: false)
+        }
+        .font(.caption).padding(10)
+        .background { chatStyle.bubble(mine: true) }
+        .frame(maxWidth: .infinity, alignment: .trailing)
     }
 
     private var composer: some View {
@@ -2144,6 +2269,7 @@ struct RiderThreadView: View {
                     .disabled(sending)
                 }
             }
+            RiderMentionSuggestions.forText($draft, editing: composingText, limit: 1000)
             HStack(alignment: .center, spacing: 8) {
                 if recorder.beganAt != nil {
                     RiderRecordingStatus(recorder: recorder)
@@ -2155,10 +2281,14 @@ struct RiderThreadView: View {
                     RiderChatCapture(recorder: recorder, event: recordEvent)
                         .disabled(sending || preparingAttachment)
                 } else {
-                    Button(action: send) { Image(systemName: "arrow.up").font(.body.bold()).frame(minHeight: 27) }
-                        .buttonStyle(.borderedProminent)
-                        .accessibilityLabel("Отправить")
-                        .disabled(sending || preparingAttachment || recorder.busy)
+                    Button(action: send) {
+                        Image(systemName: "arrow.up").font(.body.bold())
+                            .frame(minWidth: 44, minHeight: 44)
+                            .contentShape(.interaction, Rectangle())
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .accessibilityLabel("Отправить")
+                    .disabled(sending || preparingAttachment || recorder.busy)
                 }
             }
         }
@@ -2190,7 +2320,9 @@ struct RiderThreadView: View {
                     else { error = "Камера недоступна на этом устройстве." }
                 } label: { Label("Сделать фото", systemImage: "camera") }
             } label: {
-                Image(systemName: "photo").font(.title3.weight(.medium)).frame(width: 38, height: 40)
+                Image(systemName: "photo").font(.title3.weight(.medium))
+                    .frame(width: 44, height: 44)
+                    .contentShape(.interaction, Rectangle())
             }
             .accessibilityLabel("Добавить изображение")
             .disabled(sending || preparingAttachment || recorder.busy)

@@ -147,6 +147,7 @@ final class RiderSOSAppDelegate: NSObject, UIApplicationDelegate, UNUserNotifica
 
     @Published private(set) var available = false
     @Published private(set) var receiverStatus: String?
+    @Published private(set) var receiverConfirmedAt: Date?
     @Published var inbox: Inbox?
     private(set) var radarVisible = false
     private var token: String?
@@ -204,6 +205,7 @@ final class RiderSOSAppDelegate: NSObject, UIApplicationDelegate, UNUserNotifica
         }
         available = status == .authorized || status == .provisional || status == .ephemeral
         guard available else {
+            receiverConfirmedAt = nil
             receiverStatus = status == .denied ? "Для SOS разреши уведомления Rider в настройках iPhone." : nil
             token = nil
             receiverTask?.cancel()
@@ -254,6 +256,7 @@ final class RiderSOSAppDelegate: NSObject, UIApplicationDelegate, UNUserNotifica
         if RiderCommunity.endpoint != nil {
             let _: ReceiverStatus? = try? await RiderCommunity.decode("sos/receiver", method: "DELETE")
         }
+        receiverConfirmedAt = nil
         receiverStatus = "Входящие SOS рядом выключены."
     }
 
@@ -270,11 +273,13 @@ final class RiderSOSAppDelegate: NSObject, UIApplicationDelegate, UNUserNotifica
                 let result: ReceiverStatus = try await RiderCommunity.decode(lan ? "sos/foreground" : "sos/receiver",
                                                                               method: "PUT", body: body)
                 if available && !Task.isCancelled {
+                    receiverConfirmedAt = result.enabled ? Date() : nil
                     receiverStatus = result.enabled ? "Геопозиция обновлена. Принимаешь SOS рядом." : "Входящие SOS рядом выключены."
                     if !result.enabled { lastUpdate = .distantPast }
                 }
             } catch {
                 if available && !Task.isCancelled {
+                    receiverConfirmedAt = nil
                     receiverStatus = "Не удалось обновить позицию для SOS."
                     lastUpdate = Date().addingTimeInterval(-35)
                 }
@@ -326,6 +331,7 @@ final class RiderSOSAppDelegate: NSObject, UIApplicationDelegate, UNUserNotifica
         announcedForeground.removeAll()
         soundedForeground.removeAll()
         receiverStatus = nil
+        receiverConfirmedAt = nil
         lastUpdate = .distantPast
         latestFix = nil
         token = nil
@@ -433,39 +439,110 @@ final class RiderSOSAppDelegate: NSObject, UIApplicationDelegate, UNUserNotifica
     }
 }
 
-struct RiderSOSReadiness: View {
+struct RiderSOSStatusButton: View {
     @ObservedObject private var service = RiderSOSService.shared
     @ObservedObject var recorder: SessionRecorder
+    @AppStorage("rider.alert.sos") private var receiveSOS = true
+    @State private var showing = false
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 5)) { context in
+            let isLive = receiveSOS && service.available && recorder.usableFix != nil &&
+                service.receiverConfirmedAt.map { context.date.timeIntervalSince($0) < 120 } == true
+            Button { showing = true } label: {
+                Image(systemName: "sos.circle.fill")
+                    .font(.system(size: 27, weight: .semibold))
+                    .foregroundStyle(isLive ? RiderTheme.accent : Color.secondary)
+                    .frame(width: 44, height: 44)
+                    .overlay(alignment: .bottomTrailing) {
+                        Circle()
+                            .fill(isLive ? Color.green : Color.secondary)
+                            .frame(width: 8, height: 8)
+                            .padding(2)
+                            .background(RiderTheme.canvas, in: Circle())
+                            .offset(x: -4, y: -4)
+                            .accessibilityHidden(true)
+                    }
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("SOS рядом")
+            .accessibilityValue(isLive ? "Приём активен" : "Приём не активен")
+        }
+        .sheet(isPresented: $showing) { RiderSOSSettingsPanel(recorder: recorder) }
+    }
+}
+
+private struct RiderSOSSettingsPanel: View {
+    @ObservedObject private var service = RiderSOSService.shared
+    @ObservedObject var recorder: SessionRecorder
+    @AppStorage("rider.alert.sos") private var receiveSOS = true
+    @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            Label("SOS рядом", systemImage: "dot.radiowaves.left.and.right").font(.headline)
-            if RiderCommunity.usesLANTrust {
-                if !recorder.locationAuthorized {
-                    Text("Для приёма SOS рядом включи точную геопозицию.")
-                    Button("Разрешить геопозицию") { recorder.locateSpot() }.buttonStyle(.borderless)
-                } else {
-                    Text(service.receiverStatus ?? "Получаешь SOS в радиусе 1,5 км, пока открыт Rider.")
-                }
-            } else if RiderCommunity.endpoint == nil {
-                Text("Приём появится после подключения сервера Rider.")
-            } else if !service.available {
-                Text(service.receiverStatus ?? "Чтобы получать сигналы от райдеров рядом, разреши уведомления.")
-                Button("Разрешить уведомления") {
-                    Task {
-                        await service.refreshAuthorization(prompt: true)
-                        if !service.available, let url = URL(string: UIApplication.openSettingsURLString) { openURL(url) }
+        NavigationStack {
+            Form {
+                Section("Приём сигналов") {
+                    Toggle("Получать SOS от других", isOn: $receiveSOS)
+                    if receiveSOS {
+                        if RiderCommunity.endpoint == nil {
+                            Text("Подключи сервер Rider.").foregroundStyle(.secondary)
+                        } else {
+                            if !recorder.locationAuthorized || recorder.usableFix == nil {
+                                Button(recorder.locationAuthorized ? "Обновить геопозицию" : "Разрешить геопозицию") {
+                                    if recorder.authorization == .denied || recorder.authorization == .restricted {
+                                        openSettings()
+                                    } else if recorder.locationAuthorized {
+                                        recorder.refreshSOSFix()
+                                    } else {
+                                        recorder.locateSpot()
+                                    }
+                                }
+                            }
+                            if !RiderCommunity.usesLANTrust && !service.available {
+                                Button("Разрешить уведомления") {
+                                    Task {
+                                        await service.refreshAuthorization(prompt: true)
+                                        if !service.available { openSettings() }
+                                    }
+                                }
+                            }
+                            Text(status).foregroundStyle(.secondary)
+                        }
                     }
-                }.buttonStyle(.borderless)
-            } else if !recorder.locationAuthorized {
-                Text("Для поиска сигналов в радиусе 1,5 км нужна точная геопозиция.")
-                Button("Разрешить геопозицию") { recorder.locateSpot() }.buttonStyle(.borderless)
-            } else {
-                Text(service.receiverStatus ?? "Приём включён. Rider обновляет позицию для поиска сигналов в радиусе 1,5 км.")
+                }
+
+                DisclosureGroup("Инструкция") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Во время каталки проведи ползунок SOS, чтобы отправить координаты райдерам рядом.")
+                        Text("Приём сигналов в радиусе 1,5 км работает с точной геопозицией. Если получишь сигнал, открой карту и нажми «Отозваться», чтобы сообщить автору.")
+                        if RiderCommunity.usesLANTrust {
+                            Text("В локальной версии для приёма сигналов Rider должен быть открыт.")
+                        }
+                        Text("При непосредственной опасности обратись в экстренные службы. SOS в Rider оповещает других райдеров.")
+                    }.font(.subheadline)
+                }
             }
+            .navigationTitle("SOS рядом")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Готово") { dismiss() } } }
         }
-        .font(.caption)
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
+        .onChange(of: receiveSOS) { _, on in
+            if on { recorder.refreshSOSFix() }
+        }
+    }
+
+    private var status: String {
+        if !recorder.locationAuthorized { return "Для приёма нужна точная геопозиция." }
+        if recorder.usableFix == nil { return "Ждём точные координаты GPS." }
+        return service.receiverStatus ?? "Проверяем готовность приёма."
+    }
+
+    private func openSettings() {
+        if let url = URL(string: UIApplication.openSettingsURLString) { openURL(url) }
     }
 }
 
@@ -475,6 +552,7 @@ struct RiderSOSControl: View {
     let session: SessionSummary
 
     @GestureState private var offset: CGFloat = 0
+    @GestureState private var dragging = false
     @State private var started: Date?
     @State private var showingRadar = false
     @State private var sending = false
@@ -499,14 +577,19 @@ struct RiderSOSControl: View {
                     Capsule().fill(Color(red: 0.63, green: 0.12, blue: 0.15))
                     Capsule().strokeBorder(Color.white.opacity(0.55))
                     Text(receipt?.active == true ? "SOS активен · открыть радар" : "SOS · веди ползунок медленно")
-                        .font(.caption.bold()).frame(maxWidth: .infinity)
-                        .padding(.leading, 45).padding(.trailing, 8)
-                    Circle().fill(.white).frame(width: 40, height: 40)
+                        .font(.caption.bold())
+                        .multilineTextAlignment(.center)
+                        .lineLimit(2)
+                        .minimumScaleFactor(0.75)
+                        .frame(maxWidth: .infinity)
+                        .padding(.leading, 52).padding(.trailing, 8)
+                    Circle().fill(.white).frame(width: 44, height: 44)
                         .overlay { Image(systemName: "dot.radiowaves.left.and.right").font(.system(size: 14, weight: .bold)).foregroundStyle(.red) }
                         .contentShape(Circle())
                         .offset(x: min(travel, max(0, offset)))
-                        .gesture(DragGesture(minimumDistance: 4)
+                        .gesture(DragGesture(minimumDistance: 4, coordinateSpace: .global)
                             .updating($offset) { value, state, _ in state = value.translation.width }
+                            .updating($dragging) { _, active, _ in active = true }
                             .onChanged { value in if started == nil { started = value.time } }
                             .onEnded { value in
                                 defer { started = nil }
@@ -532,6 +615,14 @@ struct RiderSOSControl: View {
                     .font(.caption2.bold()).buttonStyle(.plain)
             } else if let feedback {
                 Text(feedback).multilineTextAlignment(.center).font(.caption2.weight(.semibold))
+            }
+        }
+        .onChange(of: dragging) { _, active in
+            if !active {
+                Task { @MainActor in
+                    await Task.yield()
+                    if !dragging { started = nil }
+                }
             }
         }
         .task { allowsDrill = await RiderSOSService.shared.allowsDrill() }

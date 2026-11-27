@@ -377,6 +377,12 @@ private struct SpotDetailView: View {
             VStack(alignment: .leading, spacing: 17) {
                 titleCard
                 SpotRecords(recorder: recorder, sessions: sessions)
+                if !sessions.isEmpty {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Label("Прыжки по направлению ветра", systemImage: "wind").font(.headline)
+                        RiderWindDirectionResults(rides: RiderPublicRide.summaries(in: sessions))
+                    }.lagoonCard()
+                }
                 SpotWeather(spot: spot, editShore: { editing = true })
                 SpotGallery(spotID: spot.id, relatedIDs: (spot.accessPoints ?? []).map(\.id).filter { $0 != spot.id })
                 if let points = spot.accessPoints {

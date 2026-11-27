@@ -229,6 +229,23 @@ class CommunityTests(unittest.TestCase):
         self.assertFalse(search(lat=1, lon=2)["nearby"])
         self.assertFalse(search(query="ветер")["people"])
 
+    def test_mentions_prioritize_connections_without_duplicates_or_private_profiles(self):
+        current = self.publish(self.me, "katya_me")["mine"]["id"]
+        followed = self.publish(self.audience, "katya_sunset")["mine"]["id"]
+        follower = self.publish("c" * 72, "katya_shmatya")["mine"]["id"]
+        self.publish("d" * 72, "katya_kitersha")
+        self.publish("e" * 72, "katya_private")
+        self.call("PATCH", "/me", "e" * 72, {"publicProfile": False})
+        self.call("PUT", "/follow/" + followed, self.me)
+        self.call("PUT", "/follow/" + current, self.audience)
+        self.call("PUT", "/follow/" + current, "c" * 72)
+        result = self.call("POST", "/people/search", self.me, {"query": " @KATYA_ ", "mentions": True})
+        self.assertEqual([p["id"] for p in result["following"]], [followed])
+        self.assertEqual([p["id"] for p in result["followers"]], [follower])
+        self.assertEqual([p["username"] for p in result["people"]], ["katya_kitersha"])
+        self.assertEqual(self.call("POST", "/people/search", self.me,
+                                   {"query": "@", "mentions": True})["people"], [])
+
     def test_verified_opt_in_contacts(self):
         self.publish(self.me, "person")
         self.publish(self.audience, "viewer")
@@ -630,6 +647,16 @@ class CommunityTests(unittest.TestCase):
         self.assertEqual((updated[0]["likes"], updated[0]["liked"]), (1, True))
         other = self.call("GET", post + "/comments", tokens[2])[0]
         self.assertEqual((other["likes"], other["liked"]), (1, False))
+        self.call("PUT", comment + "/like", tokens[2])
+        found = self.call("GET", comment + "/like/0", tokens[1])
+        self.assertEqual((found["total"], found["mine"], [r["id"] for r in found["people"]]),
+                         (2, True, [people[2], people[1]]))
+        self.assertEqual(self.call("GET", comment + "/like/1", self.me)["people"][0]["id"], people[1])
+        self.call("PATCH", "/me", tokens[2], {"publicProfile": False})
+        found = self.call("GET", comment + "/like/0", self.me)
+        self.assertEqual((found["total"], found["mine"], [r["id"] for r in found["people"]]),
+                         (1, False, [people[1]]))
+        self.call("GET", post + "/comments/" + str(UUID(int=712)) + "/like/0", self.me, expect=404)
         self.call("PUT", post + "/comments/" + str(UUID(int=712)) + "/like", tokens[1], expect=404)
         self.assertEqual(self.call("DELETE", comment + "/like", tokens[1])[0]["likes"], 0)
 
@@ -671,7 +698,7 @@ class CommunityTests(unittest.TestCase):
         self.call("PUT", "/follow/" + rider["id"], self.audience)
         self.call("PUT", "/statistics", self.me, dict(generatedAt=self.now, update=dict(year=2026,
                   rides=[self.ride], totals=self.totals, records=[record], secrets=["height3"],
-                  publicRides=[dict(record, seconds=900, jumps=2, windMS=7, spot="Example", kite="Kite", board="Board", heightSum=8.3, latitude=1, longitude=2)])))
+                  publicRides=[dict(record, seconds=900, jumps=2, windMS=7, windDirection=315, spot="Example", kite="Kite", board="Board", heightSum=8.3, latitude=1, longitude=2)])))
         post = str(UUID(int=101))
         path = "/posts/" + post
         self.call("PUT", path, self.me, dict(id=post, caption="Ветер", photo="/9j/2Q=="))
@@ -682,6 +709,7 @@ class CommunityTests(unittest.TestCase):
         self.assertEqual(page["points"], 165)
         self.assertEqual(page["distance"], 19)
         self.assertEqual(page["rides"][0]["seconds"], 900)
+        self.assertEqual(page["rides"][0]["windDirection"], 315)
         self.assertNotIn("latitude", page["rides"][0])
         self.assertEqual(page["rider"]["profile"]["secrets"], ["height3"])
         self.assertEqual(page["posts"][0]["post"]["id"], post)
@@ -700,7 +728,7 @@ class CommunityTests(unittest.TestCase):
         self.assertEqual(page["rider"]["profile"]["totals"], self.totals)
         self.assertEqual(len(page["posts"]), 1)
         self.assertEqual(page["sessionRecords"][0]["height"], 5.2)
-        self.assertTrue(set(page["sessionRecords"][0]).isdisjoint({"spot", "board", "windMS", "kite", "heightSum"}))
+        self.assertTrue(set(page["sessionRecords"][0]).isdisjoint({"spot", "board", "windMS", "windDirection", "kite", "heightSum"}))
         self.assertEqual(self.call("POST", "/tops", self.audience, {"metric": "height"})[0]["id"], rider["id"])
         self.assertEqual(self.ranking(2026)[0]["points"], 165)
 

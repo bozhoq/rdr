@@ -109,6 +109,11 @@ struct RiderAnalytics: View {
                                   rides: rides, axes: [.spot, .kit]) { sample in
                         RideWindComparison(rides: sample)
                     }
+                    AnalyticsCard(title: "Направление ветра на споте", icon: "location.north.line",
+                                  help: "Сравни результаты для каждого направления ветра на одном споте.",
+                                  rides: rides, axes: [.kit, .wind]) { sample in
+                        SpotWindAnalytics(rides: sample)
+                    }
                     AnalyticsCard(title: "Динамика по месяцам", icon: "chart.line.uptrend.xyaxis",
                                   help: "Посмотри, меняется ли результат по месяцам. Переключись на часы или прыжки, чтобы сопоставить прогресс с накатом.",
                                   rides: rides, axes: [.spot, .kit, .wind]) { sample in
@@ -199,6 +204,83 @@ private struct AnalyticsCard<Content: View>: View {
                             in: RoundedRectangle(cornerRadius: 10))
         }
         .tint(RiderTheme.accent)
+    }
+}
+
+private struct SpotWindAnalytics: View {
+    let rides: [RiderPublicRide]
+    @State private var selectedSpot = ""
+
+    var body: some View {
+        let spots = Set(rides.compactMap { ride in
+            ride.windDirection == nil ? nil : RideDimension.spot.key(ride)
+        }).sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+        if let first = spots.first {
+            let spot = spots.contains(selectedSpot) ? selectedSpot : first
+            LabeledContent("Спот") {
+                Picker("Спот", selection: Binding(get: { spot }, set: { selectedSpot = $0 })) {
+                    ForEach(spots, id: \.self) { Text($0).tag($0) }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+            }
+            RiderWindDirectionResults(rides: rides.filter { RideDimension.spot.key($0) == spot })
+        } else {
+            Text("Пока нет каталок с указанными спотом и направлением ветра.")
+                .font(.subheadline).foregroundStyle(.secondary)
+        }
+    }
+}
+
+struct RiderWindDirectionResults: View {
+    let rides: [RiderPublicRide]
+    private static let directions = (0..<8).map { SpotForecast.compass(Double($0 * 45)) }
+
+    private var byDirection: [String: [RiderPublicRide]] {
+        Dictionary(grouping: rides.filter { SpotForecast.compass($0.windDirection) != "—" },
+                   by: { SpotForecast.compass($0.windDirection) })
+    }
+
+    var body: some View {
+        let groups = byDirection
+        let directions = Self.directions.filter { groups[$0] != nil }
+        if directions.isEmpty {
+            Text("Пока нет каталок с указанным направлением ветра.")
+                .font(.subheadline).foregroundStyle(.secondary)
+        } else {
+            ForEach(directions, id: \.self) { direction in
+                let sample = groups[direction] ?? []
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Label(direction, systemImage: "wind").font(.subheadline.weight(.semibold))
+                        Spacer()
+                        Text("\(sample.count) каталок · \(Int(RideMeasure.jumps.value(in: sample) ?? 0)) прыжков")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    ViewThatFits(in: .horizontal) {
+                        HStack(spacing: 14) { heights(sample) }
+                        VStack(alignment: .leading, spacing: 4) { heights(sample) }
+                    }
+                    .font(.footnote).monospacedDigit()
+                }
+                .accessibilityElement(children: .combine)
+                if direction != directions.last { Divider() }
+            }
+            let count = groups.values.reduce(0) { $0 + $1.count }
+            if count < rides.count {
+                Text("Направление известно для \(count) из \(rides.count) каталок.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    @ViewBuilder private func heights(_ rides: [RiderPublicRide]) -> some View {
+        Text("Лучший \(height(.best, in: rides))")
+        Text("Средняя высота \(height(.mean, in: rides))").foregroundStyle(.secondary)
+    }
+
+    private func height(_ measure: RideMeasure, in rides: [RiderPublicRide]) -> String {
+        measure.value(in: rides).map { measure.display($0) } ?? "—"
     }
 }
 
