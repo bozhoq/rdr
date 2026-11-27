@@ -493,6 +493,29 @@ class CommunityTests(unittest.TestCase):
         with closing(sqlite3.connect(os.environ["RIDER_DB"])) as db:
             self.assertEqual(db.execute("SELECT count(*) FROM sos_incidents").fetchone()[0],2)
 
+    def test_delete_gallery_post_preserves_adjacent_posts(self):
+        self.publish(self.me, "gallery_owner")
+        self.publish(self.audience, "viewer")
+        identifiers = [str(UUID(int=700+i)) for i in range(4)]
+        for index, post in enumerate(identifiers, start=1):
+            self.call("PUT", "/posts/" + post, self.me,
+                      dict(id=post, caption=f"Post {index}", photo="/9j/2Q=="))
+            self.now += 1
+        self.assertEqual(
+            [entry["post"]["id"] for entry in self.call("GET", "/riders/me", self.me)["posts"]],
+            identifiers[::-1],
+        )
+        target = "/posts/" + identifiers[2]
+        self.call("DELETE", target, self.audience)
+        self.call("GET", target + "/details", self.me)
+        self.call("DELETE", target, self.me)
+        self.call("DELETE", target, self.me)
+        self.call("GET", target + "/details", self.me, expect=404)
+        self.assertEqual(
+            [entry["post"]["id"] for entry in self.call("GET", "/riders/me", self.me)["posts"]],
+            [identifiers[3], identifiers[1], identifiers[0]],
+        )
+
     def test_journal_video_privacy_and_idempotent_publish(self):
         rider = self.publish(self.me, "author")["mine"]
         self.publish(self.audience, "viewer")

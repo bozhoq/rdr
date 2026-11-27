@@ -52,13 +52,18 @@ private func riderHandle(_ username: String?, or name: String) -> String {
     return "@" + username
 }
 
-/// Inline author handles and mentions wrap with the caption and navigate inside Rider.
+/// Keep explicit mentions tappable without adding text to the caption.
 private struct RiderLinkedText: View {
     let text: String
     var author: String? = nil
     var authorID: String? = nil
     var linkTint = RiderTheme.accent
-    @State private var destination: String?
+    @State private var destination: Mention?
+
+    private struct Mention: Identifiable {
+        let id: String
+    }
+
     private static let handles = try! NSRegularExpression(pattern: #"(?<![A-Za-z0-9_.+@])@([A-Za-z0-9_]{3,24})(?![A-Za-z0-9_])"#)
 
     private var content: AttributedString {
@@ -80,10 +85,19 @@ private struct RiderLinkedText: View {
         Text(content).tint(linkTint)
             .environment(\.openURL, OpenURLAction { url in
                 guard url.scheme == "rider", url.host == "profile" else { return .systemAction }
-                destination = url.lastPathComponent
+                destination = Mention(id: url.lastPathComponent)
                 return .handled
             })
-            .navigationDestination(item: $destination) { RiderPublicProfileView(id: $0) }
+            .sheet(item: $destination) { mention in
+                NavigationStack {
+                    RiderPublicProfileView(id: mention.id)
+                        .toolbar {
+                            ToolbarItem(placement: .confirmationAction) {
+                                Button("Закрыть") { destination = nil }
+                            }
+                        }
+                }
+            }
     }
 }
 
@@ -179,7 +193,7 @@ struct RiderBadgeIcon: View {
 enum RiderPublicationSection: String, Codable, CaseIterable, Identifiable {
     case gallery, journal
     var id: Self { self }
-    var title: String { self == .gallery ? "Фото и видео" : "Заметки" }
+    var title: String { self == .gallery ? "Фото и видео" : "Стена" }
     var icon: String { self == .gallery ? "square.grid.3x3" : "text.alignleft" }
 }
 
@@ -206,6 +220,10 @@ struct RiderPost: Codable, Identifiable {
     var showsMedia: Bool { photo != nil || (hasCover ?? (publicationSection == .gallery)) }
 
     var date: Date { Date(timeIntervalSince1970: createdAt) }
+    var deletionDescription: String {
+        let text = caption.trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? date.formatted(date: .abbreviated, time: .shortened) : String(text.prefix(120))
+    }
     var contentID: UUID { sourceID ?? id }
     var remotePhoto: URL? {
         guard showsMedia else { return nil }
@@ -552,7 +570,11 @@ struct RiderPostDetail: View {
     @State private var confirmDelete = false
     @State private var error: String?
 
-    private var post: RiderPost { editable ? social.posts.first { $0.id == original.id } ?? original : original }
+    private var post: RiderPost {
+        guard editable, var local = social.posts.first(where: { $0.id == original.id }) else { return original }
+        if original.published == true { local.published = true }
+        return local
+    }
 
     var body: some View {
         ScrollViewReader { scroll in
@@ -593,6 +615,8 @@ struct RiderPostDetail: View {
         }
         .confirmationDialog("Удалить публикацию?", isPresented: $confirmDelete, titleVisibility: .visible) {
             Button("Удалить", role: .destructive) { update(deleting: true) }
+        } message: {
+            Text(post.deletionDescription)
         }
         .disabled(busy)
     }
@@ -950,7 +974,7 @@ struct RiderPostComposer: View {
                     .focused($captionFocused).lineLimit(3...7)
                     .onChange(of: caption) { _, value in if value.count > 800 { caption = String(value.prefix(800)) } }
                 if photo == nil && section == .gallery && !trimmed.isEmpty {
-                    Text("Пост с одним текстом появится в «Заметках».").font(.footnote).foregroundStyle(.secondary)
+                    Text("Пост с одним текстом появится на стене. Упоминание начинается с @юзернейма.").font(.footnote).foregroundStyle(.secondary)
                 }
                 Button {
                     captionFocused = false
@@ -1129,6 +1153,7 @@ struct RiderFeedView: View {
     @State private var selection = Feed.following
     @State private var conversation: RiderPerson?
     @State private var entries: [RiderFeedEntry]?
+    @State private var storiesExpanded = false
     @State private var loadedFeed: Feed?
     @State private var failed = false
 
@@ -1143,7 +1168,7 @@ struct RiderFeedView: View {
         return ScrollView {
             VStack(alignment: .leading, spacing: 10) {
                 if RiderCommunity.endpoint != nil {
-                    RiderStoriesStrip()
+                    RiderStoriesStrip(expanded: $storiesExpanded)
                     RiderPeopleEntry(recorder: recorder)
                 }
                 RiderSections(options: Feed.allCases, selection: $selection) { Text($0.title) }
@@ -1172,6 +1197,11 @@ struct RiderFeedView: View {
                 }
             }.padding(.horizontal, 12).padding(.vertical, 8)
         }
+        .simultaneousGesture(DragGesture(minimumDistance: 24).onEnded { motion in
+            if abs(motion.translation.height) > abs(motion.translation.width) {
+                storiesExpanded = false
+            }
+        })
         .toolbar(.hidden, for: .navigationBar)
         .scrollContentBackground(.hidden).background(RiderTheme.canvas)
         .navigationDestination(item: $conversation) { RiderThreadView(peer: $0) }
@@ -1315,13 +1345,11 @@ struct RiderFeedCard: View {
 
     @ViewBuilder private var caption: some View {
         if !post.caption.isEmpty {
-                RiderLinkedText(text: post.caption,
-                    author: riderHandle(post.sourceUsername ?? (post.sourceID == nil ? username : nil), or: post.sourceAuthor ?? author),
-                    authorID: post.sourceID == nil ? (entry?.authorID ?? username) : post.sourceUsername)
-                    .font(.subheadline)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.top, 2)
-            }
+            RiderLinkedText(text: post.caption)
+                .font(.subheadline)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 2)
+        }
     }
 
     private func openSentConversation() {

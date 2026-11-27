@@ -865,11 +865,22 @@ private struct RiderProfilePublications: View {
         let remote: RiderFeedEntry?
         var id: UUID { post.id }
 
+        func resolved(using local: RiderPost?) -> RiderPost {
+            guard var local else { return post }
+            if let remote {
+                local.published = remote.post.published
+                local.hasVideo = remote.post.hasVideo
+                local.hasCover = remote.post.hasCover
+            }
+            return local
+        }
+
         static func merged(remote: [RiderFeedEntry], local: [RiderPost]) -> [Self] {
             var collected: [UUID: Self] = [:]
             for entry in remote { collected[entry.id] = Self(post: entry.post, remote: entry) }
             for post in local {
-                collected[post.id] = Self(post: post, remote: collected[post.id]?.remote)
+                let shared = collected[post.id]
+                collected[post.id] = Self(post: shared?.resolved(using: post) ?? post, remote: shared?.remote)
             }
             return collected.values.sorted {
                 $0.post.createdAt == $1.post.createdAt ? $0.id.uuidString < $1.id.uuidString : $0.post.createdAt > $1.post.createdAt
@@ -885,6 +896,16 @@ private struct RiderProfilePublications: View {
     let avatar: Data?
     @Binding var selection: RiderPublicationSection
     var addPost: (() -> Void)?
+    @State private var gallery: GallerySelection?
+
+    private struct GallerySelection: Hashable {
+        let id = UUID()
+        let initial: UUID
+        let posts: [Entry]
+
+        static func == (lhs: Self, rhs: Self) -> Bool { lhs.id == rhs.id }
+        func hash(into hasher: inout Hasher) { hasher.combine(id) }
+    }
 
     var body: some View {
         let posts = Entry.merged(remote: entries.filter { !social.deletedPosts.contains($0.id) },
@@ -892,16 +913,22 @@ private struct RiderProfilePublications: View {
         VStack(alignment: .leading, spacing: 8) {
             publicationControls
             if posts.isEmpty {
-                Text(selection == .gallery ? "Пока нет фото и видео." : "Пока нет заметок.")
+                Text(selection == .gallery ? "Пока нет фото и видео." : "Стена пока пуста.")
                     .font(.subheadline).foregroundStyle(.secondary)
             } else if selection == .gallery {
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: 3), spacing: 3) {
                     ForEach(posts) { item in
-                        NavigationLink {
-                            RiderProfileGallery(items: posts, initial: item.id, isMine: isMine,
-                                                name: name, username: username, avatar: avatar)
-                        } label: { RiderPostSquare(post: item.post) }
-                            .buttonStyle(.plain)
+                        Button {
+                            gallery = GallerySelection(initial: item.id, posts: posts)
+                        } label: {
+                            RiderTheme.surface
+                                .aspectRatio(1, contentMode: .fit)
+                                .overlay { RiderPostSquare(post: item.post).allowsHitTesting(false) }
+                                .clipped()
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(item.post.deletionDescription)
                     }
                 }
                 .clipShape(RoundedRectangle(cornerRadius: 10))
@@ -916,6 +943,11 @@ private struct RiderProfilePublications: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .navigationDestination(item: $gallery) { selection in
+            RiderProfileGallery(items: selection.posts, initial: selection.initial, isMine: isMine,
+                                name: name, username: username, avatar: avatar)
+                .id(selection.id)
+        }
     }
 
     @ViewBuilder private var publicationControls: some View {
@@ -967,7 +999,11 @@ private struct RiderProfileGallery: View {
     let name: String
     let username: String?
     let avatar: Data?
-    @State private var focused: UUID?
+    let initial: UUID
+    @State private var didPosition = false
+    @State private var deleting: RiderPost?
+    @State private var deletionInProgress = false
+    @State private var deleteError = false
     @State private var detail: Detail?
     @State private var conversation: RiderPerson?
 
@@ -984,25 +1020,42 @@ private struct RiderProfileGallery: View {
         self.name = name
         self.username = username
         self.avatar = avatar
-        _focused = State(initialValue: initial)
+        self.initial = initial
     }
 
     var body: some View {
-        ScrollView {
-            LazyVStack(spacing: 10) {
-                ForEach(items.filter { !social.deletedPosts.contains($0.id) }) { item in
-                    card(item).id(item.id)
+        ScrollViewReader { reader in
+            ScrollView {
+                LazyVStack(spacing: 10) {
+                    ForEach(items.filter { !social.deletedPosts.contains($0.id) }) { item in
+                        card(item).id(item.id)
+                    }
                 }
+                .padding(12)
             }
-            .scrollTargetLayout()
-            .padding(12)
+            .task {
+                guard !didPosition else { return }
+                await Task.yield()
+                guard !Task.isCancelled else { return }
+                reader.scrollTo(initial, anchor: .top)
+                didPosition = true
+            }
         }
-        .scrollPosition(id: $focused, anchor: .top)
         .background(RiderTheme.canvas.ignoresSafeArea())
         .navigationTitle("Публикации")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.visible, for: .navigationBar)
         .navigationDestination(item: $conversation) { RiderThreadView(peer: $0) }
+        .confirmationDialog("Удалить эту публикацию?", isPresented: Binding(
+            get: { deleting != nil }, set: { if !$0 { deleting = nil } }
+        ), titleVisibility: .visible, presenting: deleting) { post in
+            Button("Удалить", role: .destructive) { delete(post) }
+        } message: { post in
+            Text(post.deletionDescription)
+        }
+        .alert("Не удалось удалить публикацию", isPresented: $deleteError) {
+            Button("OK", role: .cancel) {}
+        }
         .sheet(item: $detail) { request in
             let item = request.item
             NavigationStack {
@@ -1014,21 +1067,37 @@ private struct RiderProfileGallery: View {
     }
 
     private func card(_ item: RiderProfilePublications.Entry) -> some View {
-        let post = social.posts.first { $0.id == item.id && isMine } ?? item.post
+        let post = item.resolved(using: isMine ? social.posts.first { $0.id == item.id } : nil)
         return VStack(alignment: .trailing, spacing: 4) {
             if isMine && post.sourceID == nil {
-                Button {
-                    detail = Detail(item: item, comments: false)
+                Menu {
+                    if post.published != true && RiderCommunity.endpoint != nil {
+                        Button("Опубликовать", systemImage: "arrow.up.circle") {
+                            detail = Detail(item: item, comments: false)
+                        }
+                    }
+                    Button("Удалить", systemImage: "trash", role: .destructive) { deleting = post }
                 } label: {
                     Image(systemName: "ellipsis.circle").font(.title3).frame(width: 44, height: 44)
                 }
                 .buttonStyle(.plain)
+                .disabled(deletionInProgress)
                 .accessibilityLabel("Управление публикацией")
             }
             RiderFeedCard(post: post, author: item.remote?.author ?? name, username: item.remote?.username ?? username,
                           avatar: item.remote?.avatar ?? avatar, editable: isMine && item.post.sourceID == nil,
                           entry: item.remote, onComments: { detail = Detail(item: item, comments: true) },
                           onConversation: { conversation = $0 })
+        }
+    }
+
+    private func delete(_ target: RiderPost) {
+        guard !deletionInProgress else { return }
+        deletionInProgress = true
+        Task {
+            defer { deletionInProgress = false }
+            do { try await social.delete(target) }
+            catch { deleteError = true }
         }
     }
 }
@@ -1386,6 +1455,10 @@ private struct RiderFollowList: View {
 
 struct RiderPublicProfileView: View {
     @EnvironmentObject private var social: RiderSocialStore
+    @Environment(\.riderOpenOwnProfile) private var openOwnProfile
+    @Environment(\.dismiss) private var dismiss
+    @AppStorage("rider.accountID") private var accountID = ""
+    @AppStorage("rider.username") private var ownUsername = ""
     let id: String
     @State private var page: RiderPublicPage?
     @State private var unavailable = false
@@ -1395,7 +1468,23 @@ struct RiderPublicProfileView: View {
 
     @State private var publicationSection = RiderPublicationSection.gallery
 
+    private var isSelf: Bool {
+        id == "me" || id == accountID || (!ownUsername.isEmpty && id.lowercased() == ownUsername.lowercased())
+            || page?.mine == true
+    }
+
     var body: some View {
+        if isSelf, let openOwnProfile {
+            Color.clear.task {
+                dismiss()
+                openOwnProfile()
+            }
+        } else {
+            publicProfile
+        }
+    }
+
+    private var publicProfile: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 9) {
                 if let page {

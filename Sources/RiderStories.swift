@@ -31,7 +31,7 @@ struct RiderStoriesStrip: View {
     @Environment(\.scenePhase) private var phase
     @State private var stories: [RiderStory] = []
     @State private var opened: Deck?
-    @State private var expanded = false
+    @Binding var expanded: Bool
     @State private var composing = false
     @State private var failed = false
 
@@ -356,9 +356,17 @@ private struct RiderStorySlide: View {
     @State private var sending = false
     @State private var replySent = false
     @State private var error: String?
+    @GestureState private var touching = false
+    @State private var touch: Touch?
+
+    private struct Touch {
+        let downAt: Date
+        let startTime: TimeInterval
+        var scrubbing = false
+    }
 
     private var playing: Bool {
-        ready && phase == .active && !typing && !confirmDelete && !deleting &&
+        ready && phase == .active && touch == nil && !typing && !confirmDelete && !deleting &&
         !showingViewers && !sending && !changingLike && error == nil
     }
 
@@ -372,19 +380,8 @@ private struct RiderStorySlide: View {
             }
             if !ready && !failed { ProgressView().tint(.white).allowsHitTesting(false) }
             if failed { Text("История недоступна").allowsHitTesting(false) }
-            HStack(spacing: 0) {
-                Button {
-                    if typing { typing = false } else { previous() }
-                } label: { tapArea }
-                    .disabled(!canGoBack && !typing)
-                    .accessibilityLabel(typing ? "Скрыть клавиатуру" : "Предыдущая история")
-                Button {
-                    if typing { typing = false } else { next() }
-                } label: { tapArea }
-                    .accessibilityLabel(typing ? "Скрыть клавиатуру" : "Следующая история")
-            }
-            .buttonStyle(.plain)
-            .disabled(changingLike || sending || deleting)
+            storyControls
+                .allowsHitTesting(!changingLike && !sending && !deleting)
         }
         .safeAreaInset(edge: .top, spacing: 0) { header }
         .safeAreaInset(edge: .bottom, spacing: 0) { footer }
@@ -415,8 +412,63 @@ private struct RiderStorySlide: View {
         }
     }
 
-    private var tapArea: some View {
-        Color.clear.frame(maxWidth: .infinity, maxHeight: .infinity).contentShape(Rectangle())
+    private var storyControls: some View {
+        GeometryReader { bounds in
+            Color.clear
+                .contentShape(Rectangle())
+                .gesture(DragGesture(minimumDistance: 0)
+                    .updating($touching) { _, active, _ in active = true }
+                    .onChanged { updateTouch($0, width: bounds.size.width) }
+                    .onEnded { finishTouch($0, width: bounds.size.width) })
+        }
+        .onChange(of: touching) { _, active in
+            if !active {
+                Task { @MainActor in
+                    await Task.yield()
+                    if !touching { touch = nil }
+                }
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("История")
+        .accessibilityHint("Удерживай для паузы и веди пальцем для перемотки")
+        .accessibilityAction(named: Text("Предыдущая история")) { if canGoBack { previous() } }
+        .accessibilityAction(named: Text("Следующая история")) { next() }
+    }
+
+    private func updateTouch(_ gesture: DragGesture.Value, width: CGFloat) {
+        if touch == nil {
+            updatePlayback(false)
+            touch = Touch(downAt: gesture.time, startTime: elapsed)
+        }
+        guard ready, !typing, var touch, width > 0 else { return }
+        let translation = gesture.translation
+        let draggedHorizontally = abs(translation.width) > max(10, abs(translation.height))
+        guard touch.scrubbing || (draggedHorizontally && gesture.time.timeIntervalSince(touch.downAt) >= 0.24) else { return }
+        touch.scrubbing = true
+        self.touch = touch
+        elapsed = min(max(0, duration - 0.05), max(0, touch.startTime + Double(translation.width / width) * duration))
+        player?.seek(to: CMTime(seconds: elapsed, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+    }
+
+    private func finishTouch(_ gesture: DragGesture.Value, width: CGFloat) {
+        guard let touch else { return }
+        defer { self.touch = nil }
+        if typing {
+            typing = false
+            return
+        }
+        let translation = gesture.translation
+        if touch.scrubbing {
+            updateTouch(gesture, width: width)
+        } else if abs(translation.width) >= 45 && abs(translation.width) > abs(translation.height) {
+            if translation.width < 0 { next() }
+            else if canGoBack { previous() }
+        } else if gesture.time.timeIntervalSince(touch.downAt) < 0.24,
+                  hypot(translation.width, translation.height) < 12 {
+            if gesture.startLocation.x >= width / 2 { next() }
+            else if canGoBack { previous() }
+        }
     }
 
     private var header: some View {

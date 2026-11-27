@@ -4,6 +4,17 @@ import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 
+private struct RiderOpenOwnProfileKey: EnvironmentKey {
+    static let defaultValue: (() -> Void)? = nil
+}
+
+extension EnvironmentValues {
+    var riderOpenOwnProfile: (() -> Void)? {
+        get { self[RiderOpenOwnProfileKey.self] }
+        set { self[RiderOpenOwnProfileKey.self] = newValue }
+    }
+}
+
 enum RiderLocalAccount {
     static func directory(_ name: String) -> URL {
         let defaults = UserDefaults.standard
@@ -328,6 +339,10 @@ private struct Tabs: View {
         }
         .modifier(RiderSocialAlerts())
         .environmentObject(social)
+        .environment(\.riderOpenOwnProfile, {
+            riderPath = []
+            selectedTab = .rider
+        })
         .tint(RiderTheme.accent)
         .alert("Rider", isPresented: Binding(
             get: { recorder.errorMessage != nil },
