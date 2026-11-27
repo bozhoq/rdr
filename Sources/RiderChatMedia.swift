@@ -204,7 +204,7 @@ enum RiderMediaEncoding {
             try videoTrack.insertTimeRange(range, of: video, at: cursor)
 
             if let audio = try await asset.loadTracks(withMediaType: .audio).first {
-                let audioRange = CMTimeRangeGetIntersection(try await audio.load(.timeRange), range)
+                let audioRange = CMTimeRangeGetIntersection(try await audio.load(.timeRange), otherRange: range)
                 if audioRange.duration.seconds > 0 {
                     try audioTrack.insertTimeRange(audioRange, of: audio, at: cursor + (audioRange.start - range.start))
                 }

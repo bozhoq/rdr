@@ -319,7 +319,8 @@ struct RiderAccountAccessSettings: View {
                     notice = "Сначала заверши и сохрани каталку."
                     return
                 }
-                let _: [String: Bool]? = try? await RiderCommunity.decode("sos/receiver", method: "DELETE")
+                let path = RiderCommunity.usesLANTrust ? "sos/receiver" : "sos/device"
+                let _: [String: Bool]? = try? await RiderCommunity.decode(path, method: "DELETE")
                 try RiderCommunity.clearDeviceCredential()
                 RiderSOSService.shared.resetAccount()
                 RiderLocalAccount.markSignedOut()

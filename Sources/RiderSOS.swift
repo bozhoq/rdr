@@ -47,6 +47,7 @@ final class RiderSOSAppDelegate: NSObject, UIApplicationDelegate, UNUserNotifica
 
     func userNotificationCenter(_ center: UNUserNotificationCenter,
                                 willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
+        guard !UserDefaults.standard.bool(forKey: "rider.accountNeedsSignIn") else { return [] }
         let info = notification.request.content.userInfo
         if let kind = info["riderSocial"] as? String {
             guard RiderAlertKind(rawValue: kind)?.enabled == true else { return [] }
@@ -61,6 +62,7 @@ final class RiderSOSAppDelegate: NSObject, UIApplicationDelegate, UNUserNotifica
     }
 
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
+        guard !UserDefaults.standard.bool(forKey: "rider.accountNeedsSignIn") else { return }
         let info = response.notification.request.content.userInfo
         if let kind = info["riderSocial"] as? String {
             await MainActor.run { NotificationCenter.default.post(name: Notification.Name("rider.social.open"), object: kind) }
