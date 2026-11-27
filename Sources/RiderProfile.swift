@@ -539,7 +539,7 @@ struct RiderProfileView: View {
                             .badge(riderPoints(rank.threshold))
                         }
                     } footer: {
-                        Text("1 очко за минуту завершённой каталки и 5 очков за засчитанный прыжок от 2 м. За одну сессию учитываются до 8 часов и 100 прыжков. На уровне 5+ очки продолжают накапливаться. Новый сезон начинается 1 января по Москве.")
+                        Text("1 балл за минуту завершённой каталки и 5 баллов за засчитанный прыжок от 2 м. За одну сессию учитываются до 8 часов и 100 прыжков. На уровне 5+ баллы продолжают накапливаться. Новый сезон начинается 1 января по Москве.")
                     }
                     Section("Ачивки сезона · \(riderPoints(progress.achievementPoints))") {
                         ForEach(progress.achievements) { award in
@@ -783,7 +783,7 @@ struct RiderProfileView: View {
         return Section("Видимость") {
             Toggle("Публичный профиль", isOn: Binding(get: { visible }, set: { updateVisibility(profile: $0) }))
             Toggle("Публичная статистика", isOn: Binding(get: { statsVisible }, set: { updateVisibility(stats: $0) }))
-            Text("Уровень, очки, рекорды, часы на воде и ачивки видны всем райдерам. Переключатель статистики открывает графики по ветру, спотам и комплектам.")
+            Text("Уровень, баллы, рекорды, часы на воде и ачивки видны всем райдерам. Переключатель статистики открывает графики по ветру, спотам и комплектам.")
                 .font(.footnote).foregroundStyle(.secondary)
             if statsVisible && !visible {
                 Text("Статистика появится, когда откроешь профиль.").font(.footnote).foregroundStyle(.secondary)
@@ -1317,7 +1317,7 @@ struct RiderRankCard: View {
                 }
             }
             if rank == .s {
-                Label("Очки копятся до конца сезона", systemImage: "infinity")
+                Label("Баллы копятся до конца сезона", systemImage: "infinity")
                     .font(.caption.weight(.semibold)).foregroundStyle(color)
             } else {
                 ProgressView(value: Double(points - rank.threshold) / Double((rank.next?.threshold ?? rank.threshold + 1) - rank.threshold))

@@ -85,12 +85,12 @@ func riderPoints(_ points: Int, withPlus: Bool = false) -> String {
     let magnitude = points.magnitude
     let unit: String
     if (11...14).contains(magnitude % 100) {
-        unit = "очков"
+        unit = "баллов"
     } else {
         switch magnitude % 10 {
-        case 1: unit = "очко"
-        case 2...4: unit = "очка"
-        default: unit = "очков"
+        case 1: unit = "балл"
+        case 2...4: unit = "балла"
+        default: unit = "баллов"
         }
     }
     let sign = withPlus && points > 0 ? "+" : ""
@@ -493,7 +493,7 @@ enum RiderTopMetric: String, CaseIterable, Identifiable {
     }
     var unit: String {
         switch self {
-        case .rank: return "очки"
+        case .rank: return "баллы"
         case .airtime: return "с"
         case .height, .distance: return "м"
         }

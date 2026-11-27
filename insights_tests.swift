@@ -152,10 +152,10 @@ import FoundationXML
         check(RiderSeasonProgress([rideForProfile], at: january).points == 0 &&
               RiderRank.forPoints(5000).rawValue == "5" && RiderRank.forPoints(5001).rawValue == "5+",
               "Rider season resets at midnight in Moscow and thresholds include their lower edge")
-        check(riderPoints(0) == "0 очков" && riderPoints(1) == "1 очко" &&
-              riderPoints(4) == "4 очка" && riderPoints(11) == "11 очков" &&
-              riderPoints(12) == "12 очков" && riderPoints(21) == "21 очко" &&
-              riderPoints(22, withPlus: true) == "+22 очка",
+        check(riderPoints(0) == "0 баллов" && riderPoints(1) == "1 балл" &&
+              riderPoints(4) == "4 балла" && riderPoints(11) == "11 баллов" &&
+              riderPoints(12) == "12 баллов" && riderPoints(21) == "21 балл" &&
+              riderPoints(22, withPlus: true) == "+22 балла",
               "Rider points labels use Russian integer plurals and an optional reward sign")
         let socialBadges = RiderAchievement.milestones(profileTotals, followers: 10)
         let followerBadge = socialBadges.first { $0.id == "ten-followers" }
