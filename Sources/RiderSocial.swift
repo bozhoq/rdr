@@ -1698,7 +1698,7 @@ private struct RiderPostEquipmentTag: View {
     var body: some View {
         if let equipment {
             Button { showing = true } label: {
-                Label { Text(equipment.name) } icon: { EquipmentGlyph(kind: .kite).stroke(lineWidth: 1.5).frame(width: 15, height: 16) }
+                Label { Text(equipment.name) } icon: { EquipmentGlyph(kind: .kite).rendered().frame(width: 15, height: 16) }
                     .font(.caption.weight(.semibold))
                     .lineLimit(1)
                     .padding(.horizontal, 9).padding(.vertical, 7)
@@ -1710,8 +1710,8 @@ private struct RiderPostEquipmentTag: View {
             .popover(isPresented: $showing) {
                 VStack(alignment: .leading, spacing: 12) {
                     Text(equipment.name).font(.headline)
-                    Label { Text(equipment.kite) } icon: { EquipmentGlyph(kind: .kite).stroke(lineWidth: 1.5).frame(width: 18, height: 20) }
-                    Label { Text(equipment.board) } icon: { EquipmentGlyph(kind: .board).stroke(lineWidth: 1.5).frame(width: 18, height: 20) }
+                    Label { Text(equipment.kite) } icon: { EquipmentGlyph(kind: .kite).rendered().frame(width: 18, height: 20) }
+                    Label { Text(equipment.board) } icon: { EquipmentGlyph(kind: .board).rendered().frame(width: 18, height: 20) }
                 }
                 .padding(20)
                 .presentationCompactAdaptation(.popover)
@@ -2550,7 +2550,8 @@ struct RiderTopsView: View {
             Text(name)
         } icon: {
             EquipmentGlyph(kind: glyph)
-                .stroke(RiderTheme.accent, style: StrokeStyle(lineWidth: 1.2, lineCap: .round, lineJoin: .round))
+                .rendered(lineWidth: 1.2)
+                .foregroundStyle(RiderTheme.accent)
                 .frame(width: 18, height: 18)
                 .accessibilityHidden(true)
         }
@@ -2630,26 +2631,54 @@ struct EquipmentGlyph: Shape {
     enum Kind: Equatable { case kite, board }
     let kind: Kind
 
+    @ViewBuilder
+    func rendered(lineWidth: CGFloat = 1.5) -> some View {
+        if kind == .kite {
+            fill()
+        } else {
+            stroke(style: StrokeStyle(lineWidth: lineWidth, lineCap: .round, lineJoin: .round))
+        }
+    }
+
     func path(in rect: CGRect) -> Path {
         func point(_ x: CGFloat, _ y: CGFloat) -> CGPoint {
-            CGPoint(x: rect.minX + rect.width * x, y: rect.minY + rect.height * y)
+            let (horizontal, vertical) = kind == .board ? (1 - y, x) : (x, y)
+            return CGPoint(x: rect.minX + rect.width * horizontal, y: rect.minY + rect.height * vertical)
         }
         var shape = Path()
         if kind == .kite {
-            shape.move(to: point(0.08, 0.64))
-            shape.addQuadCurve(to: point(0.92, 0.64), control: point(0.5, -0.37))
-            shape.addQuadCurve(to: point(0.08, 0.64), control: point(0.5, 0.26))
-            shape.move(to: point(0.08, 0.64))
-            shape.addLine(to: point(0.5, 0.92))
-            shape.addLine(to: point(0.92, 0.64))
+            shape.move(to: point(0.14, 0.54))
+            shape.addCurve(to: point(0.48, 0.23), control1: point(0.16, 0.38), control2: point(0.33, 0.22))
+            shape.addCurve(to: point(0.55, 0.34), control1: point(0.51, 0.23), control2: point(0.54, 0.27))
+            shape.addCurve(to: point(0.24, 0.58), control1: point(0.52, 0.41), control2: point(0.35, 0.47))
+            shape.addCurve(to: point(0.14, 0.54), control1: point(0.20, 0.61), control2: point(0.16, 0.59))
+            shape.closeSubpath()
+
+            shape.move(to: point(0.58, 0.24))
+            shape.addCurve(to: point(0.84, 0.61), control1: point(0.76, 0.28), control2: point(0.87, 0.43))
+            shape.addCurve(to: point(0.70, 0.88), control1: point(0.83, 0.72), control2: point(0.78, 0.85))
+            shape.addCurve(to: point(0.57, 0.76), control1: point(0.63, 0.91), control2: point(0.55, 0.83))
+            shape.addCurve(to: point(0.66, 0.39), control1: point(0.62, 0.62), control2: point(0.69, 0.48))
+            shape.addCurve(to: point(0.58, 0.24), control1: point(0.65, 0.33), control2: point(0.61, 0.28))
+            shape.closeSubpath()
         } else {
-            let inset = CGRect(x: rect.minX + rect.width * 0.36, y: rect.minY + rect.height * 0.06,
-                               width: rect.width * 0.28, height: rect.height * 0.88)
-            shape.addRoundedRect(in: inset, cornerSize: CGSize(width: rect.width * 0.14, height: rect.height * 0.14))
-            for y in [CGFloat(0.36), CGFloat(0.64)] {
-                shape.move(to: point(0.37, y))
-                shape.addLine(to: point(0.63, y))
+            shape.move(to: point(0.08, 0.50))
+            shape.addCurve(to: point(0.17, 0.34), control1: point(0.08, 0.41), control2: point(0.09, 0.34))
+            shape.addCurve(to: point(0.50, 0.38), control1: point(0.33, 0.37), control2: point(0.38, 0.38))
+            shape.addCurve(to: point(0.83, 0.34), control1: point(0.62, 0.38), control2: point(0.68, 0.37))
+            shape.addCurve(to: point(0.92, 0.50), control1: point(0.91, 0.34), control2: point(0.92, 0.41))
+            shape.addCurve(to: point(0.83, 0.66), control1: point(0.92, 0.59), control2: point(0.91, 0.66))
+            shape.addCurve(to: point(0.50, 0.62), control1: point(0.67, 0.63), control2: point(0.62, 0.62))
+            shape.addCurve(to: point(0.17, 0.66), control1: point(0.38, 0.62), control2: point(0.32, 0.63))
+            shape.addCurve(to: point(0.08, 0.50), control1: point(0.09, 0.66), control2: point(0.08, 0.59))
+            shape.closeSubpath()
+            for x in [CGFloat(0.29), 0.61] {
+                shape.move(to: point(x, 0.57))
+                shape.addCurve(to: point(x + 0.06, 0.44), control1: point(x - 0.02, 0.50), control2: point(x, 0.45))
+                shape.addCurve(to: point(x + 0.09, 0.57), control1: point(x + 0.11, 0.45), control2: point(x + 0.12, 0.52))
             }
+            shape.move(to: point(0.46, 0.51))
+            shape.addLine(to: point(0.54, 0.51))
         }
         return shape
     }

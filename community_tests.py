@@ -30,6 +30,7 @@ class CommunityTests(unittest.TestCase):
     def call(self, method, path, token, data=None, expect=200, raw=False):
         payload = json.dumps(data).replace("/", r"\/").encode() if data is not None else b""
         env = dict(REQUEST_METHOD=method, PATH_INFO=path, CONTENT_LENGTH=str(len(payload)))
+        env["wsgi.url_scheme"] = "https"
         env["wsgi.input"] = io.BytesIO(payload)
         env["HTTP_AUTHORIZATION"] = "Bearer " + token
         headers = []
@@ -312,6 +313,65 @@ class CommunityTests(unittest.TestCase):
             else:
                 self.assertTrue(status["required"])
                 self.assertFalse(status["verified"])
+
+    def test_password_policy_mfa_and_restricted_reset(self):
+        self.enterContext(patch.dict(os.environ, {"RIDER_SMS_RU_API_ID":"test",
+                         "RIDER_SMTP_HOST":"localhost", "RIDER_SMTP_FROM":"rider@example.test"}))
+        email = self.enterContext(patch.object(rider_discovery, "deliver_email"))
+        sms = self.enterContext(patch.object(rider_discovery, "deliver"))
+        address, phone = "rider@example.test", "+12025550105"
+        password, new_password = "summer wind over the lagoon", "ride by the warm shoreline"
+
+        def code(device, *, contact=address, kind="email", intent="auto", expect=200):
+            self.call("POST", "/account/start", device, {"kind":kind,"contact":contact,"intent":intent})
+            pin = (email if kind == "email" else sms).call_args.args[1]
+            return self.call("POST", "/account/verify", device, {"code":pin}, expect=expect)
+
+        code(self.me)
+        code(self.me, contact=phone, kind="phone")
+        body = dict(name="Local Rider", username="password_rider", totals=self.totals, password=password)
+        owner = self.call("PUT", "/registration", self.me, body)["mine"]["id"]
+        self.assertTrue(self.call("GET", "/account", self.me)["passwordEnabled"])
+
+        def login(device, *, secret=password, kind="email", contact=address, expect=200, **extra):
+            return self.call("POST", "/account/password-login", device, dict(
+                kind=kind, contact=contact, password=secret, **extra), expect=expect)
+
+        login(self.audience, secret="bad password", expect=403)
+        self.assertEqual(login(self.audience, kind="phone", contact=phone), {"step":"complete"})
+        self.assertEqual(self.call("GET", "/me", self.audience)["mine"]["id"], owner)
+        policy = dict(currentPassword=password, passwordEnabled=True, emailEnabled=False, smsEnabled=False, mfa=True)
+        self.call("POST", "/account/security", self.me, dict(policy,currentPassword="wrong"), expect=403)
+        self.call("POST", "/account/security", self.me, dict(policy,passwordEnabled=False), expect=409)
+        self.call("POST", "/account/security", self.me, dict(policy,passwordEnabled=False,mfa=False), expect=409)
+        self.call("POST", "/account/security", self.me, policy)
+        self.now += 61
+        other = "c"*72
+        code(other, intent="signIn", expect=409)
+        self.assertTrue(self.call("GET", "/registration", other)["required"])
+        self.now += 61
+        code(other, intent="reset", expect=409)
+        self.now += 3600
+        self.assertEqual(login(other, kind="phone", contact=phone), {"step":"emailRequired"})
+        login(other, kind="phone", contact=phone, secondEmail="someone@example.test", expect=403)
+        self.assertEqual(login(other, kind="phone", contact=phone, secondEmail=address), {"step":"codeRequired"})
+        self.assertTrue(self.call("GET", "/registration", other)["required"])
+        pin = email.call_args.args[1]
+        self.call("POST", "/account/verify", other, {"code":pin})
+        self.call("POST", "/account/verify", other, {"code":pin}, expect=403)
+        self.assertEqual(self.call("GET", "/me", other)["mine"]["id"], owner)
+
+        self.call("POST", "/account/security", self.me, dict(policy,mfa=False))
+        self.now += 61
+        recovering = "d"*72
+        self.assertEqual(code(recovering, intent="reset"), {"resetReady":True})
+        self.assertTrue(self.call("GET", "/registration", recovering)["required"])
+        self.call("POST", "/account/password-reset", recovering, {"password":new_password})
+        self.call("POST", "/account/password-reset", recovering, {"password":new_password}, expect=403)
+        old_device = "e"*72
+        login(old_device, expect=403)
+        self.assertEqual(login(old_device, secret=new_password), {"step":"complete"})
+        self.assertEqual(self.call("GET", "/me", old_device)["mine"]["id"], owner)
 
     def test_demo_alert_delivery_and_preferences(self):
         recipient = self.publish(self.me, "recipient")["mine"]["id"]

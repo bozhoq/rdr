@@ -166,11 +166,20 @@ enum RiderCommunity {
         let showBirthday: Bool?
     }
 
-    static func register(name: String, username: String, publicProfile: Bool, statsPublic: Bool) async throws -> String {
-        let profile = RiderPublication(name: name, username: username, bio: nil, totals: RiderTotals([]), avatar: nil,
-                                       publicProfile: publicProfile, statsPublic: statsPublic)
-        let result = try await request("registration", method: "PUT", payload: profile)
-        return result.mine?.profile.username ?? username
+    private struct RegistrationPayload: Encodable {
+        let name: String
+        let username: String
+        let publicProfile: Bool
+        let statsPublic: Bool
+        let password: String
+        let totals = RiderTotals([])
+    }
+
+    static func register(name: String, username: String, publicProfile: Bool, statsPublic: Bool,
+                         password: String) async throws {
+        let payload = RegistrationPayload(name: name, username: username, publicProfile: publicProfile,
+                                          statsPublic: statsPublic, password: password)
+        let _: CommunityState = try await decode("registration", method: "PUT", body: JSONEncoder().encode(payload))
     }
 
     static func unread() async throws -> RiderUnread {

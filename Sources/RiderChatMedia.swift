@@ -1504,10 +1504,9 @@ struct RiderChatBackdrop: View {
         wind.opacity = 0.65
         let glyph = EquipmentGlyph(kind: .kite)
         let frame = CGRect(x: -scale / 2, y: -scale / 2, width: scale, height: scale)
-        wind.stroke(glyph.path(in: frame), with: .color(color),
-                    style: StrokeStyle(lineWidth: max(1.25, scale * 0.03), lineCap: .round, lineJoin: .round))
+        wind.fill(glyph.path(in: frame), with: .color(color))
         var line = Path()
-        line.move(to: CGPoint(x: -scale * 0.19, y: scale * 0.21))
+        line.move(to: CGPoint(x: scale * 0.17, y: scale * 0.38))
         line.addQuadCurve(to: CGPoint(x: -scale * 1.7, y: scale * 1.67),
                           control: CGPoint(x: -scale * 0.68, y: scale * 1.14))
         wind.stroke(line, with: .color(color.opacity(0.60)), style: StrokeStyle(lineWidth: 0.8, lineCap: .round))

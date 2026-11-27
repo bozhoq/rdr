@@ -265,13 +265,25 @@ struct SetupFields: View {
                 .onChange(of: setup.kite) { _, value in setup.kite = String(value.prefix(100)) }
         } else {
             Button { showingKitePicker = true } label: {
-                LabeledContent("Кайт", value: setup.kite.isEmpty ? "Выбрать" : setup.kiteTitle)
+                LabeledContent {
+                    Text(setup.kite.isEmpty ? "Выбрать" : setup.kiteTitle)
+                } label: {
+                    Label { Text("Кайт") } icon: {
+                        EquipmentGlyph(kind: .kite).rendered().frame(width: 18, height: 20)
+                    }
+                }
             }.sheet(isPresented: $showingKitePicker) {
                 KitePicker(setup: $setup, recent: suggestions.kites)
             }
         }
         Button { showingBoardPicker = true } label: {
-            LabeledContent("Доска", value: setup.boardTitle.isEmpty ? "Выбрать" : setup.boardTitle)
+            LabeledContent {
+                Text(setup.boardTitle.isEmpty ? "Выбрать" : setup.boardTitle)
+            } label: {
+                Label { Text("Доска") } icon: {
+                    EquipmentGlyph(kind: .board).rendered().frame(width: 18, height: 20)
+                }
+            }
         }.sheet(isPresented: $showingBoardPicker) {
             BoardPicker(setup: $setup, recent: recent)
         }

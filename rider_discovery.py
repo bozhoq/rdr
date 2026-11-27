@@ -222,6 +222,15 @@ CREATE TABLE IF NOT EXISTS login_challenges(
 CREATE TABLE IF NOT EXISTS login_devices(
  device TEXT PRIMARY KEY, owner TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS login_devices_owner ON login_devices(owner);
+CREATE TABLE IF NOT EXISTS login_security(
+ owner TEXT PRIMARY KEY, salt BLOB NOT NULL, verifier BLOB NOT NULL,
+ password_enabled INTEGER NOT NULL DEFAULT 1, email_enabled INTEGER NOT NULL DEFAULT 1,
+ sms_enabled INTEGER NOT NULL DEFAULT 1, mfa INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS login_mfa_pending(
+ device TEXT PRIMARY KEY, owner TEXT NOT NULL, verifier BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS login_resets(
+ device TEXT PRIMARY KEY, owner TEXT NOT NULL, expires INTEGER NOT NULL);
+
 """
 
 
@@ -255,40 +264,175 @@ def login_address(kind, raw):
     raise ValueError()
 
 
+def contact_digest(key, kind, address):
+    return digest_phone(key, address) if kind == "phone" else sealed(key, "email:" + address)
+
+
+def password_bytes(value, *, creating=False):
+    if not isinstance(value, str) or not 1 <= len(value) <= 128 or (creating and len(value) < 15):
+        raise ValueError("invalid password")
+    return value.encode("utf-8")
+
+
+def derive_password(password, salt):
+    return hashlib.scrypt(password, salt=salt, n=2**15, r=8, p=3, maxmem=64*1024*1024, dklen=32)
+
+
+def security_row(db, owner):
+    return db.execute("""SELECT salt,verifier,password_enabled,email_enabled,sms_enabled,mfa
+        FROM login_security WHERE owner=?""", (owner,)).fetchone()
+
+
+def new_password(db, owner, password):
+    salt = secrets.token_bytes(16)
+    db.execute("""INSERT INTO login_security(owner,salt,verifier) VALUES(?,?,?) ON CONFLICT(owner) DO UPDATE SET
+        salt=excluded.salt,verifier=excluded.verifier,password_enabled=1""",
+               (owner, salt, derive_password(password, salt)))
+    db.execute("DELETE FROM login_mfa_pending WHERE owner=?", (owner,))
+    db.execute("DELETE FROM login_resets WHERE owner=?", (owner,))
+
+
+def may_use_account(db, owner, target):
+    if owner == target:
+        return True
+    current = db.execute("SELECT document FROM profiles WHERE id=?", (owner,)).fetchone()
+    has_contact = db.execute("SELECT 1 FROM login_contacts WHERE owner=?", (owner,)).fetchone()
+    return not has_contact and (not current or json.loads(current[0]).get("onboardingPending", False))
+
+
+def bind_account(db, device, owner, target):
+    if owner != target:
+        db.execute("INSERT INTO login_devices VALUES(?,?) ON CONFLICT(device) DO UPDATE SET owner=excluded.owner",
+                   (device,target))
+
+
+def issue_login_code(db, *, key, device, kind, address, digest, intent, ip, now, mfa=None):
+    if not login_methods().get(kind):
+        return "503 Service Unavailable", {"error":"delivery unavailable"}
+    if not spend(db, [("login:device:"+device, 3, 1, 3600), ("login:contact:"+digest, 1, 1, 60),
+                      ("login:day:"+digest, 6, 1, 86400), ("login:ip:"+sealed(key,ip), 12, 1, 3600),
+                      ("login:global:"+kind, 100, 1, 86400)], now):
+        return "429 Too Many Requests", {"error":"try later"}
+    code = f"{secrets.randbelow(1000000):06d}"
+    purpose = f"{intent}:{kind}"
+    proof = sealed(key, "login:"+purpose+device+digest+code)
+    db.execute("DELETE FROM login_challenges WHERE expires<=?", (now,))
+    db.execute("DELETE FROM login_mfa_pending WHERE device=? OR device NOT IN (SELECT device FROM login_challenges)", (device,))
+    db.execute("INSERT OR REPLACE INTO login_challenges VALUES(?,?,?,?,?,5)", (device,purpose,digest,proof,now+300))
+    if mfa is not None:
+        db.execute("INSERT INTO login_mfa_pending VALUES(?,?,?)", (device,*mfa))
+    db.commit()
+    try:
+        (deliver if kind == "phone" else deliver_email)(address, code)
+    except (OSError, ValueError, KeyError, smtplib.SMTPException):
+        removed = db.execute("DELETE FROM login_challenges WHERE device=? AND proof=?", (device,proof))
+        if removed.rowcount:
+            db.execute("DELETE FROM login_mfa_pending WHERE device=?", (device,))
+        return "503 Service Unavailable", {"error":"delivery unavailable"}
+    return "200 OK", {"sent":True}
+
+
+def password_login(db, owner, device, raw, key, ip, now):
+    kind = raw.get("kind")
+    address = login_address(kind, raw.get("contact"))
+    digest = contact_digest(key, kind, address)
+    password = password_bytes(raw.get("password"))
+    existing = db.execute("SELECT owner FROM login_contacts WHERE kind=? AND digest=?", (kind,digest)).fetchone()
+    target = existing[0] if existing else None
+    if not spend(db, [("pw:id:"+(target or digest), 8, 1, 900), ("pw:device:"+device, 12, 1, 900),
+                      ("pw:ip:"+sealed(key,ip), 36, 1, 900), ("pw:global", 120, 1, 900)], now):
+        return "429 Too Many Requests", {"error":"try later"}
+    security = security_row(db, target)
+    candidate = derive_password(password, security[0] if security else b"rider-unknown-v1")
+    valid = hmac.compare_digest(candidate, security[1] if security else bytes(32))
+    if not (security and valid and security[2] and may_use_account(db, owner, target)):
+        return "403 Forbidden", {"error":"invalid credentials"}
+    if not security[5]:
+        bind_account(db, device, owner, target)
+        return "200 OK", {"step":"complete"}
+    email = address if kind == "email" else raw.get("secondEmail")
+    if not email:
+        return "200 OK", {"step":"emailRequired"}
+    email = login_address("email", email)
+    email_digest = contact_digest(key, "email", email)
+    if not db.execute("SELECT 1 FROM login_contacts WHERE owner=? AND kind='email' AND digest=?",
+                      (target,email_digest)).fetchone():
+        return "403 Forbidden", {"error":"invalid credentials"}
+    status, response = issue_login_code(db, key=key, device=device, kind="email", address=email, digest=email_digest,
+                                        intent="mfa", ip=ip, now=now, mfa=(target,security[1]))
+    return status, {"step":"codeRequired"} if status == "200 OK" else response
+
+
+def manage_password(db, owner, device, path, raw, key, ip, now):
+    if path == "/account/password-reset":
+        reset = db.execute("SELECT owner FROM login_resets WHERE device=? AND expires>?", (device,now)).fetchone()
+        security = security_row(db, reset[0]) if reset else None
+        if not reset or (security and security[5]) or not may_use_account(db, owner, reset[0]):
+            return "403 Forbidden", {"error":"reset unavailable"}
+        new_password(db, reset[0], password_bytes(raw.get("password"), creating=True))
+        bind_account(db, device, owner, reset[0])
+        return "200 OK", {"saved":True}
+    linked = {row[0] for row in db.execute("SELECT kind FROM login_contacts WHERE owner=?", (owner,))}
+    if not linked:
+        return "403 Forbidden", {"error":"verify contact first"}
+    security = security_row(db, owner)
+    if security:
+        if not spend(db, [("pw:settings:"+owner, 8, 1, 900), ("pw:settings-ip:"+sealed(key,ip), 36, 1, 900)], now):
+            return "429 Too Many Requests", {"error":"try later"}
+        old_password = raw.get("currentPassword")
+        if not old_password or not hmac.compare_digest(derive_password(password_bytes(old_password), security[0]), security[1]):
+            return "403 Forbidden", {"error":"invalid password"}
+    if path == "/account/password":
+        new_password(db, owner, password_bytes(raw.get("password"), creating=True))
+        return "200 OK", {"saved":True}
+    if not security:
+        return "403 Forbidden", {"error":"set a password first"}
+    fields = ("passwordEnabled", "emailEnabled", "smsEnabled", "mfa")
+    if set(raw) - {*fields,"currentPassword"} or any(type(raw.get(field)) is not bool for field in fields):
+        raise ValueError()
+    password, email, sms, mfa = (raw[field] for field in fields)
+    providers = login_methods()
+    if mfa and (not password or not ("email" in linked and providers["email"])):
+        return "409 Conflict", {"error":"mfa requires password and verified email"}
+    if not (password or (email and "email" in linked and providers["email"]) or (sms and "phone" in linked and providers["phone"])):
+        return "409 Conflict", {"error":"keep an available sign-in method"}
+    db.execute("""UPDATE login_security SET password_enabled=?,email_enabled=?,sms_enabled=?,mfa=? WHERE owner=?""",
+               (password,email,sms,mfa,owner))
+    db.execute("DELETE FROM login_mfa_pending WHERE owner=?", (owner,))
+    db.execute("DELETE FROM login_resets WHERE owner=?", (owner,))
+    return "200 OK", {"saved":True}
+
+
 def account(db, owner, device, path, method, raw, ip):
     if (path, method) == ("/account", "GET"):
         linked = {row[0] for row in db.execute("SELECT kind FROM login_contacts WHERE owner=?", (owner,))}
-        return "200 OK", {"methods":login_methods(), "linked":sorted(linked)}
-    if method != "POST" or path not in ("/account/start", "/account/verify"):
+        security = security_row(db, owner)
+        return "200 OK", {"methods":login_methods(), "linked":sorted(linked), "hasPassword":bool(security),
+                           "passwordEnabled":bool(security and security[2]),
+                           "emailEnabled":not security or bool(security[3]),
+                           "smsEnabled":not security or bool(security[4]), "mfa":bool(security and security[5])}
+    if method != "POST" or path not in ("/account/start", "/account/verify", "/account/password",
+                                         "/account/password-login", "/account/security", "/account/password-reset"):
         return "404 Not Found", {"error":"unknown account request"}
     db.execute("BEGIN IMMEDIATE")
+    # Another request may have enrolled this device while this operation waited for the writer lock.
+    device_owner = db.execute("SELECT owner FROM login_devices WHERE device=?", (device,)).fetchone()
+    owner = device_owner[0] if device_owner else device
     now = int(time.time())
     key = secret_key(db)
+    if path == "/account/password-login":
+        return password_login(db, owner, device, raw, key, ip, now)
+    if path in ("/account/password", "/account/security", "/account/password-reset"):
+        return manage_password(db, owner, device, path, raw, key, ip, now)
     if path == "/account/start":
         kind = raw.get("kind")
         intent = raw.get("intent", "auto")
-        if intent not in ("auto", "signIn", "register"):
+        if intent not in ("auto", "signIn", "register", "reset"):
             raise ValueError()
         address = login_address(kind, raw.get("contact"))
-        if not login_methods().get(kind):
-            return "503 Service Unavailable", {"error":"delivery unavailable"}
-        digest = digest_phone(key, address) if kind == "phone" else sealed(key, "email:" + address)
-        if not spend(db, [("login:device:"+device, 3, 1, 3600), ("login:contact:"+digest, 1, 1, 60),
-                          ("login:day:"+digest, 6, 1, 86400), ("login:ip:"+sealed(key,ip), 12, 1, 3600),
-                          ("login:global:"+kind, 100, 1, 86400)], now):
-            return "429 Too Many Requests", {"error":"try later"}
-        code = f"{secrets.randbelow(1000000):06d}"
-        purpose = f"{intent}:{kind}"
-        proof = sealed(key, "login:"+purpose+device+digest+code)
-        db.execute("DELETE FROM login_challenges WHERE expires<=?", (now,))
-        db.execute("INSERT OR REPLACE INTO login_challenges VALUES(?,?,?,?,?,5)", (device,purpose,digest,proof,now+300))
-        db.commit()
-        try:
-            (deliver if kind == "phone" else deliver_email)(address, code)
-        except (OSError, ValueError, KeyError, smtplib.SMTPException):
-            db.execute("DELETE FROM login_challenges WHERE device=? AND proof=?", (device,proof))
-            return "503 Service Unavailable", {"error":"delivery unavailable"}
-        return "200 OK", {"sent":True}
+        digest = contact_digest(key, kind, address)
+        return issue_login_code(db, key=key, device=device, kind=kind, address=address, digest=digest,
+                                intent=intent, ip=ip, now=now)
 
     code = raw.get("code")
     if not isinstance(code, str) or not re.fullmatch(r"[0-9]{6}", code):
@@ -305,17 +449,30 @@ def account(db, owner, device, path, method, raw, ip):
         return "403 Forbidden", {"error":"invalid code"}
     db.execute("DELETE FROM login_challenges WHERE device=?", (device,))
     existing = db.execute("SELECT owner FROM login_contacts WHERE kind=? AND digest=?", (kind,digest)).fetchone()
+    target = existing[0] if existing else None
+    security = security_row(db, target)
+    if intent == "mfa":
+        pending = db.execute("SELECT owner,verifier FROM login_mfa_pending WHERE device=?", (device,)).fetchone()
+        db.execute("DELETE FROM login_mfa_pending WHERE device=?", (device,))
+        if not (pending and target == pending[0] and security and security[2] and security[5]
+                and hmac.compare_digest(pending[1], security[1]) and may_use_account(db, owner, target)):
+            return "403 Forbidden", {"error":"invalid second factor"}
+        bind_account(db, device, owner, target)
+        return "200 OK", {"verified":True}
+    if intent == "reset":
+        if not target or (security and security[5]) or not may_use_account(db, owner, target):
+            return "409 Conflict", {"error":"reset unavailable"}
+        db.execute("DELETE FROM login_resets WHERE expires<=?", (now,))
+        db.execute("INSERT OR REPLACE INTO login_resets VALUES(?,?,?)", (device,target,now+300))
+        return "200 OK", {"resetReady":True}
     if intent == "signIn" and not existing:
         return "409 Conflict", {"error":"contact is not registered for sign-in"}
-    if intent == "register" and existing and existing[0] != owner:
-        return "409 Conflict", {"error":"contact is already registered"}
-    if existing and existing[0] != owner:
-        current = db.execute("SELECT document FROM profiles WHERE id=?", (owner,)).fetchone()
-        has_contact = db.execute("SELECT 1 FROM login_contacts WHERE owner=?", (owner,)).fetchone()
-        if has_contact or (current and not json.loads(current[0]).get("onboardingPending", False)):
+    if existing and target != owner:
+        if intent == "register" or not may_use_account(db, owner, target):
             return "409 Conflict", {"error":"contact belongs to an existing account"}
-        db.execute("INSERT INTO login_devices VALUES(?,?) ON CONFLICT(device) DO UPDATE SET owner=excluded.owner",
-                   (device,existing[0]))
+        if security and (security[5] or not security[3 if kind == "email" else 4]):
+            return "409 Conflict", {"error":"code sign-in is disabled"}
+        bind_account(db, device, owner, target)
     elif not existing:
         if kind == "phone" and db.execute("SELECT 1 FROM contact_phones WHERE digest=? AND owner<>?",
                                           (digest,owner)).fetchone():

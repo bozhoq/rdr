@@ -876,6 +876,7 @@ def application(env, start_response):
         return [data]
 
     path, method = env.get("PATH_INFO", ""), env.get("REQUEST_METHOD", "")
+    secure = env.get("wsgi.url_scheme") == "https" or env.get("HTTPS") == "on"
     if (path, method) == ("/health", "GET"):
         return send("200 OK", {"status": "ready"})
     view_path = re.fullmatch(r"/posts/([a-fA-F0-9-]{36})/view", path)
@@ -974,6 +975,8 @@ def application(env, start_response):
             linked = db.execute("SELECT owner FROM login_devices WHERE device=?", (device,)).fetchone()
             owner = linked[0] if linked else device
             if path == "/account" or path.startswith("/account/"):
+                if not secure:
+                    return send("403 Forbidden", {"error":"HTTPS required"})
                 try:
                     raw = read_json(env, 2048) if method == "POST" else {}
                     if not isinstance(raw, dict):
@@ -1048,6 +1051,9 @@ def application(env, start_response):
                     if path == "/registration" and not doc.get("username"):
                         raise ValueError("username is required")
                     scores = score_rows(raw["records"]) if "records" in raw else None
+                    password = rider_discovery.password_bytes(raw["password"], creating=True) if path == "/registration" and "password" in raw else None
+                    if password is not None and not secure:
+                        return send("403 Forbidden", {"error":"HTTPS required"})
                 except (ValueError, TypeError, OverflowError, RecursionError):
                     return send("400 Bad Request", {"error": "invalid profile"})
                 db.execute("BEGIN IMMEDIATE")
@@ -1057,7 +1063,7 @@ def application(env, start_response):
                     old.get("name") == "Райдер" and (old.get("username") or "").startswith("rider_" + owner[:12])
                     and not old.get("publicProfile"))):
                     return send("200 OK", state(db, owner, include_directory=False))
-                if path == "/registration" and any(rider_discovery.login_methods().values()) and not db.execute(
+                if path == "/registration" and (password is not None or any(rider_discovery.login_methods().values())) and not db.execute(
                     "SELECT 1 FROM login_contacts WHERE owner=?", (owner,)).fetchone():
                     return send("403 Forbidden", {"error":"verify an email address or phone number first"})
                 doc["onboardingPending"] = False
@@ -1093,6 +1099,8 @@ def application(env, start_response):
                     db.execute("INSERT INTO handles VALUES (?,?)", (handle, owner))
                 if scores is not None:
                     replace_records(db, owner, scores)
+                if password is not None:
+                    rider_discovery.new_password(db, owner, password)
             elif (path, method) == ("/statistics", "GET"):
                 row = db.execute("SELECT document FROM profiles WHERE id=?", (owner,)).fetchone()
                 if not row:
@@ -1145,6 +1153,9 @@ def application(env, start_response):
                 return send("200 OK", season_credit(db, owner, year, start, end))
             elif (path, method) == ("/me", "DELETE"):
                 db.execute("DELETE FROM follows WHERE owner=?", (owner,))
+                db.execute("DELETE FROM login_security WHERE owner=?", (owner,))
+                db.execute("DELETE FROM login_mfa_pending WHERE owner=? OR device=?", (owner,device))
+                db.execute("DELETE FROM login_resets WHERE owner=? OR device=?", (owner,device))
                 db.execute("DELETE FROM login_contacts WHERE owner=?", (owner,))
                 db.execute("DELETE FROM login_challenges WHERE device=? OR device IN (SELECT device FROM login_devices WHERE owner=?)", (device,owner))
                 db.execute("DELETE FROM login_devices WHERE owner=?", (owner,))

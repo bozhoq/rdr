@@ -213,7 +213,9 @@ private struct Tabs: View {
             ctx.setLineWidth(1.7)
             ctx.setLineJoin(.round)
             ctx.setLineCap(.round)
+            ctx.setFillColor(UIColor.black.cgColor)
             ctx.addPath(EquipmentGlyph(kind: .kite).path(in: CGRect(x: 0, y: 1, width: 21, height: 23)).cgPath)
+            ctx.fillPath()
             ctx.move(to: CGPoint(x: 26, y: 20))
             ctx.addLine(to: CGPoint(x: 26, y: 5))
             ctx.move(to: CGPoint(x: 22, y: 9))
@@ -417,14 +419,14 @@ struct GearPresetEditor: View {
                 LabeledContent {
                     Text(equipment.kiteTitle.isEmpty ? "Выбрать" : equipment.kiteTitle)
                 } label: {
-                    Label { Text("Кайт") } icon: { EquipmentGlyph(kind: .kite).stroke(lineWidth: 1.5).frame(width: 18, height: 20) }
+                    Label { Text("Кайт") } icon: { EquipmentGlyph(kind: .kite).rendered().frame(width: 18, height: 20) }
                 }
             }
             Button { showingBoards = true } label: {
                 LabeledContent {
                     Text(equipment.boardTitle.isEmpty ? "Выбрать" : equipment.boardTitle)
                 } label: {
-                    Label { Text("Доска") } icon: { EquipmentGlyph(kind: .board).stroke(lineWidth: 1.5).frame(width: 18, height: 20) }
+                    Label { Text("Доска") } icon: { EquipmentGlyph(kind: .board).rendered().frame(width: 18, height: 20) }
                 }
             }
             Button("Сохранить комплект") {
@@ -1290,9 +1292,27 @@ struct SessionDetail: View {
         if let setup = session.setup {
             if !setup.spot.isEmpty { LabeledContent("Спот", value: setup.spot) }
             if !setup.kite.isEmpty {
-                LabeledContent(setup.sport == .wing ? "Винг" : setup.sport == .windsurf ? "Парус" : "Кайт", value: setup.kiteTitle)
+                if setup.sport == .wing || setup.sport == .windsurf {
+                    LabeledContent(setup.sport == .wing ? "Винг" : "Парус", value: setup.kiteTitle)
+                } else {
+                    LabeledContent {
+                        Text(setup.kiteTitle)
+                    } label: {
+                        Label { Text("Кайт") } icon: {
+                            EquipmentGlyph(kind: .kite).rendered().frame(width: 18, height: 20)
+                        }
+                    }
+                }
             }
-            if !setup.boardTitle.isEmpty { LabeledContent("Доска", value: setup.boardTitle) }
+            if !setup.boardTitle.isEmpty {
+                LabeledContent {
+                    Text(setup.boardTitle)
+                } label: {
+                    Label { Text("Доска") } icon: {
+                        EquipmentGlyph(kind: .board).rendered().frame(width: 18, height: 20)
+                    }
+                }
+            }
             LabeledContent("Где телефон", value: setup.placement.title)
         }
         Button("Изменить занятие и снаряжение") { editingSetup = true }
