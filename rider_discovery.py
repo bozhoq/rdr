@@ -266,6 +266,9 @@ def account(db, owner, device, path, method, raw, ip):
     key = secret_key(db)
     if path == "/account/start":
         kind = raw.get("kind")
+        intent = raw.get("intent", "auto")
+        if intent not in ("auto", "signIn", "register"):
+            raise ValueError()
         address = login_address(kind, raw.get("contact"))
         if not login_methods().get(kind):
             return "503 Service Unavailable", {"error":"delivery unavailable"}
@@ -275,9 +278,10 @@ def account(db, owner, device, path, method, raw, ip):
                           ("login:global:"+kind, 100, 1, 86400)], now):
             return "429 Too Many Requests", {"error":"try later"}
         code = f"{secrets.randbelow(1000000):06d}"
-        proof = sealed(key, "login:"+device+digest+code)
+        purpose = f"{intent}:{kind}"
+        proof = sealed(key, "login:"+purpose+device+digest+code)
         db.execute("DELETE FROM login_challenges WHERE expires<=?", (now,))
-        db.execute("INSERT OR REPLACE INTO login_challenges VALUES(?,?,?,?,?,5)", (device,kind,digest,proof,now+300))
+        db.execute("INSERT OR REPLACE INTO login_challenges VALUES(?,?,?,?,?,5)", (device,purpose,digest,proof,now+300))
         db.commit()
         try:
             (deliver if kind == "phone" else deliver_email)(address, code)
@@ -292,12 +296,19 @@ def account(db, owner, device, path, method, raw, ip):
     challenge = db.execute("SELECT kind,digest,proof,expires,attempts FROM login_challenges WHERE device=?", (device,)).fetchone()
     if not challenge or challenge[3] <= now or not challenge[4]:
         return "403 Forbidden", {"error":"code expired"}
-    kind, digest, proof = challenge[:3]
+    purpose, digest, proof = challenge[:3]
+    intent, separator, kind = purpose.partition(":")
+    if not separator:
+        kind, intent = purpose, "auto"
     db.execute("UPDATE login_challenges SET attempts=attempts-1 WHERE device=?", (device,))
-    if not hmac.compare_digest(proof, sealed(key, "login:"+device+digest+code)):
+    if not hmac.compare_digest(proof, sealed(key, "login:"+(purpose if separator else "")+device+digest+code)):
         return "403 Forbidden", {"error":"invalid code"}
     db.execute("DELETE FROM login_challenges WHERE device=?", (device,))
     existing = db.execute("SELECT owner FROM login_contacts WHERE kind=? AND digest=?", (kind,digest)).fetchone()
+    if intent == "signIn" and not existing:
+        return "409 Conflict", {"error":"contact is not registered for sign-in"}
+    if intent == "register" and existing and existing[0] != owner:
+        return "409 Conflict", {"error":"contact is already registered"}
     if existing and existing[0] != owner:
         current = db.execute("SELECT document FROM profiles WHERE id=?", (owner,)).fetchone()
         has_contact = db.execute("SELECT 1 FROM login_contacts WHERE owner=?", (owner,)).fetchone()

@@ -159,6 +159,11 @@ enum RiderCommunity {
         let verified: Bool?
         let name: String?
         let username: String?
+        let profileID: String?
+        let bio: String?
+        let avatar: Data?
+        let birthday: String?
+        let showBirthday: Bool?
     }
 
     static func register(name: String, username: String, publicProfile: Bool, statsPublic: Bool) async throws -> String {
@@ -362,10 +367,22 @@ enum RiderCommunity {
 
     enum Rejection: Error { case conflict, forbidden }
 
+    private static func credentialQuery(_ endpoint: URL) -> [String: Any] {
+        [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: "RiderCommunity",
+         kSecAttrAccount as String: endpoint.absoluteString]
+    }
+
+    static func clearDeviceCredential() throws {
+        guard let endpoint else { return }
+        let result = SecItemDelete(credentialQuery(endpoint) as CFDictionary)
+        guard result == errSecSuccess || result == errSecItemNotFound else {
+            throw URLError(.userAuthenticationRequired)
+        }
+    }
+
     private static func requestData(_ path: String, method: String, body: Data?, timeout: TimeInterval = 12) async throws -> Data {
         guard let base = endpoint else { throw URLError(.unsupportedURL) }
-        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
-                                    kSecAttrService as String: "RiderCommunity", kSecAttrAccount as String: base.absoluteString]
+        let query = credentialQuery(base)
         var result: CFTypeRef?
         var lookup = query
         lookup[kSecReturnData as String] = true
@@ -611,7 +628,7 @@ struct RiderProfileView: View {
                             Toggle("Показывать день и месяц", isOn: $visibleBirth)
                         }
                     } label: { Label("День рождения", systemImage: "birthday.cake") }
-                    NavigationLink { RiderAccountAccessSettings() } label: { Label("Вход и восстановление", systemImage: "key") }
+                    NavigationLink { RiderAccountAccessSettings(recorder: recorder) } label: { Label("Вход и восстановление", systemImage: "key") }
                     NavigationLink { RiderPhoneSettings() } label: { Label("Номер телефона", systemImage: "phone.fill") }
                 }
                 Section {
@@ -889,7 +906,10 @@ private struct RiderProfilePublications: View {
             } else if selection == .gallery {
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: 3), spacing: 3) {
                     ForEach(posts) { item in
-                        NavigationLink { detail(item) } label: { RiderPostSquare(post: item.post) }
+                        NavigationLink {
+                            RiderProfileGallery(items: posts, initial: item.id, isMine: isMine,
+                                                name: name, username: username, avatar: avatar)
+                        } label: { RiderPostSquare(post: item.post) }
                             .buttonStyle(.plain)
                     }
                 }
@@ -907,9 +927,78 @@ private struct RiderProfilePublications: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func detail(_ item: Entry) -> some View {
-        RiderPostDetail(original: item.post, author: item.remote?.author ?? name, username: item.remote?.username ?? username,
-                        avatar: item.remote?.avatar ?? avatar, editable: isMine && item.post.sourceID == nil, entry: item.remote)
+}
+
+private struct RiderProfileGallery: View {
+    @EnvironmentObject private var social: RiderSocialStore
+    let items: [RiderProfilePublications.Entry]
+    let isMine: Bool
+    let name: String
+    let username: String?
+    let avatar: Data?
+    @State private var focused: UUID?
+    @State private var detail: Detail?
+    @State private var conversation: RiderPerson?
+
+    private struct Detail: Identifiable {
+        let item: RiderProfilePublications.Entry
+        let comments: Bool
+        var id: UUID { item.id }
+    }
+
+    init(items: [RiderProfilePublications.Entry], initial: UUID, isMine: Bool,
+         name: String, username: String?, avatar: Data?) {
+        self.items = items
+        self.isMine = isMine
+        self.name = name
+        self.username = username
+        self.avatar = avatar
+        _focused = State(initialValue: initial)
+    }
+
+    var body: some View {
+        ScrollView {
+            LazyVStack(spacing: 10) {
+                ForEach(items.filter { !social.deletedPosts.contains($0.id) }) { item in
+                    card(item).id(item.id)
+                }
+            }
+            .scrollTargetLayout()
+            .padding(12)
+        }
+        .scrollPosition(id: $focused, anchor: .top)
+        .background(RiderTheme.canvas.ignoresSafeArea())
+        .navigationTitle("Публикации")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar(.visible, for: .navigationBar)
+        .navigationDestination(item: $conversation) { RiderThreadView(peer: $0) }
+        .sheet(item: $detail) { request in
+            let item = request.item
+            NavigationStack {
+                RiderPostDetail(original: item.post, author: item.remote?.author ?? name,
+                                username: item.remote?.username ?? username, avatar: item.remote?.avatar ?? avatar,
+                                editable: isMine && item.post.sourceID == nil, openComments: request.comments, entry: item.remote)
+            }
+        }
+    }
+
+    private func card(_ item: RiderProfilePublications.Entry) -> some View {
+        let post = social.posts.first { $0.id == item.id && isMine } ?? item.post
+        return VStack(alignment: .trailing, spacing: 4) {
+            if isMine && post.sourceID == nil {
+                Button {
+                    detail = Detail(item: item, comments: false)
+                } label: {
+                    Image(systemName: "ellipsis.circle").font(.title3).frame(width: 44, height: 44)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Управление публикацией")
+            }
+            RiderFeedCard(post: post, author: item.remote?.author ?? name, username: item.remote?.username ?? username,
+                          avatar: item.remote?.avatar ?? avatar, editable: isMine && item.post.sourceID == nil,
+                          entry: item.remote, onComments: { detail = Detail(item: item, comments: true) },
+                          onConversation: { conversation = $0 })
+        }
     }
 }
 

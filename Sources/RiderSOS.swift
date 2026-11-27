@@ -1,3 +1,4 @@
+import AVFoundation
 import AudioToolbox
 import CoreLocation
 import MapKit
@@ -51,7 +52,11 @@ final class RiderSOSAppDelegate: NSObject, UIApplicationDelegate, UNUserNotifica
             guard RiderAlertKind(rawValue: kind)?.enabled == true else { return [] }
             return RiderAlertKind.sound.enabled ? [.banner, .sound] : [.banner]
         }
-        guard info["riderSOSReply"] != nil || (info["riderSOS"] != nil && RiderAlertKind.sos.enabled) else { return [] }
+        if info["riderSOS"] != nil && RiderAlertKind.sos.enabled {
+            await MainActor.run { RiderSOSService.shared.playAlarm() }
+            return [.banner]
+        }
+        guard info["riderSOSReply"] != nil else { return [] }
         return RiderAlertKind.sound.enabled ? [.banner, .sound] : [.banner]
     }
 
@@ -148,6 +153,7 @@ final class RiderSOSAppDelegate: NSObject, UIApplicationDelegate, UNUserNotifica
     private var receiverTask: Task<Void, Never>?
     private var requestingPermission = false
     private var announcedForeground: Set<UUID> = []
+    private var alarm: AVAudioPlayer?
     private let registeredKey = "rider.sos.registered"
 
     func open(_ selected: UUID? = nil) {
@@ -309,6 +315,17 @@ final class RiderSOSAppDelegate: NSObject, UIApplicationDelegate, UNUserNotifica
         return result.action
     }
 
+    func resetAccount() {
+        receiverTask?.cancel()
+        announcedForeground.removeAll()
+        receiverStatus = nil
+        lastUpdate = .distantPast
+        latestFix = nil
+        token = nil
+        inbox = nil
+        alarm?.stop()
+    }
+
     func pollForeground() async {
         guard RiderCommunity.usesLANTrust, RiderAlertKind.sos.enabled else { return }
         uploadLocationIfNeeded()
@@ -319,9 +336,58 @@ final class RiderSOSAppDelegate: NSObject, UIApplicationDelegate, UNUserNotifica
               let incoming = items.first(where: { $0.decision == nil && !announcedForeground.contains($0.id) }) else { return }
         announcedForeground.insert(incoming.id)
         open(incoming.id)
-        if RiderAlertKind.sound.enabled { AudioServicesPlaySystemSound(1007) }
+        playAlarm()
+    }
+
+    func playAlarm() {
+        if RiderAlertKind.sound.enabled {
+            alarm?.stop()
+            do {
+                let player = try AVAudioPlayer(data: Self.alarmAudio)
+                alarm = player
+                if !player.play() { AudioServicesPlaySystemSound(1007) }
+            } catch {
+                AudioServicesPlaySystemSound(1007)
+            }
+        }
         if RiderAlertKind.vibrate.enabled { UINotificationFeedbackGenerator().notificationOccurred(.warning) }
     }
+
+    private static let alarmAudio: Data = {
+        let sampleRate = 22_050
+        let count = Int(Double(sampleRate) * 2.4)
+        var wave = Data("RIFF".utf8)
+        func word(_ value: UInt16) {
+            var value = value.littleEndian
+            withUnsafeBytes(of: &value) { wave.append(contentsOf: $0) }
+        }
+        func integer(_ value: UInt32) {
+            var value = value.littleEndian
+            withUnsafeBytes(of: &value) { wave.append(contentsOf: $0) }
+        }
+        integer(UInt32(36 + count * 2))
+        wave.append(contentsOf: "WAVEfmt ".utf8)
+        integer(16)
+        word(1)
+        word(1)
+        integer(UInt32(sampleRate))
+        integer(UInt32(sampleRate * 2))
+        word(2)
+        word(16)
+        wave.append(contentsOf: "data".utf8)
+        integer(UInt32(count * 2))
+        var phase = 0.0
+        for index in 0..<count {
+            let time = Double(index) / Double(sampleRate)
+            let pulse = time.truncatingRemainder(dividingBy: 0.8)
+            let ramp = max(0, min(1, pulse / 0.07, (0.65 - pulse) / 0.12))
+            let frequency = 610 + 360 * (1 - cos(2 * .pi * time / 0.8)) / 2
+            phase += 2 * .pi * frequency / Double(sampleRate)
+            let sample = Int16((sin(phase) + 0.18 * sin(2 * phase)) * ramp * 14_000)
+            word(UInt16(bitPattern: sample))
+        }
+        return wave
+    }()
 
     func alerts() async throws -> [Alert] {
         try await RiderCommunity.decode("sos/inbox")
@@ -731,6 +797,11 @@ struct RiderSOSInbox: View {
     var body: some View {
         NavigationStack {
             List {
+                if alerts.contains(where: { $0.decision == nil }) {
+                    alarmHeader
+                        .listRowInsets(EdgeInsets(top: 8, leading: 0, bottom: 8, trailing: 0))
+                        .listRowBackground(Color.clear)
+                }
                 if let error { Text(error).foregroundStyle(.secondary) }
                 else if !loaded { ProgressView("Проверяем сигналы…") }
                 else if alerts.isEmpty {
@@ -782,6 +853,26 @@ struct RiderSOSInbox: View {
             }
             .refreshable { await load() }
         }
+    }
+
+    private var alarmHeader: some View {
+        HStack(spacing: 14) {
+            Image(systemName: "sos.circle.fill")
+                .font(.system(size: 44, weight: .semibold))
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("SOS ALARM").font(.caption.weight(.black).monospaced()).tracking(2)
+                    .foregroundStyle(Color(red: 1, green: 0.71, blue: 0.64))
+                Text("Сигнал бедствия рядом").font(.title3.bold()).accessibilityAddTraits(.isHeader)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(18)
+        .foregroundStyle(.white)
+        .background(LinearGradient(colors: [Color(red: 0.50, green: 0.10, blue: 0.15),
+                                             Color(red: 0.20, green: 0.07, blue: 0.15)],
+                                   startPoint: .topLeading, endPoint: .bottomTrailing),
+                    in: RoundedRectangle(cornerRadius: 20))
     }
 
     @MainActor private func decide(_ decision: RiderSOSService.Decision, alert: RiderSOSService.Alert) async {

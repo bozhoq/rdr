@@ -1018,8 +1018,10 @@ def application(env, start_response):
                     doc.get("name") == "Райдер" and (doc.get("username") or "").startswith("rider_" + owner[:12])
                     and not doc.get("publicProfile")))
                 verified = db.execute("SELECT 1 FROM login_contacts WHERE owner=?", (owner,)).fetchone() is not None
-                return send("200 OK", {"required": pending, "verified": verified,
-                                       "name": doc.get("name"), "username": doc.get("username")})
+                return send("200 OK", {"required": pending, "verified": verified, "profileID": owner if doc else None,
+                                       "name": doc.get("name"), "username": doc.get("username"),
+                                       "bio": doc.get("bio"), "avatar": doc.get("avatar"),
+                                       "birthday": doc.get("birthday"), "showBirthday": doc.get("showBirthday")})
             if (path, method) == ("/me", "GET"):
                 return send("200 OK", state(db, owner, include_directory=False))
             if (path, method) == ("/me", "PATCH"):

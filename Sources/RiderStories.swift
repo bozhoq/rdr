@@ -162,7 +162,13 @@ private struct RiderStoryComposer: View {
     @Environment(\.dismiss) private var dismiss
     @FocusState private var typing: Bool
     @State private var picked: PhotosPickerItem?
-    @State private var camera = false
+    private enum Camera: String, Identifiable {
+        case photo, video
+        var id: String { rawValue }
+    }
+
+    @State private var camera: Camera?
+    @State private var filmed: URL?
     @State private var photo: Data?
     @State private var video: Data?
     @State private var caption = ""
@@ -179,7 +185,10 @@ private struct RiderStoryComposer: View {
                         Label("Выбрать фото или видео", systemImage: "photo.on.rectangle")
                     }
                     if UIImagePickerController.isSourceTypeAvailable(.camera) {
-                        Button { typing = false; camera = true } label: { Label("Сделать фото", systemImage: "camera") }
+                        Button { typing = false; camera = .photo } label: { Label("Сделать фото", systemImage: "camera") }
+                    }
+                    if RiderCameraVideo.available {
+                        Button { typing = false; camera = .video } label: { Label("Записать видео", systemImage: "video") }
                     }
                 } footer: { Text("История видна 24 часа. Видео до 30 секунд.") }
                 if let photo, let image = UIImage(data: photo) {
@@ -201,16 +210,44 @@ private struct RiderStoryComposer: View {
                     Button("Опубликовать", action: publish).disabled(photo == nil || publishing || loading)
                 }
             }
-            .fullScreenCover(isPresented: $camera) {
-                RiderCameraPhoto { image in
-                    photo = image.jpegData(compressionQuality: 0.85).flatMap { RiderPostComposer.postJPEG($0) }
-                    video = nil
-                    story = UUID()
-                }.ignoresSafeArea()
+            .fullScreenCover(item: $camera) { mode in
+                switch mode {
+                case .photo:
+                    RiderCameraPhoto { image in
+                        photo = image.jpegData(compressionQuality: 0.85).flatMap { RiderPostComposer.postJPEG($0) }
+                        video = nil
+                        story = UUID()
+                    }.ignoresSafeArea()
+                case .video:
+                    RiderCameraVideo { result in
+                        switch result {
+                        case let .success(url): filmed = url
+                        case .failure: error = "Не удалось сохранить видео с камеры."
+                        }
+                    }.ignoresSafeArea()
+                }
             }
         }
         .interactiveDismissDisabled(publishing)
         .task(id: picked) { await load() }
+        .task(id: filmed) {
+            guard let url = filmed else { return }
+            loading = true
+            error = nil
+            defer {
+                try? FileManager.default.removeItem(at: url)
+                if !Task.isCancelled { filmed = nil; loading = false }
+            }
+            do {
+                let (cover, clip) = try await RiderMediaEncoding.clip(from: url)
+                try Task.checkCancellation()
+                photo = cover
+                video = clip
+                story = UUID()
+            } catch {
+                if !Task.isCancelled { self.error = "Не удалось подготовить записанное видео." }
+            }
+        }
     }
 
     @MainActor private func load() async {

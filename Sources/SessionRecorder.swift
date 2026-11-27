@@ -35,7 +35,7 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
     private var conditionsResolved = false
     private var weatherTask: Task<Void, Never>?
 
-    private let store = SessionStore()
+    private let store: SessionStore
     private let motion = CMMotionManager()
     private let altimeter = CMAltimeter()
     private let speech = AVSpeechSynthesizer()
@@ -114,7 +114,8 @@ final class SessionRecorder: NSObject, ObservableObject, CLLocationManagerDelega
         calibrationPresets[effectivePlacement.rawValue]?.usable(at: Date(), systemVersion: UIDevice.current.systemVersion)
     }
 
-    override init() {
+    init(root: URL = URL.applicationSupportDirectory.appendingPathComponent("Sessions", isDirectory: true)) {
+        store = SessionStore(root: root)
         super.init()
         speech.usesApplicationAudioSession = false
         authorization = location.authorizationStatus

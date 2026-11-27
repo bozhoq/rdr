@@ -2,6 +2,7 @@ import AVKit
 import Speech
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 
 struct RiderVoiceTranscript: View {
     let url: URL
@@ -152,8 +153,17 @@ enum RiderMediaEncoding {
         return (cover, try Data(contentsOf: output))
     }
 
-    static func chatCircle(from source: URL, limit: Double) async throws -> Data {
-        let asset = AVURLAsset(url: source)
+    static func chatCircle(from sources: [URL], limit: Double) async throws -> Data {
+        let asset: AVAsset
+        let videoComposition: AVVideoComposition?
+        if sources.count == 1, let only = sources.first {
+            asset = AVURLAsset(url: only)
+            videoComposition = nil
+        } else {
+            let joined = try await joinCircleSegments(sources)
+            asset = joined.0
+            videoComposition = joined.1
+        }
         let duration = try await asset.load(.duration)
         guard duration.seconds.isFinite, duration.seconds >= 0.2 else { throw CocoaError(.fileReadCorruptFile) }
         let maximum = CMTime(seconds: limit, preferredTimescale: 600)
@@ -164,6 +174,7 @@ enum RiderMediaEncoding {
             defer { try? FileManager.default.removeItem(at: output) }
             exporter.outputURL = output
             exporter.outputFileType = .mp4
+            exporter.videoComposition = videoComposition
             exporter.timeRange = CMTimeRange(start: .zero, duration: CMTimeMinimum(duration, maximum))
             exporter.shouldOptimizeForNetworkUse = true
             await exporter.export()
@@ -173,6 +184,55 @@ enum RiderMediaEncoding {
             return try Data(contentsOf: output)
         }
         throw CocoaError(.fileReadTooLarge)
+    }
+
+    private static func joinCircleSegments(_ sources: [URL]) async throws -> (AVComposition, AVVideoComposition) {
+        let composition = AVMutableComposition()
+        guard let videoTrack = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid),
+              let audioTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        let side: CGFloat = 480
+        var instructions: [AVMutableVideoCompositionInstruction] = []
+        var cursor = CMTime.zero
+        for url in sources {
+            try Task.checkCancellation()
+            let asset = AVURLAsset(url: url)
+            guard let video = try await asset.loadTracks(withMediaType: .video).first else { continue }
+            let range = try await video.load(.timeRange)
+            guard range.duration.seconds.isFinite, range.duration.seconds > 0 else { continue }
+            try videoTrack.insertTimeRange(range, of: video, at: cursor)
+
+            if let audio = try await asset.loadTracks(withMediaType: .audio).first {
+                let audioRange = CMTimeRangeGetIntersection(try await audio.load(.timeRange), range)
+                if audioRange.duration.seconds > 0 {
+                    try audioTrack.insertTimeRange(audioRange, of: audio, at: cursor + (audioRange.start - range.start))
+                }
+            }
+
+            let size = try await video.load(.naturalSize)
+            let transform = try await video.load(.preferredTransform)
+            let bounds = CGRect(origin: .zero, size: size).applying(transform).standardized
+            guard bounds.width > 0, bounds.height > 0 else { throw CocoaError(.fileReadCorruptFile) }
+            let scale = max(side / bounds.width, side / bounds.height)
+            let crop = CGAffineTransform(translationX: -bounds.minX, y: -bounds.minY)
+                .concatenating(CGAffineTransform(scaleX: scale, y: scale))
+                .concatenating(CGAffineTransform(translationX: (side - bounds.width * scale) / 2,
+                                                 y: (side - bounds.height * scale) / 2))
+            let layer = AVMutableVideoCompositionLayerInstruction(assetTrack: videoTrack)
+            layer.setTransform(transform.concatenating(crop), at: cursor)
+            let instruction = AVMutableVideoCompositionInstruction()
+            instruction.timeRange = CMTimeRange(start: cursor, duration: range.duration)
+            instruction.layerInstructions = [layer]
+            instructions.append(instruction)
+            cursor = cursor + range.duration
+        }
+        guard !instructions.isEmpty else { throw CocoaError(.fileReadCorruptFile) }
+        let rendered = AVMutableVideoComposition()
+        rendered.instructions = instructions
+        rendered.renderSize = CGSize(width: side, height: side)
+        rendered.frameDuration = CMTime(value: 1, timescale: 30)
+        return (composition, rendered)
     }
 
     static func temporary(_ suffix: String) -> URL {
@@ -200,6 +260,47 @@ struct RiderCameraPhoto: UIViewControllerRepresentable {
         func imagePickerController(_ picker: UIImagePickerController,
                                    didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]) {
             if let image = info[.originalImage] as? UIImage { parent.selected(image) }
+            parent.dismiss()
+        }
+    }
+}
+
+struct RiderCameraVideo: UIViewControllerRepresentable {
+    let selected: (Result<URL, Error>) -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    static var available: Bool {
+        UIImagePickerController.isSourceTypeAvailable(.camera) &&
+        UIImagePickerController.availableMediaTypes(for: .camera)?.contains(UTType.movie.identifier) == true
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+    func makeUIViewController(context: Context) -> UIImagePickerController {
+        let picker = UIImagePickerController()
+        picker.sourceType = .camera
+        picker.mediaTypes = [UTType.movie.identifier]
+        picker.cameraCaptureMode = .video
+        picker.videoMaximumDuration = 30
+        picker.videoQuality = .typeMedium
+        picker.delegate = context.coordinator
+        return picker
+    }
+    func updateUIViewController(_ controller: UIImagePickerController, context: Context) {}
+
+    final class Coordinator: NSObject, UIImagePickerControllerDelegate, UINavigationControllerDelegate {
+        let parent: RiderCameraVideo
+        init(_ parent: RiderCameraVideo) { self.parent = parent }
+        func imagePickerControllerDidCancel(_ picker: UIImagePickerController) { parent.dismiss() }
+        func imagePickerController(_ picker: UIImagePickerController,
+                                   didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]) {
+            do {
+                guard let source = info[.mediaURL] as? URL else { throw CocoaError(.fileReadCorruptFile) }
+                let saved = RiderMediaEncoding.temporary(source.pathExtension.isEmpty ? "mov" : source.pathExtension)
+                try FileManager.default.copyItem(at: source, to: saved)
+                parent.selected(.success(saved))
+            } catch {
+                parent.selected(.failure(error))
+            }
             parent.dismiss()
         }
     }
@@ -427,9 +528,9 @@ struct RiderCameraPhoto: UIViewControllerRepresentable {
         callback?(result)
     }
 
-    private func completeVideo(_ result: Result<URL?, Error>, attempt id: UUID) {
+    private func completeVideo(_ result: Result<[URL], Error>, attempt id: UUID) {
         guard attempt == id else {
-            if let url = try? result.get() { try? FileManager.default.removeItem(at: url) }
+            for url in (try? result.get()) ?? [] { try? FileManager.default.removeItem(at: url) }
             return
         }
         camera = nil
@@ -441,9 +542,10 @@ struct RiderCameraPhoto: UIViewControllerRepresentable {
         exportTask = Task {
             defer { if attempt == id { exportTask = nil } }
             do {
-                guard let url = try result.get() else { discard(); return }
-                defer { try? FileManager.default.removeItem(at: url) }
-                let data = try await RiderMediaEncoding.chatCircle(from: url, limit: Self.circleLimit)
+                let urls = try result.get()
+                guard !urls.isEmpty else { discard(); return }
+                defer { for url in urls { try? FileManager.default.removeItem(at: url) } }
+                let data = try await RiderMediaEncoding.chatCircle(from: urls, limit: Self.circleLimit)
                 guard attempt == id, !Task.isCancelled else { return }
                 let upload = try RiderChatUpload(filename: "circle.mp4", contentType: "video/mp4", data: data)
                 exportTask = nil
@@ -616,16 +718,20 @@ private final class RoundCamera: NSObject, AVCaptureFileOutputRecordingDelegate 
     private let queue = DispatchQueue(label: "rider.camera")
     private let movie = AVCaptureMovieFileOutput()
     private var lens: AVCaptureDeviceInput?
-    private var completion: ((Result<URL?, Error>) -> Void)?
+    private var completion: ((Result<[URL], Error>) -> Void)?
     private var discarded = false
     private var stopRequested = false
-    // Keep the delegate alive until AVFoundation delivers the final file, even after cancellation.
+    private var segments: [URL] = []
+    private var remaining: Double = 0
+    private var switching: (position: AVCaptureDevice.Position, callback: (Bool) -> Void)?
+    // Keep the delegate alive until AVFoundation delivers the final file.
     private var activeCapture: RoundCamera?
 
-    func start(position: AVCaptureDevice.Position, maxDuration: Double, completion: @escaping (Result<URL?, Error>) -> Void) {
+    func start(position: AVCaptureDevice.Position, maxDuration: Double, completion: @escaping (Result<[URL], Error>) -> Void) {
         queue.async {
             self.completion = completion
             self.activeCapture = self
+            self.remaining = maxDuration
             self.session.sessionPreset = .medium
             guard self.useCamera(position),
                   let microphone = AVCaptureDevice.default(for: .audio),
@@ -636,20 +742,23 @@ private final class RoundCamera: NSObject, AVCaptureFileOutputRecordingDelegate 
             }
             self.session.addInput(input)
             self.session.addOutput(self.movie)
-            self.movie.maxRecordedDuration = CMTime(seconds: maxDuration, preferredTimescale: 600)
             self.movie.maxRecordedFileSize = 64 * 1024 * 1024
-            self.movie.connection(with: .video)?.videoOrientation = .portrait
             self.session.startRunning()
-            self.movie.startRecording(to: RiderMediaEncoding.temporary("mov"), recordingDelegate: self)
+            self.startSegment()
         }
+    }
+
+    private func startSegment() {
+        movie.connection(with: .video)?.videoOrientation = .portrait
+        movie.maxRecordedDuration = CMTime(seconds: remaining, preferredTimescale: 600)
+        movie.startRecording(to: RiderMediaEncoding.temporary("mov"), recordingDelegate: self)
     }
 
     func switchCamera(_ position: AVCaptureDevice.Position, completion: @escaping (Bool) -> Void) {
         queue.async {
-            guard !self.stopRequested, self.completion != nil else { completion(false); return }
-            let changed = self.useCamera(position)
-            self.movie.connection(with: .video)?.videoOrientation = .portrait
-            completion(changed)
+            guard !self.stopRequested, self.completion != nil, self.switching == nil else { completion(false); return }
+            self.switching = (position, completion)
+            if self.movie.isRecording { self.movie.stopRecording() }
         }
     }
 
@@ -696,33 +805,58 @@ private final class RoundCamera: NSObject, AVCaptureFileOutputRecordingDelegate 
     func fileOutput(_ output: AVCaptureFileOutput, didStartRecordingTo url: URL,
                     from connections: [AVCaptureConnection]) {
         queue.async {
-            if self.stopRequested && self.movie.isRecording { self.movie.stopRecording() }
+            if (self.stopRequested || self.switching != nil) && self.movie.isRecording {
+                self.movie.stopRecording()
+            }
         }
     }
 
     func fileOutput(_ output: AVCaptureFileOutput, didFinishRecordingTo url: URL,
                     from connections: [AVCaptureConnection], error: Error?) {
         queue.async {
-            if self.discarded {
+            let valid = (error as NSError?)?.userInfo[AVErrorRecordingSuccessfullyFinishedKey] as? Bool ?? (error == nil)
+            if !self.discarded && valid {
+                let duration = AVURLAsset(url: url).duration.seconds
+                if duration.isFinite && duration > 0 {
+                    self.segments.append(url)
+                    self.remaining -= duration
+                } else {
+                    try? FileManager.default.removeItem(at: url)
+                }
+            } else {
                 try? FileManager.default.removeItem(at: url)
-                self.complete(.success(nil))
-            } else if let error, (error as NSError).userInfo[AVErrorRecordingSuccessfullyFinishedKey] as? Bool != true {
-                try? FileManager.default.removeItem(at: url)
+            }
+
+            if let pending = self.switching, !self.stopRequested && self.remaining > 0.2 {
+                self.switching = nil
+                let changed = self.useCamera(pending.position)
+                self.startSegment()
+                pending.callback(changed)
+            } else if self.discarded {
+                self.complete(.success([]))
+            } else if self.segments.isEmpty, let error {
                 self.complete(.failure(error))
             } else {
-                self.complete(.success(url))
+                self.complete(.success(self.segments))
             }
         }
     }
 
-    private func complete(_ result: Result<URL?, Error>) {
+    private func complete(_ result: Result<[URL], Error>) {
         _ = configureTorch(false)
         if session.isRunning { session.stopRunning() }
         let callback = completion
         completion = nil
+        switching?.callback(false)
+        switching = nil
+        if discarded {
+            for url in segments { try? FileManager.default.removeItem(at: url) }
+        }
+        segments.removeAll()
         activeCapture = nil
         callback?(result)
     }
+
 }
 
 private struct CameraPreview: UIViewRepresentable {

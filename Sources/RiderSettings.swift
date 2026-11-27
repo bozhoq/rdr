@@ -266,23 +266,75 @@ private enum RiderLoginMethod: String, CaseIterable, Identifiable {
     var placeholder: String { self == .phone ? "+7 …" : "name@example.com" }
 }
 
+private struct RiderAccountAvailability: Decodable {
+    let methods: [String: Bool]
+    let linked: [String]
+
+    var canRecover: Bool { linked.contains { methods[$0] == true } }
+}
+
 struct RiderAccountAccessSettings: View {
+    @ObservedObject var recorder: SessionRecorder
+    @State private var confirmingExit = false
+    @State private var working = false
+    @State private var notice: String?
+
     var body: some View {
-        Form { RiderAccountVerification { _ in } }
-            .navigationTitle("Вход и восстановление")
-            .navigationBarTitleDisplayMode(.inline)
+        Form {
+            RiderAccountVerification(intent: "auto") { _ in }
+            Section {
+                Button("Выйти из аккаунта", role: .destructive) { confirmingExit = true }
+                    .disabled(working)
+                if let notice { Text(notice).font(.footnote).foregroundStyle(.secondary) }
+            }
+        }
+        .navigationTitle("Вход и восстановление")
+        .navigationBarTitleDisplayMode(.inline)
+        .confirmationDialog("Выйти из аккаунта?", isPresented: $confirmingExit, titleVisibility: .visible) {
+            Button("Выйти", role: .destructive, action: signOut)
+        } message: {
+            Text("Для повторного входа понадобится код на подтверждённый телефон или почту.")
+        }
+    }
+
+    private func signOut() {
+        guard !working else { return }
+        guard recorder.live == nil, recorder.analyzingSessionID == nil else {
+            notice = "Сначала заверши и сохрани каталку."
+            return
+        }
+        working = true
+        notice = nil
+        Task {
+            defer { working = false }
+            do {
+                let account: RiderAccountAvailability = try await RiderCommunity.decode("account")
+                guard account.canRecover else {
+                    notice = "Перед выходом привяжи почту или телефон, чтобы сохранить доступ к профилю."
+                    return
+                }
+                let current: RiderCommunity.Registration = try await RiderCommunity.decode("registration")
+                if let id = current.profileID { RiderLocalAccount.identify(id) }
+                guard recorder.live == nil, recorder.analyzingSessionID == nil else {
+                    notice = "Сначала заверши и сохрани каталку."
+                    return
+                }
+                let _: [String: Bool]? = try? await RiderCommunity.decode("sos/receiver", method: "DELETE")
+                try RiderCommunity.clearDeviceCredential()
+                RiderSOSService.shared.resetAccount()
+                RiderLocalAccount.markSignedOut()
+            } catch {
+                notice = "Не удалось выйти. Проверь подключение к Rider и повтори."
+            }
+        }
     }
 }
 
 private struct RiderAccountVerification: View {
+    let intent: String
     let verified: (RiderCommunity.Registration) -> Void
 
-    private struct Availability: Decodable {
-        let methods: [String: Bool]
-        let linked: [String]
-    }
-
-    @State private var availability: Availability?
+    @State private var availability: RiderAccountAvailability?
     @State private var method = RiderLoginMethod.phone
     @State private var contact = ""
     @State private var code = ""
@@ -343,6 +395,10 @@ private struct RiderAccountVerification: View {
     @MainActor private func load() async {
         do {
             availability = try await RiderCommunity.decode("account")
+            if !awaitingCode, availability?.methods[method.rawValue] != true,
+               let active = RiderLoginMethod.allCases.first(where: { availability?.methods[$0.rawValue] == true }) {
+                method = active
+            }
             notice = nil
         } catch {
             if !Task.isCancelled { notice = "Не удалось загрузить доступные способы входа." }
@@ -356,7 +412,8 @@ private struct RiderAccountVerification: View {
         Task {
             defer { working = false }
             do {
-                let payload = ["kind":method.rawValue, "contact":contact.trimmingCharacters(in: .whitespacesAndNewlines)]
+                let payload = ["kind":method.rawValue, "intent":intent,
+                               "contact":contact.trimmingCharacters(in: .whitespacesAndNewlines)]
                 let result: [String: Bool] = try await RiderCommunity.decode("account/start", method: "POST",
                                                                             body: JSONEncoder().encode(payload))
                 guard result["sent"] == true else { throw URLError(.badServerResponse) }
@@ -387,7 +444,11 @@ private struct RiderAccountVerification: View {
             } catch RiderCommunity.Rejection.forbidden {
                 notice = "Код неверный или истёк. Проверь код или запроси новый."
             } catch RiderCommunity.Rejection.conflict {
-                notice = "Этот контакт уже привязан. Для действующего профиля добавляй контакт с устройства, где в него уже выполнен вход."
+                switch intent {
+                case "register": notice = "Этот контакт уже используется. Вернись и выбери «Войти»."
+                case "signIn": notice = "Вход с этим контактом недоступен. Проверь, что он привязан к твоему профилю."
+                default: notice = "Не удалось привязать этот контакт. Возможно, он уже используется в другом профиле."
+                }
             } catch {
                 notice = "Не удалось подтвердить код. Проверь подключение к Rider."
                 await load()
@@ -402,9 +463,23 @@ private struct RiderAccountVerification: View {
 }
 
 struct RiderRegistrationView: View {
-    let onDone: () -> Void
-    @AppStorage("rider.profileName") private var savedName = "Райдер"
-    @AppStorage("rider.username") private var savedUsername = ""
+    let onDone: (RiderCommunity.Registration) -> Void
+
+    private enum Route: Hashable {
+        case signIn, recovery, register
+
+        var title: String {
+            switch self {
+            case .signIn: return "Вход"
+            case .recovery: return "Восстановление доступа"
+            case .register: return "Регистрация"
+            }
+        }
+
+        var intent: String { self == .register ? "register" : "signIn" }
+    }
+
+    @State private var navigation: [Route] = []
     @State private var name = ""
     @State private var username = ""
     @State private var publicProfile = true
@@ -418,48 +493,77 @@ struct RiderRegistrationView: View {
     }
 
     var body: some View {
-        NavigationStack {
-            Form {
-                if contactVerified {
-                    Section {
-                        TextField("Имя или ник", text: $name)
-                            .onChange(of: name) { _, value in name = String(value.prefix(50)) }
-                        TextField("Уникальный @юзернейм", text: $username)
-                            .textInputAutocapitalization(.never).autocorrectionDisabled()
-                            .onChange(of: username) { _, value in username = String(value.prefix(25)) }
-                    } header: { Text("Создай профиль Rider") }
-                    footer: { Text("Для юзернейма используй 3–24 латинские буквы, цифры или подчёркивания.") }
-                    Section {
-                        Toggle("Публичный профиль", isOn: $publicProfile)
-                        Toggle("Публичная статистика", isOn: $publicStats)
-                    } footer: {
-                        Text("Открытый профиль позволяет сразу публиковать посты, подписываться и писать райдерам. Публичная статистика открывает графики каталок. Видимость можно изменить в профиле.")
-                    }
-                    if let notice { Text(notice).foregroundStyle(.red) }
-                    Button(working ? "Регистрируем…" : "Зарегистрироваться", action: register)
-                        .disabled(working || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
-                                  handle.range(of: #"^[a-z0-9_]{3,24}$"#, options: .regularExpression) == nil)
-                } else {
-                    RiderAccountVerification(verified: acceptStatus)
+        NavigationStack(path: $navigation) {
+            ScrollView {
+                VStack(spacing: 16) {
+                    RDRWordmark().frame(maxWidth: .infinity)
+                    Text("Добро пожаловать в Rider").font(.title2.bold())
+                    NavigationLink("Войти", value: Route.signIn)
+                        .buttonStyle(.borderedProminent).controlSize(.large)
+                    NavigationLink("Регистрация", value: Route.register)
+                        .buttonStyle(.bordered).controlSize(.large)
+                    NavigationLink("Забыли пароль?", value: Route.recovery)
+                        .buttonStyle(.plain).foregroundStyle(RiderTheme.accent)
                 }
+                .multilineTextAlignment(.center)
+                .padding(24)
+                .frame(maxWidth: 430)
+                .frame(maxWidth: .infinity)
             }
-            .scrollDismissesKeyboard(.interactively)
-            .navigationTitle("Добро пожаловать")
-            .task {
-                // A previous request may have succeeded while the connection was closing.
-                if let status: RiderCommunity.Registration = try? await RiderCommunity.decode("registration"),
-                   !Task.isCancelled { acceptStatus(status) }
+            .background(RiderTheme.canvas.ignoresSafeArea())
+            .navigationDestination(for: Route.self) { route in
+                Form {
+                    if route == .register && contactVerified {
+                        profileForm
+                    } else {
+                        if route == .recovery {
+                            Text("Введи привязанный контакт. Rider отправит одноразовый код для входа.")
+                        }
+                        RiderAccountVerification(intent: route.intent, verified: acceptStatus)
+                    }
+                }
+                .navigationTitle(route.title)
+                .navigationBarTitleDisplayMode(.inline)
+                .scrollDismissesKeyboard(.interactively)
+            }
+        }
+        .task {
+            if let status: RiderCommunity.Registration = try? await RiderCommunity.decode("registration"),
+               !Task.isCancelled {
+                if !status.required { onDone(status) }
+                else if status.verified == true {
+                    contactVerified = true
+                    navigation = [.register]
+                }
             }
         }
     }
 
+    @ViewBuilder private var profileForm: some View {
+        Section {
+            TextField("Имя или ник", text: $name)
+                .onChange(of: name) { _, value in name = String(value.prefix(50)) }
+            TextField("Уникальный @юзернейм", text: $username)
+                .textInputAutocapitalization(.never).autocorrectionDisabled()
+                .onChange(of: username) { _, value in username = String(value.prefix(25)) }
+        } header: { Text("Создай профиль Rider") }
+        footer: { Text("Для юзернейма используй 3–24 латинские буквы, цифры или подчёркивания.") }
+        Section {
+            Toggle("Публичный профиль", isOn: $publicProfile)
+            Toggle("Публичная статистика", isOn: $publicStats)
+        }
+        if let notice { Text(notice).foregroundStyle(.red) }
+        Button(working ? "Регистрируем…" : "Зарегистрироваться", action: register)
+            .disabled(working || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                      handle.range(of: #"^[a-z0-9_]{3,24}$"#, options: .regularExpression) == nil)
+    }
+
     private func acceptStatus(_ status: RiderCommunity.Registration) {
         if !status.required {
-            if let name = status.name { savedName = name }
-            if let username = status.username { savedUsername = username }
-            onDone()
-        } else {
-            contactVerified = status.verified == true
+            onDone(status)
+        } else if status.verified == true {
+            contactVerified = true
+            if navigation.last != .register { navigation = [.register] }
         }
     }
 
@@ -471,10 +575,10 @@ struct RiderRegistrationView: View {
             defer { working = false }
             do {
                 let clean = name.trimmingCharacters(in: .whitespacesAndNewlines)
-                savedUsername = try await RiderCommunity.register(name: clean, username: handle,
-                                        publicProfile: publicProfile, statsPublic: publicStats)
-                savedName = clean
-                onDone()
+                _ = try await RiderCommunity.register(name: clean, username: handle,
+                                                       publicProfile: publicProfile, statsPublic: publicStats)
+                let profile: RiderCommunity.Registration = try await RiderCommunity.decode("registration")
+                acceptStatus(profile)
             } catch RiderCommunity.Rejection.conflict {
                 notice = "Этот юзернейм занят."
             } catch {

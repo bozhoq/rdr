@@ -4,13 +4,56 @@ import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 
+enum RiderLocalAccount {
+    static func directory(_ name: String) -> URL {
+        let defaults = UserDefaults.standard
+        let base = URL.applicationSupportDirectory
+        guard let id = defaults.string(forKey: "rider.accountID"), !id.isEmpty,
+              id != defaults.string(forKey: "rider.legacyAccountID") else {
+            return base.appendingPathComponent(name, isDirectory: true)
+        }
+        return base.appendingPathComponent("RiderAccounts", isDirectory: true)
+            .appendingPathComponent(id, isDirectory: true)
+            .appendingPathComponent(name, isDirectory: true)
+    }
+
+    static func identify(_ id: String) {
+        let defaults = UserDefaults.standard
+        if defaults.string(forKey: "rider.legacyAccountID") == nil {
+            defaults.set(id, forKey: "rider.legacyAccountID")
+        }
+        defaults.set(id, forKey: "rider.accountID")
+    }
+
+    static func restoreProfile(_ status: RiderCommunity.Registration) {
+        let defaults = UserDefaults.standard
+        defaults.set(status.name ?? "Райдер", forKey: "rider.profileName")
+        defaults.set(status.username ?? "", forKey: "rider.username")
+        defaults.set(status.bio ?? "", forKey: "rider.profileBio")
+        defaults.set(status.avatar ?? Data(), forKey: "rider.profilePhoto")
+        defaults.set(status.birthday ?? "", forKey: "rider.birthDay")
+        defaults.set(status.showBirthday ?? false, forKey: "rider.birthVisible")
+    }
+
+    static func markSignedOut() {
+        let defaults = UserDefaults.standard
+        defaults.set(true, forKey: "rider.accountNeedsSignIn")
+        defaults.set(false, forKey: "rider.registrationComplete")
+        for key in ["rider.profileName", "rider.username", "rider.profileBio", "rider.profilePhoto",
+                    "rider.birthDay", "rider.birthVisible"] {
+            defaults.removeObject(forKey: key)
+        }
+    }
+}
+
 @main
 struct SessionApp: App {
     @UIApplicationDelegateAdaptor(RiderSOSAppDelegate.self) private var sosDelegate
     @ObservedObject private var sos = RiderSOSService.shared
     @Environment(\.scenePhase) private var scenePhase
-    @StateObject private var recorder = SessionRecorder()
-    @State private var showRegistration = false
+    @State private var recorder = SessionRecorder(root: RiderLocalAccount.directory("Sessions"))
+    @AppStorage("rider.accountNeedsSignIn") private var needsSignIn = false
+    @AppStorage("rider.accountID") private var accountID = ""
     @AppStorage("rider.registrationComplete") private var registrationComplete = false
     @AppStorage("rider.appearance") private var theme = RiderAppearance.lagoon
     @AppStorage("rider.textSize") private var textSize = 0
@@ -22,13 +65,20 @@ struct SessionApp: App {
 
     var body: some Scene {
         WindowGroup {
-            Tabs(recorder: recorder)
+            Group {
+                if needsSignIn {
+                    RiderRegistrationView(onDone: activate)
+                        .tint(RiderTheme.accent)
+                } else {
+                    Tabs(recorder: recorder).id(accountID)
+                }
+            }
                 .environment(\.locale, Locale(identifier: "ru_RU"))
                 .background(RiderWindowAppearance(theme: theme).frame(width: 0, height: 0))
                 .environment(\.dynamicTypeSize, chosenSize)
                 .onChange(of: scenePhase) { _, phase in recorder.sceneChanged(phase) }
-                .task(id: scenePhase) {
-                    guard scenePhase == .active, RiderCommunity.endpoint != nil else { return }
+                .task(id: scenePhase == .active && !needsSignIn) {
+                    guard scenePhase == .active, !needsSignIn, RiderCommunity.endpoint != nil else { return }
                     await sos.refreshAuthorization()
                     while !Task.isCancelled {
                         if sos.available { recorder.refreshSOSFix() }
@@ -36,37 +86,28 @@ struct SessionApp: App {
                         catch { break }
                     }
                 }
-                .task(id: scenePhase) {
-                    guard scenePhase == .active, RiderCommunity.usesLANTrust else { return }
+                .task(id: scenePhase == .active && !needsSignIn) {
+                    guard scenePhase == .active, !needsSignIn, RiderCommunity.usesLANTrust else { return }
                     while !Task.isCancelled {
                         await sos.pollForeground()
                         do { try await Task.sleep(for: .seconds(3)) } catch { return }
                     }
                 }
-                .task(id: scenePhase) {
-                    guard scenePhase == .active, RiderCommunity.endpoint != nil, !registrationComplete else { return }
+                .task(id: scenePhase == .active && !needsSignIn) {
+                    guard scenePhase == .active, !needsSignIn, RiderCommunity.endpoint != nil,
+                          !registrationComplete || accountID.isEmpty else { return }
                     for _ in 0..<3 {
                         do {
                             let status: RiderCommunity.Registration = try await RiderCommunity.decode("registration")
-                            if !Task.isCancelled {
-                                if status.required { showRegistration = true }
-                                else { registrationComplete = true }
-                            }
+                            guard !Task.isCancelled, !needsSignIn else { return }
+                            if status.required { needsSignIn = true }
+                            else { activate(status) }
                             return
                         } catch {
                             do { try await Task.sleep(for: .seconds(3)) } catch { return }
                         }
                     }
-                    // Registration can be retried if Wi-Fi or the server is unavailable.
-                    if !Task.isCancelled { showRegistration = true }
-                }
-                .fullScreenCover(isPresented: $showRegistration) {
-                    RiderRegistrationView {
-                        registrationComplete = true
-                        showRegistration = false
-                    }
-                    .interactiveDismissDisabled()
-                    .tint(RiderTheme.accent)
+                    if !Task.isCancelled && !registrationComplete { needsSignIn = true }
                 }
                 .sheet(item: $sos.inbox) { inbox in
                     if let id = inbox.selected, inbox.outgoing { RiderSOSOutgoing(id: id) }
@@ -74,6 +115,19 @@ struct SessionApp: App {
                 }
         }
     }
+
+    private func activate(_ status: RiderCommunity.Registration) {
+        if let id = status.profileID {
+            let old = RiderLocalAccount.directory("Sessions")
+            RiderLocalAccount.identify(id)
+            let new = RiderLocalAccount.directory("Sessions")
+            if old != new { recorder = SessionRecorder(root: new) }
+        }
+        if needsSignIn || !registrationComplete { RiderLocalAccount.restoreProfile(status) }
+        registrationComplete = true
+        needsSignIn = false
+    }
+
 }
 
 private struct RiderWindowAppearance: UIViewRepresentable {
@@ -179,7 +233,8 @@ private struct Tabs: View {
                     do {
                         let current = try await RiderCommunity.statisticsCredit()
                         guard !Task.isCancelled else { return }
-                        let changed = lastSyncedStatistics != trigger.update
+                        let changed = lastSyncedStatistics != trigger.update &&
+                                      (!recorder.history.isEmpty || lastSyncedStatistics != nil)
                         let credit = changed ? try await RiderCommunity.syncStatistics(trigger.update) : current
                         guard !Task.isCancelled else { return }
                         let changedCredit = social.seasonCredit != credit
@@ -388,8 +443,7 @@ private struct RecordingView: View {
     @State private var confirmingStop = false
     @State private var showingSensorCheck = false
     @State private var markerKind = MarkerKind.walking
-    @AppStorage("rider.nextSecretMission") private var missionOffer = ""
-    @State private var skipMission = false
+    @State private var startingMission: RiderMission?
 
     private enum RecordingDevice: Hashable { case phone, watch }
     var body: some View {
@@ -427,6 +481,12 @@ private struct RecordingView: View {
         }
         .sheet(isPresented: $showingSensorCheck, onDismiss: recorder.cancelSensorCheck) {
             sensorCheck
+        }
+        .sheet(item: $startingMission) { mission in
+            challenge(mission)
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.hidden)
+                .interactiveDismissDisabled()
         }
         .confirmationDialog("Завершить запись?", isPresented: $confirmingStop, titleVisibility: .visible) {
             Button("Завершить и сохранить", action: onStop)
@@ -496,8 +556,6 @@ private struct RecordingView: View {
                     }
                 }.lagoonCard()
 
-                secretGoal
-
                 Button(action: startRide) {
                     Text("Начать каталку").font(.headline)
                         .frame(maxWidth: .infinity).padding(.vertical, 10)
@@ -522,51 +580,45 @@ private struct RecordingView: View {
         }
         .background(RiderTheme.canvas.ignoresSafeArea())
         .task {
-            prepareSecretGoal()
             await RiderSOSService.shared.refreshAuthorization(prompt: true)
             if RiderCommunity.endpoint != nil, recorder.locationAuthorized, recorder.usableFix == nil {
                 recorder.locateSpot()
             }
         }
-        .onChange(of: recorder.history.count) { _, _ in prepareSecretGoal() }
         .onChange(of: recorder.automaticConditions) { _, _ in recorder.automaticSpotOverride = nil }
         .task(id: recorder.automaticConditions) {
             if recorder.automaticConditions && recorder.locationAuthorized { recorder.locateSpot() }
         }
     }
 
-    @ViewBuilder private var secretGoal: some View {
-        if let mission = RiderMission(rawValue: missionOffer) {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 12) {
-                    RiderMissionSticker(mission: mission, size: 42)
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("Случайная цель").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                        Text(mission.rule.title).font(.headline)
-                        Text("\(mission.rule.goal) · +\(mission.rule.points) ПТС").font(.caption)
-                            .foregroundStyle(RiderTheme.accent)
-                    }
-                }
-                Toggle("Взять задание на каталку", isOn: Binding(get: { !skipMission }, set: { skipMission = !$0 }))
-                    .font(.subheadline)
+    private func challenge(_ mission: RiderMission) -> some View {
+        ScrollView {
+            VStack(spacing: 14) {
+                RiderMissionSticker(mission: mission, size: 78, earned: true)
+                Text("Вызов на каталку").font(.title.bold())
+                Text(mission.rule.title).font(.title2.weight(.semibold))
+                Text(mission.rule.goal).font(.body)
+                Text("+\(mission.rule.points) ПТС").font(.subheadline.monospacedDigit().bold())
+                    .padding(.horizontal, 12).padding(.vertical, 5)
+                    .background(.white.opacity(0.15), in: Capsule())
+                Button("Вызов принят") { startingMission = nil }
+                    .buttonStyle(.borderedProminent).tint(.white)
+                    .foregroundStyle(RiderTheme.action)
+                    .controlSize(.large)
+                    .padding(.top, 4)
             }
-            .lagoonCard()
+            .multilineTextAlignment(.center)
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity)
+            .padding(24)
         }
-    }
-
-    private func prepareSecretGoal() {
-        guard recorder.live == nil else { return }
-        let earned = RiderMission.earned(in: recorder.history)
-        if let offered = RiderMission(rawValue: missionOffer), !earned.contains(offered) { return }
-        missionOffer = RiderMission.draw(excluding: earned)?.rawValue ?? ""
+        .background(RiderTheme.lagoon.ignoresSafeArea())
     }
 
     private func startRide() {
-        recorder.start(mission: skipMission ? nil : RiderMission(rawValue: missionOffer))
-        if recorder.live != nil {
-            missionOffer = ""
-            skipMission = false
-        }
+        let earned = RiderMission.earned(in: recorder.history)
+        recorder.start(mission: RiderMission.draw(excluding: earned) ?? RiderMission.draw(excluding: []))
+        startingMission = recorder.live?.mission
     }
 
     private var sensorCheck: some View {

@@ -300,6 +300,19 @@ class CommunityTests(unittest.TestCase):
         self.assertNotEqual(result["mine"]["id"], first)
         self.assertEqual(self.call("GET", "/account", fresh)["linked"], ["email"])
 
+        self.now += 61
+        for device, intent, contact in [("1"*72, "signIn", "not-registered@example.test"),
+                                        ("2"*72, "register", address),
+                                        ("3"*72, "signIn", "new@example.test")]:
+            self.call("POST", "/account/start", device, {"kind":"email","contact":contact,"intent":intent})
+            verify(device, email.call_args.args[1], expect=200 if device == "3"*72 else 409)
+            status = self.call("GET", "/registration", device)
+            if device == "3"*72:
+                self.assertEqual(status["profileID"], result["mine"]["id"])
+            else:
+                self.assertTrue(status["required"])
+                self.assertFalse(status["verified"])
+
     def test_demo_alert_delivery_and_preferences(self):
         recipient = self.publish(self.me, "recipient")["mine"]["id"]
         alpha = self.publish(self.audience, "alpha")["mine"]["id"]

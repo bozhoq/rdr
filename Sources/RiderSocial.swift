@@ -347,7 +347,7 @@ final class RiderSocialStore: ObservableObject {
             if !Task.isCancelled { reposts = entries }
         } catch { /* Keep the previous list during a temporary network failure. */ }
     }
-    private let directory = URL.applicationSupportDirectory.appendingPathComponent("RiderPosts", isDirectory: true)
+    private let directory = RiderLocalAccount.directory("RiderPosts")
 
     init() {
         let files = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
@@ -1280,10 +1280,12 @@ struct RiderFeedCard: View {
                     .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
             }
             if post.showsMedia {
-                if post.isVideo {
+                if post.publicationSection == .journal {
+                    postPhoto
+                } else if post.isVideo {
                     Button { showingVideo = true } label: { postPhoto }
                         .buttonStyle(.plain).accessibilityLabel("Смотреть видео")
-                } else if onComments != nil || post.publicationSection == .journal {
+                } else if onComments != nil {
                     postPhoto
                 } else {
                     NavigationLink { detail() } label: { postPhoto }
