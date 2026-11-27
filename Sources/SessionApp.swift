@@ -205,29 +205,6 @@ private struct Tabs: View {
         }.withRenderingMode(.alwaysOriginal)
     }
 
-    private static let spotIcon: UIImage = {
-        UIGraphicsImageRenderer(size: CGSize(width: 27, height: 27)).image { renderer in
-            let context = renderer.cgContext
-            context.setStrokeColor(UIColor.black.cgColor)
-            context.setLineWidth(1.7)
-            context.setLineCap(.round)
-            context.strokeEllipse(in: CGRect(x: 4.5, y: 19, width: 18, height: 5))
-            context.move(to: CGPoint(x: 12.5, y: 21))
-            context.addQuadCurve(to: CGPoint(x: 14.8, y: 8.5), control: CGPoint(x: 12.4, y: 14))
-            context.move(to: CGPoint(x: 6.5, y: 8))
-            context.addQuadCurve(to: CGPoint(x: 14.8, y: 8.5), control: CGPoint(x: 9.5, y: 4))
-            context.addQuadCurve(to: CGPoint(x: 20.8, y: 5.5), control: CGPoint(x: 16.3, y: 4.2))
-            context.move(to: CGPoint(x: 7.5, y: 13))
-            context.addQuadCurve(to: CGPoint(x: 14.8, y: 8.5), control: CGPoint(x: 10, y: 8.3))
-            context.addQuadCurve(to: CGPoint(x: 22.5, y: 12), control: CGPoint(x: 20, y: 7.6))
-            context.move(to: CGPoint(x: 14.8, y: 8.5))
-            context.addQuadCurve(to: CGPoint(x: 12.2, y: 3.5), control: CGPoint(x: 15, y: 4.8))
-            context.move(to: CGPoint(x: 14.8, y: 8.5))
-            context.addQuadCurve(to: CGPoint(x: 18.3, y: 14.2), control: CGPoint(x: 17.6, y: 9.7))
-            context.strokePath()
-        }.withRenderingMode(.alwaysTemplate)
-    }()
-
     private static let rideIcon: UIImage = {
         let size = CGSize(width: 31, height: 25)
         return UIGraphicsImageRenderer(size: size).image { renderer in
@@ -310,7 +287,7 @@ private struct Tabs: View {
             NavigationStack {
                 SpotsView(recorder: recorder) { selectedTab = .record }
             }
-            .tabItem { Label { Text("Спот") } icon: { Image(uiImage: Self.spotIcon) } }
+            .tabItem { Label { Text("Спот") } icon: { Image(uiImage: RiderSpotIcon.image) } }
             .tag(Tab.spot)
 
             NavigationStack {
@@ -534,6 +511,20 @@ private struct RecordingView: View {
         }
     }
 
+    private func conditionMenu<Options: View>(_ title: String, value: String?, @ViewBuilder options: () -> Options) -> some View {
+        Menu(content: options) {
+            LabeledContent {
+                Text(value ?? "Выбрать")
+                    .foregroundStyle(value == nil ? RiderTheme.accent : Color.secondary)
+            } label: {
+                Text(title).foregroundStyle(RiderTheme.accent)
+            }
+            .frame(minHeight: 44)
+            .contentShape(.interaction, Rectangle())
+        }
+        .menuIndicator(.hidden)
+    }
+
     private var preparation: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
@@ -565,24 +556,20 @@ private struct RecordingView: View {
                             LabeledContent("Спот", value: recorder.draftSetup.spot.isEmpty ? "Выбрать" : recorder.draftSetup.spot)
                         }.padding(.vertical, 10)
                         Divider()
-                        LabeledContent("Ветер") {
+                        conditionMenu("Ветер", value: recorder.manualWind?.title) {
                             Picker("Ветер", selection: $recorder.manualWind) {
-                                Text("Не указан").tag(ManualWindRange?.none)
+                                Text("Сбросить").tag(ManualWindRange?.none)
                                 ForEach(ManualWindRange.allCases) { range in Text(range.title).tag(Optional(range)) }
                             }
-                            .labelsHidden()
-                            .pickerStyle(.menu)
                         }
-                        LabeledContent("Направление ветра") {
+                        conditionMenu("Направление ветра", value: recorder.manualDirection.map { SpotForecast.compass(Double($0)) }) {
                             Picker("Направление ветра", selection: $recorder.manualDirection) {
-                                Text("Не указано").tag(Int?.none)
+                                Text("Сбросить").tag(Int?.none)
                                 ForEach(0..<8, id: \.self) { i in
                                     let bearing = Double(i * 45)
                                     Text(SpotForecast.compass(bearing) + " " + SpotForecast.windArrow(bearing)).tag(Optional(i * 45))
                                 }
                             }
-                            .labelsHidden()
-                            .pickerStyle(.menu)
                         }
                         if !recorder.manualWindValid { Text("Укажите диапазон ветра.").font(.footnote) }
                     }
@@ -861,6 +848,31 @@ private struct RecordingView: View {
             Button("Открыть настройки GPS") { openURL(settings) }
         }
     }
+}
+
+enum RiderSpotIcon {
+    static let image: UIImage = {
+        UIGraphicsImageRenderer(size: CGSize(width: 27, height: 27)).image { renderer in
+            let context = renderer.cgContext
+            context.setStrokeColor(UIColor.black.cgColor)
+            context.setLineWidth(1.7)
+            context.setLineCap(.round)
+            context.strokeEllipse(in: CGRect(x: 4.5, y: 19, width: 18, height: 5))
+            context.move(to: CGPoint(x: 12.5, y: 21))
+            context.addQuadCurve(to: CGPoint(x: 14.8, y: 8.5), control: CGPoint(x: 12.4, y: 14))
+            context.move(to: CGPoint(x: 6.5, y: 8))
+            context.addQuadCurve(to: CGPoint(x: 14.8, y: 8.5), control: CGPoint(x: 9.5, y: 4))
+            context.addQuadCurve(to: CGPoint(x: 20.8, y: 5.5), control: CGPoint(x: 16.3, y: 4.2))
+            context.move(to: CGPoint(x: 7.5, y: 13))
+            context.addQuadCurve(to: CGPoint(x: 14.8, y: 8.5), control: CGPoint(x: 10, y: 8.3))
+            context.addQuadCurve(to: CGPoint(x: 22.5, y: 12), control: CGPoint(x: 20, y: 7.6))
+            context.move(to: CGPoint(x: 14.8, y: 8.5))
+            context.addQuadCurve(to: CGPoint(x: 12.2, y: 3.5), control: CGPoint(x: 15, y: 4.8))
+            context.move(to: CGPoint(x: 14.8, y: 8.5))
+            context.addQuadCurve(to: CGPoint(x: 18.3, y: 14.2), control: CGPoint(x: 17.6, y: 9.7))
+            context.strokePath()
+        }.withRenderingMode(.alwaysTemplate)
+    }()
 }
 
 struct RDRWordmark: View {
@@ -1724,6 +1736,7 @@ enum RiderTheme {
     static let border = adaptive(light: 0xB5E4DE, dark: 0x285554)
     static let accent = adaptive(light: 0x00797C, dark: 0x64EDDD)
     static let action = Color(uiColor: rgb(0x00797C))
+    static let danger = adaptive(light: 0xB42339, dark: 0xFF6677)
     static let gold = adaptive(light: 0x916108, dark: 0xFFD768)
     static let silver = adaptive(light: 0x5B6776, dark: 0xD9E5F0)
     static let bronze = adaptive(light: 0x914719, dark: 0xEBA978)

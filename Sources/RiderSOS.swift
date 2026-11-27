@@ -452,7 +452,7 @@ struct RiderSOSStatusButton: View {
             Button { showing = true } label: {
                 Image(systemName: "sos.circle.fill")
                     .font(.system(size: 27, weight: .semibold))
-                    .foregroundStyle(isLive ? RiderTheme.accent : Color.secondary)
+                    .foregroundStyle(isLive ? RiderTheme.danger : Color.secondary)
                     .frame(width: 44, height: 44)
                     .overlay(alignment: .bottomTrailing) {
                         Circle()

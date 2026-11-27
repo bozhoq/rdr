@@ -805,6 +805,29 @@ class CommunityTests(unittest.TestCase):
         self.assertFalse(profile["publicProfile"])
         self.assertFalse(profile["statsPublic"])
 
+    def test_podium_conditions_match_the_winning_ride_and_respect_privacy(self):
+        self.publish(self.me, "rider")
+        self.publish(self.audience, "viewer")
+        record = dict(self.ride, id=str(UUID(int=0xABCD)).upper(), spot="Old Case", kite="K9", board="D1")
+        later = dict(record, id=str(UUID(int=0xABCE)), startedAt=self.now-10, height=4, airtime=5, spot="Other")
+        rides = [dict(later, windMS=12, windDirection=180), dict(record, spot="Cape Sunset", windMS=8, windDirection=315)]
+        self.call("PUT", "/statistics", self.me, dict(generatedAt=self.now, update=dict(
+            year=2026, rides=[self.ride], totals=self.totals, records=[record, later], publicRides=rides)))
+        for score, spot, speed, direction in (("height", "Cape Sunset", 8, 315), ("airtime", "Other", 12, 180)):
+            top = self.call("POST", "/tops", self.audience, {"metric":score})[0]
+            self.assertEqual((top["spot"], top["windMS"], top["windDirection"]), (spot, speed, direction))
+            self.assertEqual((top["kite"], top["board"]), ("K9", "D1"))
+        self.call("PATCH", "/me", self.me, {"statsPublic":False})
+        top = self.call("POST", "/tops", self.audience, {"metric":"height"})[0]
+        self.assertTrue({"spot", "windMS", "windDirection"}.isdisjoint(top))
+        self.call("PATCH", "/me", self.me, {"statsPublic":True})
+        self.stats([], revision=1)
+        self.call("PUT", "/me", self.me, dict(name="Rider", username="rider", totals=self.totals,
+                                              records=[dict(record, id=str(UUID(int=0xABCF)))]))
+        legacy = self.call("POST", "/tops", self.audience, {"metric":"height"})[0]
+        self.assertEqual(legacy["spot"], "old case")
+        self.assertIsNone(legacy["windMS"])
+
     def test_message_attachment_private_and_retry_safe(self):
         sender = self.publish(self.me, "rider")["mine"]["id"]
         peer = self.publish(self.audience, "viewer")["mine"]["id"]

@@ -289,6 +289,9 @@ struct RiderTopEntry: Decodable, Identifiable {
     let avatar: Data?
     let kite: String?
     let board: String?
+    var spot: String? = nil
+    var windMS: Double? = nil
+    var windDirection: Double? = nil
     var points: Int?
     var premium: Bool? = nil
 
@@ -816,7 +819,10 @@ private struct RiderCommentsView: View {
     @State private var draft = ""
     @State private var replying: RiderComment?
     @State private var viewedLikes: RiderComment?
-    @State private var detent = PresentationDetent.fraction(0.55)
+    private static let compactDetent = PresentationDetent.fraction(0.55)
+    @State private var detent = RiderCommentsView.compactDetent
+    @State private var keyboardVisible = false
+    @State private var collapseAfterKeyboard = false
     @FocusState private var composing: Bool
     @State private var draftID = UUID()
     @State private var error: String?
@@ -857,10 +863,23 @@ private struct RiderCommentsView: View {
                 })
             }
         }
-        .presentationDetents([.fraction(0.55), .large], selection: $detent)
+        .presentationDetents([Self.compactDetent, .large], selection: $detent)
         .presentationDragIndicator(.visible)
         .onChange(of: composing) { _, editing in
-            if editing { detent = .large }
+            if editing {
+                collapseAfterKeyboard = false
+                detent = .large
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
+            keyboardVisible = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardDidHideNotification)) { _ in
+            keyboardVisible = false
+            if collapseAfterKeyboard {
+                collapseAfterKeyboard = false
+                if !composing { detent = Self.compactDetent }
+            }
         }
         .task(id: postID) { await load() }
     }
@@ -1011,6 +1030,11 @@ private struct RiderCommentsView: View {
             draftID = UUID()
             replying = nil
             composing = false
+            if keyboardVisible {
+                collapseAfterKeyboard = true
+            } else {
+                detent = Self.compactDetent
+            }
             return result
         }
     }
@@ -1600,7 +1624,8 @@ struct RiderFeedCard: View {
             .accessibilityLabel("Комментарии")
             .accessibilityValue((commentSummary?.total ?? 0).formatted())
             Button { sharing = true } label: {
-                Image(systemName: "paperplane").font(.title3).frame(width: 44, height: 44)
+                Image(systemName: "square.and.arrow.up").font(.title3).frame(width: 44, height: 44)
+                    .contentShape(.interaction, Rectangle())
             }
             .buttonStyle(.borderless)
             .accessibilityLabel("Поделиться")
@@ -1669,7 +1694,17 @@ struct RiderFeedCard: View {
                     if !RiderCommunity.usesLANTrust {
                         ShareLink(item: url) { Label("Поделиться ссылкой", systemImage: "square.and.arrow.up") }
                     }
-                } else if let bytes = post.photo, let image = UIImage(data: bytes) {
+                }
+                if post.publicationSection == .journal && !post.caption.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    ShareLink(item: post.caption) { Label("Поделиться текстом", systemImage: "text.alignleft") }
+                    Button {
+                        UIPasteboard.general.string = post.caption
+                        sharing = false
+                    } label: {
+                        Label("Скопировать текст", systemImage: "doc.on.doc")
+                    }
+                }
+                if let bytes = post.photo, let image = UIImage(data: bytes) {
                     ShareLink(item: RiderPostPhoto(bytes: bytes),
                               message: Text(post.caption), preview: SharePreview("Фото Rider", image: Image(uiImage: image))) {
                         Label("Поделиться фото", systemImage: "square.and.arrow.up")
@@ -2547,6 +2582,7 @@ private struct RiderChatFile: Transferable {
 
 struct RiderTopsView: View {
     @EnvironmentObject private var social: RiderSocialStore
+    @Environment(\.dynamicTypeSize) private var textSize
     @ObservedObject var recorder: SessionRecorder
     @AppStorage("rider.profileName") private var name = "Райдер"
     @AppStorage("rider.username") private var username = ""
@@ -2680,34 +2716,50 @@ struct RiderTopsView: View {
                     .accessibilityLabel("Место \(place)")
                 RiderAvatar(photo: entry.avatar ?? Data(), size: 42).accessibilityHidden(true)
                 riderName(entry)
-                Spacer(minLength: 4)
-                scoreValue(entry).font(.title3.bold()).multilineTextAlignment(.trailing)
+                scoreValue(entry).font(.title3.bold())
+                    .fixedSize(horizontal: true, vertical: false)
+                    .multilineTextAlignment(.trailing)
             }
-            if let kite = entry.kite {
-                equipmentLabel(kite, glyph: .kite).accessibilityLabel("Кайт \(kite)")
-            }
-            if let board = entry.board {
-                equipmentLabel(board, glyph: .board).accessibilityLabel("Доска \(board)")
-            }
-            if score != .rank && entry.kite == nil && entry.board == nil {
-                Text("Снаряжение не указано")
-            }
+            if score != .rank { recordDetails(entry) }
         }
         .font(.footnote)
         .lagoonCard()
         .listRowBackground(Color.clear)
     }
 
-    private func equipmentLabel(_ name: String, glyph: EquipmentGlyph.Kind) -> some View {
-        Label {
-            Text(name)
-        } icon: {
-            EquipmentGlyph(kind: glyph)
-                .rendered(lineWidth: 1.2)
-                .foregroundStyle(RiderTheme.accent)
-                .frame(width: 18, height: 18)
-                .accessibilityHidden(true)
+    @ViewBuilder private func recordDetails(_ entry: RiderTopEntry) -> some View {
+        let speed = entry.windMS.map { metric($0, unit: "м/с") }
+        let compass = SpotForecast.compass(entry.windDirection)
+        let wind = [speed, compass == "—" ? nil : compass].compactMap { $0 }.joined(separator: " · ")
+        if entry.kite != nil || entry.board != nil || entry.spot != nil || !wind.isEmpty {
+            let column = GridItem(.flexible(), spacing: 12, alignment: .leading)
+            LazyVGrid(columns: textSize.isAccessibilitySize ? [column] : [column, column], alignment: .leading, spacing: 8) {
+                recordDetail("Кайт", value: entry.kite) { EquipmentGlyph(kind: .kite).rendered(lineWidth: 1.2) }
+                recordDetail("Доска", value: entry.board) { EquipmentGlyph(kind: .board).rendered(lineWidth: 1.2) }
+                recordDetail("Спот", value: entry.spot) {
+                    Image(uiImage: RiderSpotIcon.image).resizable().scaledToFit()
+                }
+                recordDetail("Ветер", value: wind.isEmpty ? nil : wind) {
+                    Image(systemName: "wind")
+                }
+            }
         }
+    }
+
+    private func recordDetail<Icon: View>(_ title: String, value: String?, @ViewBuilder icon: () -> Icon) -> some View {
+        HStack(alignment: .top, spacing: 5) {
+            icon()
+                .foregroundStyle(RiderTheme.accent)
+                .frame(width: 19, height: 19)
+                .accessibilityHidden(true)
+            Text(value ?? "—")
+                .foregroundStyle(value == nil ? Color.secondary : Color.primary)
+                .lineLimit(textSize.isAccessibilitySize ? nil : 2)
+                .minimumScaleFactor(0.85)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(title)
+        .accessibilityValue(value ?? "Данные не указаны")
     }
 
     private func leaderboardRow(_ entry: RiderTopEntry, place: Int) -> some View {
@@ -2716,8 +2768,8 @@ struct RiderTopsView: View {
                 .accessibilityLabel("Место \(place)")
             RiderAvatar(photo: entry.avatar ?? Data(), size: 32).accessibilityHidden(true)
             riderName(entry)
-            Spacer(minLength: 4)
             scoreValue(entry).font(.headline)
+                .fixedSize(horizontal: true, vertical: false)
         }
     }
 
@@ -2743,11 +2795,18 @@ struct RiderTopsView: View {
 
     private func rankedRiderLabel(_ entry: RiderTopEntry) -> some View {
         VStack(alignment: .leading, spacing: 2) {
-            RiderName(entry.name, premium: entry.premium).font(.headline)
+            RiderName(entry.name, premium: entry.premium)
+                .font(.headline)
+                .lineLimit(textSize.isAccessibilitySize ? 2 : 1)
+                .minimumScaleFactor(0.65)
             if let tag = entry.username, !tag.isEmpty {
                 Text("@" + tag).font(.caption).foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.65)
             }
         }
+        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+        .contentShape(.interaction, Rectangle())
     }
 
     private func localRows(spot: RiderSpot?, filter: RiderTopFilter, progress: RiderSeasonProgress) -> [RiderTopEntry] {
@@ -2761,9 +2820,12 @@ struct RiderTopsView: View {
         }
         let records = RiderJumpScore.records(in: matches)
         guard let best = RiderJumpScore.best(for: score, in: records) else { return [] }
+        let wind = matches.first { $0.id == best.id }?.wind
+        let speed = wind.map { $0.knots * SessionWind.metersPerSecondPerKnot }
         return [RiderTopEntry(id: "local", name: name, username: username, height: best.height,
                               airtime: best.airtime, distance: best.distance, avatar: photo,
-                              kite: best.kite, board: best.board)]
+                              kite: best.kite, board: best.board, spot: best.spot,
+                              windMS: speed.flatMap { (0...150).contains($0) ? $0 : nil }, windDirection: wind?.direction)]
     }
 
     @MainActor private func load(_ filter: RiderTopFilter) async {

@@ -912,6 +912,7 @@ private struct RiderProfilePublications: View {
     @Binding var selection: RiderPublicationSection
     var addPost: (() -> Void)?
     @State private var gallery: GallerySelection?
+    @State private var conversation: RiderPerson?
 
     private struct GallerySelection: Hashable {
         let id = UUID()
@@ -949,12 +950,14 @@ private struct RiderProfilePublications: View {
                 LazyVStack(spacing: 8) {
                     ForEach(posts) { item in
                         RiderFeedCard(post: item.post, author: item.remote?.author ?? name, username: item.remote?.username ?? username,
-                                      avatar: item.remote?.avatar ?? avatar, editable: isMine && item.post.sourceID == nil, entry: item.remote)
+                                      avatar: item.remote?.avatar ?? avatar, editable: isMine && item.post.sourceID == nil, entry: item.remote,
+                                      onConversation: { conversation = $0 })
                     }
                 }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .navigationDestination(item: $conversation) { RiderThreadView(peer: $0) }
         .navigationDestination(item: $gallery) { selection in
             RiderProfileGallery(items: selection.posts, initial: selection.initial, isMine: isMine,
                                 name: name, username: username, avatar: avatar)
@@ -1143,29 +1146,30 @@ private struct RiderProfileRecords: View {
     var distance: Double?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
+        VStack(spacing: 5) {
             Text("Рекорды").font(.title3.bold()).accessibilityAddTraits(.isHeader)
             ViewThatFits(in: .horizontal) {
                 HStack(alignment: .top, spacing: 0) { recordItems }
-                VStack(alignment: .leading, spacing: 8) { recordItems }
+                VStack(spacing: 10) { recordItems }
             }.padding(.vertical, 8).background(RiderTheme.surface, in: RoundedRectangle(cornerRadius: 14))
-        }.frame(maxWidth: .infinity, alignment: .leading)
+        }.frame(maxWidth: .infinity)
     }
 
     @ViewBuilder private var recordItems: some View {
-        record("Топ прыжок", value: metric(totals.height, unit: "м"), icon: "arrow.up.right")
+        record("Топ прыжок", value: metric(totals.height, unit: "м"), icon: "arrow.up.to.line")
         record("Топ завис", value: metric(totals.airtime, unit: "с"), icon: "timer")
         record("Топ дистанция", value: metric(distance, unit: "м"), icon: "arrow.left.and.right")
     }
 
     private func record(_ title: String, value: String, icon: String) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
+        VStack(spacing: 3) {
             Image(systemName: icon).font(.subheadline.bold()).foregroundStyle(RiderTheme.accent).accessibilityHidden(true)
             Text(value).font(.headline.monospacedDigit())
             Text(title).font(.footnote.weight(.medium)).foregroundStyle(.secondary)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity)
         .padding(.horizontal, 9)
+        .multilineTextAlignment(.center)
         .accessibilityElement(children: .combine)
     }
 

@@ -808,7 +808,7 @@ def top_rows(db, raw, viewer=None):
         raise ValueError("invalid spot")
     name = spot.strip().casefold() if spot else None
     query = f"""WITH ranked AS (
-        SELECT p.id,p.document,r.height,r.airtime,d.distance,d.kite,d.board,
+        SELECT p.id,p.document,r.height,r.airtime,d.distance,d.kite,d.board,r.session_id,r.spot_name,
                ROW_NUMBER() OVER (PARTITION BY r.owner ORDER BY {selected} DESC,r.started_at DESC,r.session_id) AS place
         FROM records r JOIN profiles p ON p.id=r.owner
         LEFT JOIN record_details d ON d.owner=r.owner AND d.session_id=r.session_id
@@ -817,17 +817,27 @@ def top_rows(db, raw, viewer=None):
                OR ((r.spot_id IS NULL OR ? IS NULL) AND r.spot_name=?))
         )
         , places AS (SELECT *,row_number() OVER (ORDER BY {metric} DESC,id) AS position FROM ranked WHERE place=1)
-        SELECT id,document,height,airtime,distance,kite,board,position FROM places
+        SELECT id,document,height,airtime,distance,kite,board,session_id,spot_name,position FROM places
         WHERE position<=50 OR id=? ORDER BY position"""
     rows = db.execute(query, (start_at, end_at, spot_id, name, spot_id, spot_id, name, viewer))
     output = []
-    for owner, doc, height, airtime, distance, kite, board, position in rows:
+    for owner, doc, height, airtime, distance, kite, board, session_id, spot, position in rows:
         profile = json.loads(doc)
         entry = {"id": owner, "name": profile["name"], "username": profile.get("username"),
                  "height": height, "airtime": airtime, "distance": distance}
         entry.update(avatar=profile.get("avatar"), premium=is_premium(profile), position=position)
         if position <= 3:
             entry.update(kite=kite, board=board)
+            if profile.get("publicProfile", True) and profile.get("statsPublic", True):
+                # Use the winning session, even when a more recent ride has different conditions.
+                ride = db.execute("""SELECT json_extract(ride.value,'$.spot'),
+                                            json_extract(ride.value,'$.windMS'),
+                                            json_extract(ride.value,'$.windDirection')
+                    FROM rider_public_rides history JOIN json_each(history.document) AS ride
+                    WHERE history.owner=? AND lower(json_extract(ride.value,'$.id'))=? LIMIT 1""",
+                    (owner, session_id)).fetchone()
+                display_spot, speed, direction = ride or (None, None, None)
+                entry.update(spot=display_spot or spot, windMS=speed, windDirection=direction)
         output.append(entry)
     return output
 
