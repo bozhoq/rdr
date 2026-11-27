@@ -128,7 +128,15 @@ final class RiderSOSAppDelegate: NSObject, UIApplicationDelegate, UNUserNotifica
     struct Inbox: Identifiable {
         let id = UUID()
         let selected: UUID?
-        var outgoing = false
+    }
+
+    enum OutgoingPhase {
+        case locating, sending, closing
+    }
+
+    struct ReplyNotice {
+        let incident: UUID
+        let text: String
     }
 
     private struct Receiver: Codable {
@@ -149,7 +157,16 @@ final class RiderSOSAppDelegate: NSObject, UIApplicationDelegate, UNUserNotifica
     @Published private(set) var receiverStatus: String?
     @Published private(set) var receiverConfirmedAt: Date?
     @Published var inbox: Inbox?
-    private(set) var radarVisible = false
+    @Published var showingOutgoing = false
+    @Published private(set) var outgoingReceipt: Receipt?
+    @Published private(set) var outgoingFix: RiderSOSFix?
+    @Published private(set) var outgoingPhase: OutgoingPhase?
+    @Published private(set) var outgoingMessage: String?
+    @Published private(set) var replyNotice: ReplyNotice?
+    private var outgoingID: UUID?
+    private var pendingOutgoingID = UUID()
+    private var outgoingTask: Task<Void, Never>?
+    private var replyNoticeTask: Task<Void, Never>?
     private var token: String?
     private var latestFix: RiderSOSFix?
     private var lastUpdate = Date.distantPast
@@ -167,11 +184,165 @@ final class RiderSOSAppDelegate: NSObject, UIApplicationDelegate, UNUserNotifica
         inbox = Inbox(selected: selected)
     }
 
+    var hasOutgoing: Bool { outgoingReceipt?.active ?? (outgoingID != nil) }
+
     func openReceipt(_ id: UUID) {
-        if !radarVisible { inbox = Inbox(selected: id, outgoing: true) }
+        if outgoingID != id {
+            guard !hasOutgoing, outgoingPhase == nil else {
+                showingOutgoing = true
+                return
+            }
+            outgoingID = id
+            outgoingReceipt = nil
+            outgoingFix = nil
+            outgoingMessage = nil
+        }
+        showingOutgoing = true
     }
 
-    func showRadar(_ visible: Bool) { radarVisible = visible }
+    func startOutgoing(name: String, equipment: String?, recorder: SessionRecorder) {
+        restoreOutgoingTracking()
+        showingOutgoing = true
+        guard !hasOutgoing, outgoingPhase == nil else { return }
+        outgoingReceipt = nil
+        outgoingID = nil
+        outgoingMessage = nil
+        outgoingFix = RiderSOSFix(recorder.usableFix)
+        guard RiderCommunity.endpoint != nil else {
+            outgoingMessage = "Подключи сервер Rider, чтобы отправить SOS."
+            return
+        }
+        let id = pendingOutgoingID
+        outgoingPhase = outgoingFix == nil ? .locating : .sending
+        outgoingTask = Task {
+            defer {
+                if !Task.isCancelled {
+                    outgoingPhase = nil
+                    outgoingTask = nil
+                }
+            }
+
+            if outgoingFix == nil, recorder.locationAuthorized {
+                recorder.refreshSOSFix()
+                for _ in 0..<20 {
+                    do { try await Task.sleep(for: .milliseconds(350)) } catch { return }
+                    outgoingFix = RiderSOSFix(recorder.usableFix)
+                    if outgoingFix != nil { break }
+                }
+            }
+
+            guard let fix = outgoingFix, !Task.isCancelled else {
+                if !Task.isCancelled { outgoingMessage = "Для SOS нужна свежая точная GPS-позиция." }
+                return
+            }
+            outgoingPhase = .sending
+            let sent: Receipt?
+            do {
+                sent = try await send(id: id, name: name, equipment: equipment, location: fix)
+            } catch {
+                if Task.isCancelled { return }
+                sent = try? await receipt(id)
+            }
+            guard !Task.isCancelled else { return }
+            if let sent {
+                pendingOutgoingID = UUID()
+                acceptOutgoing(sent, notify: true)
+            } else {
+                outgoingMessage = "Сервер не подтвердил SOS. Проверь связь и снова проведи ползунок."
+            }
+        }
+    }
+
+    func closeOutgoing() {
+        guard outgoingPhase == nil, outgoingReceipt?.active == true, let id = outgoingID else { return }
+        outgoingPhase = .closing
+        outgoingTask = Task {
+            defer {
+                if !Task.isCancelled {
+                    outgoingPhase = nil
+                    outgoingTask = nil
+                }
+            }
+            do {
+                let closed = try await close(id)
+                guard !Task.isCancelled else { return }
+                acceptOutgoing(closed, notify: false)
+                dismissReplyNotice()
+            } catch {
+                if !Task.isCancelled { outgoingMessage = "Не удалось завершить SOS. Проверь связь." }
+            }
+        }
+    }
+
+    func pollOutgoing() async {
+        restoreOutgoingTracking()
+        guard outgoingPhase == nil, let id = outgoingID else { return }
+        if let current = outgoingReceipt, !current.active {
+            acceptOutgoing(current, notify: false)
+            return
+        }
+        do {
+            let updated = try await receipt(id)
+            guard !Task.isCancelled, outgoingID == id, outgoingPhase == nil else { return }
+            acceptOutgoing(updated, notify: outgoingReceipt != nil)
+        } catch RiderCommunity.Rejection.notFound {
+            guard !Task.isCancelled, outgoingID == id, outgoingPhase == nil else { return }
+            outgoingID = nil
+            outgoingReceipt = nil
+            if let key = outgoingStorageKey { UserDefaults.standard.removeObject(forKey: key) }
+            outgoingMessage = "Сигнал SOS недоступен."
+        } catch {
+            guard !Task.isCancelled, outgoingID == id, outgoingPhase == nil else { return }
+            outgoingMessage = "Проверяем связь с сервером. Новые отклики появятся здесь."
+        }
+    }
+
+    func dismissReplyNotice() {
+        replyNoticeTask?.cancel()
+        replyNoticeTask = nil
+        replyNotice = nil
+    }
+
+    private var outgoingStorageKey: String? {
+        guard let account = UserDefaults.standard.string(forKey: "rider.accountID"), !account.isEmpty else { return nil }
+        return "rider.sos.outgoing." + account
+    }
+
+    private func restoreOutgoingTracking() {
+        guard outgoingID == nil, outgoingPhase == nil, let key = outgoingStorageKey,
+              let saved = UserDefaults.standard.dictionary(forKey: key),
+              let expiration = saved["expiration"] as? TimeInterval, expiration > Date().timeIntervalSince1970,
+              let id = (saved["id"] as? String).flatMap(UUID.init(uuidString:)) else { return }
+        outgoingID = id
+    }
+
+    private func acceptOutgoing(_ updated: Receipt, notify: Bool) {
+        let knownResponders = Set(outgoingReceipt?.responders?.map(\.id) ?? [])
+        outgoingID = updated.active ? updated.id : nil
+        outgoingReceipt = updated
+        outgoingFix = updated.location
+        outgoingMessage = nil
+        if let key = outgoingStorageKey {
+            if updated.active, let created = updated.createdAt {
+                UserDefaults.standard.set(["id": updated.id.uuidString, "expiration": created + 900], forKey: key)
+            } else {
+                UserDefaults.standard.removeObject(forKey: key)
+            }
+        }
+        guard notify, updated.active, RiderCommunity.usesLANTrust || token == nil else { return }
+        let newResponders = (updated.responders ?? []).filter { !knownResponders.contains($0.id) }
+        guard let first = newResponders.first else { return }
+        let names = newResponders.map(\.name).joined(separator: ", ")
+        let message = newResponders.count == 1 ? "\(first.name) откликнулся на SOS" : "На SOS откликнулись \(names)"
+        dismissReplyNotice()
+        replyNotice = ReplyNotice(incident: updated.id, text: message)
+        UIAccessibility.post(notification: .announcement, argument: message)
+        if RiderAlertKind.vibrate.enabled { UINotificationFeedbackGenerator().notificationOccurred(.success) }
+        replyNoticeTask = Task {
+            do { try await Task.sleep(for: .seconds(7)) } catch { return }
+            dismissReplyNotice()
+        }
+    }
 
     func handleNotification(_ id: UUID, action: String) async {
         switch action {
@@ -336,6 +507,16 @@ final class RiderSOSAppDelegate: NSObject, UIApplicationDelegate, UNUserNotifica
         latestFix = nil
         token = nil
         inbox = nil
+        outgoingTask?.cancel()
+        outgoingTask = nil
+        outgoingID = nil
+        pendingOutgoingID = UUID()
+        outgoingReceipt = nil
+        outgoingFix = nil
+        outgoingPhase = nil
+        outgoingMessage = nil
+        showingOutgoing = false
+        dismissReplyNotice()
         stopAlarm()
     }
 
@@ -353,7 +534,7 @@ final class RiderSOSAppDelegate: NSObject, UIApplicationDelegate, UNUserNotifica
             soundedForeground.formUnion(newSignals.map(\.id))
             playAlarm()
         }
-        guard inbox == nil, !radarVisible,
+        guard inbox == nil, !showingOutgoing,
               let incoming = pending.first(where: { !announcedForeground.contains($0.id) }) else { return }
         announcedForeground.insert(incoming.id)
         open(incoming.id)
@@ -369,6 +550,7 @@ final class RiderSOSAppDelegate: NSObject, UIApplicationDelegate, UNUserNotifica
                     try session.setCategory(.playback, mode: .default, options: .mixWithOthers)
                     previousAudio = settings
                 }
+                try session.setActive(true)
                 let player = try AVAudioPlayer(data: Self.alarmAudio)
                 alarm = player
                 guard player.play() else { throw CocoaError(.featureUnsupported) }
@@ -400,7 +582,11 @@ final class RiderSOSAppDelegate: NSObject, UIApplicationDelegate, UNUserNotifica
 
     private static let alarmAudio: Data = {
         let sampleRate = 22_050
-        let count = Int(Double(sampleRate) * 2.4)
+        let notes: [(start: Double, length: Double, frequency: Double)] = [
+            (0, 0.43, 587.33), (0.19, 0.48, 783.99),
+            (0.73, 0.41, 587.33), (0.92, 0.58, 880)
+        ]
+        let count = Int(Double(sampleRate) * 1.5)
         var wave = Data("RIFF".utf8)
         func word(_ value: UInt16) {
             var value = value.littleEndian
@@ -421,15 +607,17 @@ final class RiderSOSAppDelegate: NSObject, UIApplicationDelegate, UNUserNotifica
         word(16)
         wave.append(contentsOf: "data".utf8)
         integer(UInt32(count * 2))
-        var phase = 0.0
         for index in 0..<count {
             let time = Double(index) / Double(sampleRate)
-            let pulse = time.truncatingRemainder(dividingBy: 0.8)
-            let ramp = max(0, min(1, pulse / 0.07, (0.65 - pulse) / 0.12))
-            let frequency = 610 + 360 * (1 - cos(2 * .pi * time / 0.8)) / 2
-            phase += 2 * .pi * frequency / Double(sampleRate)
-            let sample = Int16((sin(phase) + 0.18 * sin(2 * phase)) * ramp * 14_000)
-            word(UInt16(bitPattern: sample))
+            let amplitude = notes.reduce(0.0) { sum, note in
+                let elapsed = time - note.start
+                guard elapsed >= 0, elapsed < note.length else { return sum }
+                let attack = min(1, elapsed / 0.038)
+                let decay = 1 - elapsed / note.length
+                let phase = 2 * Double.pi * note.frequency * elapsed
+                return sum + attack * decay * decay * (sin(phase) + 0.12 * sin(2 * phase))
+            }
+            word(UInt16(bitPattern: Int16(amplitude * 11_000)))
         }
         return wave
     }()
@@ -479,6 +667,9 @@ private struct RiderSOSSettingsPanel: View {
     @AppStorage("rider.alert.sos") private var receiveSOS = true
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
+    @State private var allowsDrill = false
+    @State private var sendingDrill = false
+    @State private var drillError = false
 
     var body: some View {
         NavigationStack {
@@ -523,6 +714,11 @@ private struct RiderSOSSettingsPanel: View {
                         Text("При непосредственной опасности обратись в экстренные службы. SOS в Rider оповещает других райдеров.")
                     }.font(.subheadline)
                 }
+                if allowsDrill {
+                    Button("Отправить учебный SOS себе") { Task { await sendDrill() } }
+                        .disabled(sendingDrill)
+                    if drillError { Text("Учебный сигнал не отправился.").foregroundStyle(.secondary) }
+                }
             }
             .navigationTitle("SOS рядом")
             .navigationBarTitleDisplayMode(.inline)
@@ -530,8 +726,22 @@ private struct RiderSOSSettingsPanel: View {
         }
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
+        .task { allowsDrill = await service.allowsDrill() }
         .onChange(of: receiveSOS) { _, on in
             if on { recorder.refreshSOSFix() }
+        }
+    }
+
+    @MainActor private func sendDrill() async {
+        sendingDrill = true
+        drillError = false
+        defer { sendingDrill = false }
+        do {
+            try await service.requestDrill()
+            NotificationCenter.default.post(name: RiderSOSService.drillNotification, object: nil)
+            dismiss()
+        } catch {
+            drillError = true
         }
     }
 
@@ -548,19 +758,14 @@ private struct RiderSOSSettingsPanel: View {
 
 struct RiderSOSControl: View {
     @AppStorage("rider.profileName") private var name = "Райдер"
+    @ObservedObject private var service = RiderSOSService.shared
     @ObservedObject var recorder: SessionRecorder
     let session: SessionSummary
 
     @GestureState private var offset: CGFloat = 0
     @GestureState private var dragging = false
     @State private var started: Date?
-    @State private var showingRadar = false
-    @State private var sending = false
     @State private var feedback: String?
-    @State private var receipt: RiderSOSService.Receipt?
-    @State private var incidentID = UUID()
-    @State private var allowsDrill = false
-    @State private var drillRequested = false
 
     private var equipment: String? {
         guard let setup = session.setup else { return nil }
@@ -571,52 +776,65 @@ struct RiderSOSControl: View {
 
     var body: some View {
         VStack(spacing: 5) {
-            GeometryReader { area in
-                let travel = max(1, area.size.width - 54)
-                ZStack(alignment: .leading) {
-                    Capsule().fill(Color(red: 0.63, green: 0.12, blue: 0.15))
-                    Capsule().strokeBorder(Color.white.opacity(0.55))
-                    Text(receipt?.active == true ? "SOS активен · открыть радар" : "SOS · веди ползунок медленно")
-                        .font(.caption.bold())
+            if service.hasOutgoing || service.outgoingPhase != nil {
+                Button { service.showingOutgoing = true } label: {
+                    Label(service.outgoingReceipt?.active == true ? "Сигнал SOS активен" : "Открыть радар SOS",
+                          systemImage: "dot.radiowaves.left.and.right")
+                        .font(.subheadline.bold())
                         .multilineTextAlignment(.center)
-                        .lineLimit(2)
-                        .minimumScaleFactor(0.75)
-                        .frame(maxWidth: .infinity)
-                        .padding(.leading, 52).padding(.trailing, 8)
-                    Circle().fill(.white).frame(width: 44, height: 44)
-                        .overlay { Image(systemName: "dot.radiowaves.left.and.right").font(.system(size: 14, weight: .bold)).foregroundStyle(.red) }
-                        .contentShape(Circle())
-                        .offset(x: min(travel, max(0, offset)))
-                        .gesture(DragGesture(minimumDistance: 4, coordinateSpace: .global)
-                            .updating($offset) { value, state, _ in state = value.translation.width }
-                            .updating($dragging) { _, active, _ in active = true }
-                            .onChanged { value in if started == nil { started = value.time } }
-                            .onEnded { value in
-                                defer { started = nil }
-                                guard value.translation.width >= travel * 0.95 else { return }
-                                if receipt?.active == true || started.map({ value.time.timeIntervalSince($0) >= 2 }) == true {
-                                    showingRadar = true
-                                    feedback = nil
-                                } else if receipt?.active != true {
-                                    feedback = "Проведи ползунок за 2 секунды или дольше."
-                                }
-                            })
-                        .padding(.leading, 7)
+                        .frame(maxWidth: .infinity, minHeight: 50)
+                        .background(RiderTheme.danger, in: Capsule())
+                        .foregroundStyle(.white)
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+            } else {
+                slider
+                if let feedback {
+                    Text(feedback).multilineTextAlignment(.center).font(.caption2.weight(.semibold))
                 }
             }
-            .frame(height: 50)
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel("Открыть радар SOS")
-            .accessibilityAddTraits(.isButton)
-            .accessibilityAction { showingRadar = true }
+        }
+    }
 
-            if receipt?.active == true {
-                Button("Открыть радар SOS") { showingRadar = true }
-                    .font(.caption2.bold()).buttonStyle(.plain)
-            } else if let feedback {
-                Text(feedback).multilineTextAlignment(.center).font(.caption2.weight(.semibold))
+    private var slider: some View {
+        GeometryReader { area in
+            let travel = max(1, area.size.width - 58)
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color(red: 0.63, green: 0.12, blue: 0.15))
+                Capsule().strokeBorder(Color.white.opacity(0.55))
+                Text("SOS · веди ползунок медленно")
+                    .font(.caption.bold())
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.75)
+                    .frame(maxWidth: .infinity)
+                    .padding(.leading, 52).padding(.trailing, 8)
+                Circle().fill(.white).frame(width: 44, height: 44)
+                    .overlay { Image(systemName: "dot.radiowaves.left.and.right").font(.system(size: 14, weight: .bold)).foregroundStyle(.red) }
+                    .contentShape(Circle())
+                    .offset(x: min(travel, max(0, offset)))
+                    .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .global)
+                        .updating($offset) { value, state, _ in state = value.translation.width }
+                        .updating($dragging) { _, active, _ in active = true }
+                        .onChanged { value in if started == nil { started = value.time } }
+                        .onEnded { value in
+                            defer { started = nil }
+                            guard value.translation.width >= travel * 0.95 else { return }
+                            if let started, value.time.timeIntervalSince(started) >= 2 {
+                                send()
+                            } else {
+                                feedback = "Проведи ползунок за 2 секунды или дольше."
+                            }
+                        })
+                    .padding(.leading, 7)
             }
         }
+        .frame(height: 50)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Сигнал SOS")
+        .accessibilityHint("Чтобы отправить, медленно проведи ползунок до конца")
+        .accessibilityAction(named: Text("Отправить SOS"), send)
         .onChange(of: dragging) { _, active in
             if !active {
                 Task { @MainActor in
@@ -625,162 +843,103 @@ struct RiderSOSControl: View {
                 }
             }
         }
-        .task { allowsDrill = await RiderSOSService.shared.allowsDrill() }
-        .sheet(isPresented: $showingRadar, onDismiss: {
-            started = nil
-            if drillRequested {
-                drillRequested = false
-                NotificationCenter.default.post(name: RiderSOSService.drillNotification, object: nil)
-            }
-        }) {
-            RiderSOSRadarScreen(fix: receipt?.location ?? RiderSOSFix(recorder.usableFix),
-                                receipt: receipt, sending: sending, message: feedback,
-                                send: RiderCommunity.endpoint != nil ? { Task { await send() } } : nil,
-                                drill: allowsDrill ? { Task { await sendDrill() } } : nil,
-                                closeSignal: receipt?.active == true ? { Task { await closeSignal() } } : nil,
-                                enableReplies: RiderCommunity.endpoint != nil && !RiderCommunity.usesLANTrust ? {
-                Task { await RiderSOSService.shared.refreshAuthorization(prompt: true) }
-            } : nil)
-            .onAppear {
-                RiderSOSService.shared.showRadar(true)
-                recorder.refreshSOSFix()
-            }
-            .onDisappear { RiderSOSService.shared.showRadar(false) }
-            .task(id: receipt?.id) { await followResponses() }
-        }
     }
 
-    @MainActor private func followResponses() async {
-        guard let id = receipt?.id else { return }
-        for _ in 0..<225 {
-            guard receipt?.active == true else { break }
-            do {
-                try await Task.sleep(for: .seconds(4))
-                let updated = try await RiderSOSService.shared.receipt(id)
-                guard !Task.isCancelled else { return }
-                receipt = updated
-                feedback = nil
-            } catch {
-                if !Task.isCancelled, receipt?.active == true { feedback = "Связь прервалась. Проверяем отклики снова." }
-            }
-        }
-    }
-
-    @MainActor private func sendDrill() async {
-        guard !sending else { return }
-        sending = true
-        defer { sending = false }
-        do {
-            try await RiderSOSService.shared.requestDrill()
-            drillRequested = true
-            showingRadar = false
-        } catch { feedback = "Сервер не подтвердил учебный сигнал." }
-    }
-
-    @MainActor private func closeSignal() async {
-        guard !sending, let id = receipt?.id else { return }
-        sending = true
-        defer { sending = false }
-        do {
-            _ = try await RiderSOSService.shared.close(id)
-            receipt = nil
-            feedback = "Сигнал завершён. Радар готов к новой отправке."
-        } catch { feedback = "Не удалось завершить сигнал. Проверь связь." }
-    }
-
-    @MainActor private func send() async {
-        guard !sending, receipt?.active != true else { return }
-        guard let fix = RiderSOSFix(recorder.usableFix) else {
-            feedback = "Для отправки нужна свежая точная GPS-позиция."
-            return
-        }
-        sending = true
+    private func send() {
         feedback = nil
-        defer { sending = false }
-        do {
-            receipt = try await RiderSOSService.shared.send(id: incidentID, name: name, equipment: equipment, location: fix)
-            incidentID = UUID()
-        } catch {
-            if let received = try? await RiderSOSService.shared.receipt(incidentID) {
-                receipt = received
-                incidentID = UUID()
-            } else {
-                feedback = "Сервер не подтвердил сигнал SOS."
-            }
-        }
+        service.startOutgoing(name: name, equipment: equipment, recorder: recorder)
     }
 }
 
-private struct RiderSOSRadarScreen: View {
+struct RiderSOSOutgoing: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject private var service = RiderSOSService.shared
-    let fix: RiderSOSFix?
-    let receipt: RiderSOSService.Receipt?
-    let sending: Bool
-    let message: String?
-    let send: (() -> Void)?
-    var drill: (() -> Void)? = nil
-    var closeSignal: (() -> Void)? = nil
     @State private var confirmClose = false
-    let enableReplies: (() -> Void)?
 
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(alignment: .leading, spacing: 15) {
-                    RiderRadarMap(fix: fix, transmitting: sending || (receipt?.active == true && receipt?.recipients != 0))
-                    if let receipt {
+                VStack(alignment: .leading, spacing: 16) {
+                    status
+                    RiderRadarMap(fix: service.outgoingFix,
+                                  transmitting: service.outgoingPhase == .sending || service.outgoingReceipt?.active == true)
+                    if let receipt = service.outgoingReceipt {
                         RiderSOSResponseSummary(receipt: receipt)
-                    } else if sending {
-                        Label("Связываемся с сервером", systemImage: "antenna.radiowaves.left.and.right")
-                            .font(.headline)
-                    } else {
-                        if send != nil {
-                            Text(fix == nil ? "Ждём точную GPS-позицию" : "Готов к отправке").font(.title3.bold())
-                            Text("Имя, комплект и точка GPS будут доступны райдерам в зоне оповещения.")
-                                .font(.subheadline).foregroundStyle(.secondary)
-                            if RiderCommunity.usesLANTrust {
-                                Text("В домашней сборке сигналы видны на телефонах, где открыт Rider.")
-                                    .font(.caption).foregroundStyle(.secondary)
-                            }
-                        } else if RiderCommunity.endpoint == nil {
-                            Text("Сервер Rider ещё не подключён.").font(.title3.bold())
-                        } else if message == nil {
-                            ProgressView("Загружаем отклики")
-                        }
                     }
-                    if let message { Text(message).font(.subheadline.bold()).foregroundStyle(.secondary) }
-                    if let send, receipt?.active != true {
-                        Button(action: send) {
-                            Label("Отправить SOS", systemImage: "antenna.radiowaves.left.and.right")
-                                .frame(maxWidth: .infinity)
-                        }
-                        .buttonStyle(.borderedProminent).controlSize(.large).tint(.red)
-                        .disabled(sending || fix == nil)
+                    if let message = service.outgoingMessage {
+                        Text(message).font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
                     }
-                    if let drill {
-                        Button(action: drill) {
-                            Label("Отправить учебный SOS себе", systemImage: "dot.radiowaves.left.and.right")
-                                .frame(maxWidth: .infinity)
-                        }.buttonStyle(.borderedProminent).tint(.orange).disabled(sending)
-                    }
-                    if closeSignal != nil {
+                    if service.outgoingReceipt?.active == true {
                         Button("Завершить SOS", role: .destructive) { confirmClose = true }
-                            .buttonStyle(.bordered).disabled(sending)
+                            .buttonStyle(.bordered).disabled(service.outgoingPhase != nil)
+                        if !RiderCommunity.usesLANTrust && !service.available {
+                            Button("Разрешить уведомления об откликах") {
+                                Task { await service.refreshAuthorization(prompt: true) }
+                            }
+                            .font(.subheadline)
+                        }
                     }
-                    if let enableReplies, !service.available, !sending {
-                        Button("Разрешить push для откликов", action: enableReplies)
-                            .font(.subheadline).buttonStyle(.borderless)
-                    }
-                }.padding(16)
+                }
+                .padding(16)
             }
-            .background(RiderTheme.canvas)
+            .background(RiderTheme.canvas.ignoresSafeArea())
             .navigationTitle("Радар SOS")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Закрыть") { dismiss() } } }
-            .confirmationDialog("Завершить активный сигнал SOS?", isPresented: $confirmClose, titleVisibility: .visible) {
-                Button("Завершить SOS", role: .destructive) { closeSignal?() }
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(service.hasOutgoing || service.outgoingPhase != nil ? "Свернуть" : "Закрыть") { dismiss() }
+                }
             }
+            .safeAreaInset(edge: .top, spacing: 0) { RiderSOSReplyBanner() }
+            .confirmationDialog("Завершить активный сигнал SOS?", isPresented: $confirmClose, titleVisibility: .visible) {
+                Button("Завершить SOS", role: .destructive) { service.closeOutgoing() }
+            }
+        }
+    }
+
+    private var status: some View {
+        let active = service.outgoingReceipt?.active == true
+        let status: (title: String, icon: String)
+        switch (service.outgoingPhase, active) {
+        case (.locating, _): status = ("Определяем геопозицию", "location.fill")
+        case (.sending, _): status = ("Отправляем SOS", "antenna.radiowaves.left.and.right")
+        case (.closing, _): status = ("Завершаем SOS", "clock")
+        case (nil, true): status = ("Сигнал SOS активен", "sos.circle.fill")
+        case (nil, false):
+            let title = service.outgoingReceipt?.status ??
+                (service.outgoingMessage == nil ? "Загружаем сигнал SOS" : "Сигнал SOS не подтверждён")
+            status = (title, "dot.radiowaves.left.and.right")
+        }
+        return Label(status.title, systemImage: status.icon)
+            .font(.title2.bold())
+            .foregroundStyle(active ? RiderTheme.danger : Color.primary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .lagoonCard()
+            .accessibilityAddTraits(.isHeader)
+    }
+}
+
+struct RiderSOSReplyBanner: View {
+    @ObservedObject private var service = RiderSOSService.shared
+
+    var body: some View {
+        if let notice = service.replyNotice {
+            Button {
+                service.openReceipt(notice.incident)
+                service.dismissReplyNotice()
+            } label: {
+                Label(notice.text, systemImage: "person.fill.checkmark")
+                    .font(.subheadline.bold())
+                    .multilineTextAlignment(.leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(14)
+                    .background(RiderTheme.surface, in: RoundedRectangle(cornerRadius: 14))
+                    .overlay { RoundedRectangle(cornerRadius: 14).strokeBorder(RiderTheme.accent.opacity(0.65)) }
+                    .shadow(color: .black.opacity(0.18), radius: 9, y: 4)
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 16)
+            .padding(.top, 6)
         }
     }
 }
@@ -880,39 +1039,6 @@ private struct RiderSOSResponseSummary: View {
         }
         .lagoonCard()
     }
-}
-
-struct RiderSOSOutgoing: View {
-    let id: UUID
-    @State private var current: RiderSOSService.Receipt?
-    @State private var closing = false
-    @State private var message: String?
-
-    var body: some View {
-        RiderSOSRadarScreen(fix: current?.location, receipt: current, sending: closing,
-                            message: message, send: nil,
-                            closeSignal: current?.active == true ? { Task { await close() } } : nil, enableReplies: nil)
-            .task(id: id) {
-                for _ in 0..<225 {
-                    do {
-                        current = try await RiderSOSService.shared.receipt(id)
-                        message = nil
-                        guard current?.active == true else { break }
-                        try await Task.sleep(for: .seconds(4))
-                    } catch {
-                        if !Task.isCancelled { message = "Сигнал недоступен или срок оповещения истёк." }
-                        break
-                    }
-                }
-            }
-    }
-    @MainActor private func close() async {
-        closing = true
-        defer { closing = false }
-        do { current = try await RiderSOSService.shared.close(id); message = nil }
-        catch { message = "Не удалось завершить сигнал." }
-    }
-
 }
 
 struct RiderSOSInbox: View {

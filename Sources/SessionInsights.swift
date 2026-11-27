@@ -82,7 +82,7 @@ struct RiderPublicRide: Codable, Equatable, Identifiable {
 }
 
 enum RiderRank: String, CaseIterable, Identifiable {
-    case e = "E", d = "D", c = "C", b = "B", a = "A", s = "S"
+    case e = "1", d = "2", c = "3", b = "4", a = "5", s = "5+"
 
     var id: Self { self }
     var threshold: Int {
@@ -92,7 +92,7 @@ enum RiderRank: String, CaseIterable, Identifiable {
         case .c: return 350
         case .b: return 800
         case .a: return 1600
-        case .s: return 3000
+        case .s: return 5001
         }
     }
 
@@ -472,7 +472,7 @@ enum RiderTopMetric: String, CaseIterable, Identifiable {
         case .height: return "Высота (м)"
         case .airtime: return "Время полёта (с)"
         case .distance: return "Дистанция в полёте (м)"
-        case .rank: return "Ранг"
+        case .rank: return "Уровень"
         }
     }
     var unit: String {

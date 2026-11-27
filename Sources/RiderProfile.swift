@@ -378,7 +378,7 @@ enum RiderCommunity {
         return try JSONDecoder().decode(T.self, from: data)
     }
 
-    enum Rejection: Error { case conflict, forbidden }
+    enum Rejection: Error { case conflict, forbidden, notFound }
 
     private static func credentialQuery(_ endpoint: URL) -> [String: Any] {
         [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: "RiderCommunity",
@@ -431,6 +431,7 @@ enum RiderCommunity {
         let statusCode = (response as? HTTPURLResponse)?.statusCode
         if statusCode == 409 { throw Rejection.conflict }
         if statusCode == 403 { throw Rejection.forbidden }
+        if statusCode == 404 && path.hasPrefix("sos/") { throw Rejection.notFound }
         guard statusCode == 200 else { throw URLError(.badServerResponse) }
         return data
     }
@@ -531,7 +532,7 @@ struct RiderProfileView: View {
                     Section {
                         ForEach(RiderRank.allCases) { rank in
                             Label {
-                                Text("Ранг \(rank.rawValue)")
+                                Text("Уровень \(rank.rawValue)")
                             } icon: {
                                 RiderRankBadge(rank: rank, size: 30)
                             }
@@ -548,7 +549,7 @@ struct RiderProfileView: View {
                         }
                     }
                 }
-                .navigationTitle("Ранги Rider")
+                .navigationTitle("Уровни Rider")
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .confirmationAction) { Button("Готово") { showingRanks = false } }
@@ -718,7 +719,7 @@ struct RiderProfileView: View {
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("Ранг \(rank.rawValue)")
+                    .accessibilityLabel("Уровень \(rank.rawValue)")
                     Button {
                         draftName = name; draftBio = bio; draftPhoto = photo; editorPicker = nil
                         let saved = mine?.profile.birthday ?? birthDay
@@ -782,7 +783,7 @@ struct RiderProfileView: View {
         return Section("Видимость") {
             Toggle("Публичный профиль", isOn: Binding(get: { visible }, set: { updateVisibility(profile: $0) }))
             Toggle("Публичная статистика", isOn: Binding(get: { statsVisible }, set: { updateVisibility(stats: $0) }))
-            Text("Ранг, ПТС, рекорды, часы на воде и ачивки видны всем райдерам. Переключатель статистики открывает графики по ветру, спотам и комплектам.")
+            Text("Уровень, ПТС, рекорды, часы на воде и ачивки видны всем райдерам. Переключатель статистики открывает графики по ветру, спотам и комплектам.")
                 .font(.footnote).foregroundStyle(.secondary)
             if statsVisible && !visible {
                 Text("Статистика появится, когда откроешь профиль.").font(.footnote).foregroundStyle(.secondary)
@@ -1270,12 +1271,12 @@ struct RiderRankBadge: View {
 
     var body: some View {
         Text(rank.rawValue)
-            .font(.system(size: size * 0.53, weight: .black, design: .monospaced))
+            .font(.system(size: size * (rank == .s ? 0.41 : 0.53), weight: .black, design: .monospaced))
             .foregroundStyle(rank.tint)
             .frame(width: size, height: size)
             .background(Color(red: 0.05, green: 0.13, blue: 0.19), in: RoundedRectangle(cornerRadius: size * 0.26))
             .overlay { RoundedRectangle(cornerRadius: size * 0.26).strokeBorder(rank.tint.opacity(0.65)) }
-            .accessibilityLabel("Ранг \(rank.rawValue)")
+            .accessibilityLabel("Уровень \(rank.rawValue)")
     }
 }
 
@@ -1308,10 +1309,11 @@ struct RiderRankCard: View {
                 }
                 Spacer(minLength: 4)
                 if let next = rank.next {
-                    Text("До \(next.rawValue) · \((next.threshold - points).formatted())")
+                    Text("До уровня \(next.rawValue)\n\((next.threshold - points).formatted()) ПТС")
+                        .multilineTextAlignment(.trailing)
                         .font(.caption.bold().monospacedDigit()).foregroundStyle(color)
                 } else {
-                    Text("Высший ранг").font(.caption.bold()).foregroundStyle(color)
+                    Text("Высший уровень").font(.caption.bold()).foregroundStyle(color)
                 }
             }
             if rank == .s {
@@ -1320,7 +1322,7 @@ struct RiderRankCard: View {
             } else {
                 ProgressView(value: Double(points - rank.threshold) / Double((rank.next?.threshold ?? rank.threshold + 1) - rank.threshold))
                     .tint(color)
-                    .accessibilityLabel("Прогресс ранга")
+                    .accessibilityLabel("Прогресс уровня")
             }
         }
         .padding(14)
@@ -1358,7 +1360,7 @@ struct RiderRankPromotion: View {
                         .rotationEffect(.degrees(reduceMotion || revealed ? 0 : -12))
                 }
                 .frame(height: 194)
-                Text("Ранг повышен").font(.title.bold())
+                Text("Уровень повышен").font(.title.bold())
                 Text("\(previous.rawValue) → \(current.rawValue)")
                     .font(.title2.monospaced().bold()).foregroundStyle(current.tint)
                 Button("Продолжить", action: dismiss)

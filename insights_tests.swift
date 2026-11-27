@@ -113,9 +113,10 @@ import FoundationXML
             ride.durationSeconds = 8 * 3600
             return ride
         }
-        let afterS = RiderSeasonProgress(longSeason, at: origin.addingTimeInterval(7 * 86400))
-        check(afterS.rank == .s && afterS.points == 3660 && afterS.fraction == 1,
-              "Riding alone can reach S, and the rank does not cap points")
+        let longSeasonProgress = RiderSeasonProgress(longSeason, at: origin.addingTimeInterval(7 * 86400))
+        check(longSeasonProgress.rank == .a && longSeasonProgress.points == 3660 &&
+              longSeasonProgress.fraction > 0 && longSeasonProgress.fraction < 1,
+              "Riding alone can progress toward level 5+ without capping points")
         var missionRide = twoMeterRide
         missionRide.mission = .jumps1
         let earnedMission = RiderSeasonProgress([missionRide, missionRide], at: origin)
@@ -149,7 +150,7 @@ import FoundationXML
               "Interrupted rides do not earn stickers or finish highlights")
         let january = ISO8601DateFormatter().date(from: "2024-01-01T00:00:00+03:00")!
         check(RiderSeasonProgress([rideForProfile], at: january).points == 0 &&
-              RiderRank.forPoints(2999) == .a && RiderRank.forPoints(3000) == .s,
+              RiderRank.forPoints(5000).rawValue == "5" && RiderRank.forPoints(5001).rawValue == "5+",
               "Rider season resets at midnight in Moscow and thresholds include their lower edge")
         let socialBadges = RiderAchievement.milestones(profileTotals, followers: 10)
         let followerBadge = socialBadges.first { $0.id == "ten-followers" }

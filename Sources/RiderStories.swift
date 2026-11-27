@@ -30,7 +30,10 @@ struct RiderStoriesStrip: View {
     @ObservedObject var recorder: SessionRecorder
     @AppStorage("rider.profilePhoto") private var avatar = Data()
     @Environment(\.scenePhase) private var phase
+    @Environment(\.riderOpenOwnProfile) private var openOwnProfile
     @State private var stories: [RiderStory] = []
+    @State private var queuedProfile: RiderStory?
+    @State private var authorProfile: String?
     @State private var opened: Deck?
     @Binding var expanded: Bool
     @State private var composing = false
@@ -123,8 +126,14 @@ struct RiderStoriesStrip: View {
         .sheet(isPresented: $composing) {
             RiderStoryComposer { stories = $0; composing = false }
         }
-        .fullScreenCover(item: $opened, onDismiss: { Task { await load() } }) { deck in
-            RiderStoryPlayer(stories: deck.items, start: deck.start) { updated in stories = updated }
+        .fullScreenCover(item: $opened, onDismiss: storyClosed) { deck in
+            RiderStoryPlayer(stories: deck.items, start: deck.start, deleted: { stories = $0 }) { story in
+                queuedProfile = story
+                opened = nil
+            }
+        }
+        .navigationDestination(item: $authorProfile) { id in
+            RiderPublicProfileView(id: id)
         }
         .task(id: phase) {
             guard phase == .active else { return }
@@ -145,6 +154,15 @@ struct RiderStoriesStrip: View {
             .padding(3)
             .overlay { Circle().strokeBorder(fresh ? RiderTheme.accent : .secondary.opacity(0.46), lineWidth: 2) }
             .accessibilityHidden(true)
+    }
+
+    private func storyClosed() {
+        if let story = queuedProfile {
+            queuedProfile = nil
+            if story.mine, let openOwnProfile { openOwnProfile() }
+            else { authorProfile = story.author.id }
+        }
+        Task { await load() }
     }
 
     private func open(_ author: RiderPerson) {
@@ -313,13 +331,16 @@ private struct RiderStoryComposer: View {
 private struct RiderStoryPlayer: View {
     let stories: [RiderStory]
     let deleted: ([RiderStory]) -> Void
+    let openProfile: (RiderStory) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var index: Int
     @State private var likes: [UUID: Bool] = [:]
 
-    init(stories: [RiderStory], start: Int, deleted: @escaping ([RiderStory]) -> Void) {
+    init(stories: [RiderStory], start: Int, deleted: @escaping ([RiderStory]) -> Void,
+         openProfile: @escaping (RiderStory) -> Void) {
         self.stories = stories
         self.deleted = deleted
+        self.openProfile = openProfile
         _index = State(initialValue: start)
     }
 
@@ -335,6 +356,7 @@ private struct RiderStoryPlayer: View {
                         },
                         onLike: { likes[story.id] = $0 },
                         onDelete: { deleted($0); dismiss() },
+                        openProfile: { openProfile(story) },
                         close: { dismiss() })
             .id(story.id)
     }
@@ -350,6 +372,7 @@ private struct RiderStorySlide: View {
     let next: () -> Void
     let onLike: (Bool) -> Void
     let onDelete: ([RiderStory]) -> Void
+    let openProfile: () -> Void
     let close: () -> Void
 
     @Environment(\.scenePhase) private var phase
@@ -514,10 +537,17 @@ private struct RiderStorySlide: View {
             }
             .accessibilityHidden(true)
             HStack(spacing: 8) {
-                RiderAvatar(photo: story.author.avatar ?? Data(), size: 32)
-                    .accessibilityHidden(true)
-                Text(story.author.handle).font(.subheadline.bold())
-                Spacer()
+                Button(action: openProfile) {
+                    HStack(spacing: 8) {
+                        RiderAvatar(photo: story.author.avatar ?? Data(), size: 32)
+                            .accessibilityHidden(true)
+                        Text(story.author.handle).font(.subheadline.bold()).lineLimit(1)
+                    }
+                    .frame(minHeight: 44)
+                    .contentShape(Rectangle())
+                }
+                .accessibilityLabel("Открыть профиль \(story.author.handle)")
+                Spacer(minLength: 4)
                 if story.mine {
                     Button { confirmDelete = true } label: { RiderCompactAction(icon: "ellipsis") }
                         .disabled(deleting)

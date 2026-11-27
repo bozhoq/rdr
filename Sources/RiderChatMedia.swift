@@ -1019,8 +1019,16 @@ private struct CameraPreview: UIViewRepresentable {
         guard let player else { return }
         playing.toggle()
         guard !scrubbing else { return }
-        if playing { player.playImmediately(atRate: Float(speed)) }
-        else { player.pause() }
+        if playing {
+            let session = AVAudioSession.sharedInstance()
+            if session.category != .playback || !session.categoryOptions.isEmpty {
+                try? session.setCategory(.playback, mode: .default)
+            }
+            try? session.setActive(true)
+            player.playImmediately(atRate: Float(speed))
+        } else {
+            player.pause()
+        }
     }
 
     func setSpeed(_ speed: Double) {

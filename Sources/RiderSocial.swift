@@ -898,6 +898,7 @@ private struct RiderCommentsView: View {
             HStack(alignment: .bottom, spacing: 8) {
                 TextField("Написать комментарий", text: $draft, axis: .vertical)
                     .focused($composing).disabled(sending)
+                    .id(draftID)
                     .lineLimit(1...4)
                     .textFieldStyle(.roundedBorder)
                     .onChange(of: draft) { _, value in
@@ -994,6 +995,7 @@ private struct RiderCommentsView: View {
     }
 
     private func beginReply(_ comment: RiderComment) {
+        guard !sending else { return }
         if replying?.id != comment.id { draftID = UUID() }
         replying = comment
         composing = true
@@ -1020,26 +1022,25 @@ private struct RiderCommentsView: View {
     private func submit() {
         let text = trimmed
         guard !text.isEmpty, !sending, !loading else { return }
-        composing = false
-        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        let savedDraft = draft
         let id = draftID
         let parent = replying?.id
-        change {
+        collapseAfterKeyboard = keyboardVisible
+        composing = false
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        if !keyboardVisible { detent = Self.compactDetent }
+        draft = ""
+        change(onFailure: { draft = savedDraft }) {
             let result = try await RiderCommunity.submitComment(text, id: id, for: postID, replyTo: parent)
-            if draft.trimmingCharacters(in: .whitespacesAndNewlines) == text { draft = "" }
+            draft = ""
             draftID = UUID()
             replying = nil
-            composing = false
-            if keyboardVisible {
-                collapseAfterKeyboard = true
-            } else {
-                detent = Self.compactDetent
-            }
             return result
         }
     }
 
-    private func change(_ action: @escaping @MainActor () async throws -> [RiderComment]) {
+    private func change(onFailure: (() -> Void)? = nil,
+                        _ action: @escaping @MainActor () async throws -> [RiderComment]) {
         guard !loading, !sending else { return }
         sending = true
         error = nil
@@ -1051,8 +1052,10 @@ private struct RiderCommentsView: View {
                     social.commentSummaries[postID] = result.commentSummary
                 }
             } catch RiderCommunity.Rejection.forbidden {
+                onFailure?()
                 error = "Опубликуй профиль во вкладке «Райдер», чтобы комментировать."
             } catch {
+                onFailure?()
                 self.error = "Не удалось сохранить изменение. Попробуй ещё раз."
             }
         }
@@ -2677,7 +2680,7 @@ struct RiderTopsView: View {
                 }
                 if !isLocal {
                     Section {
-                        let label = score == .rank ? "по рангу" : score == .height ? "по высоте" : score == .airtime ? "по зависанию" : "по дистанции"
+                        let label = score == .rank ? "по уровню" : score == .height ? "по высоте" : score == .airtime ? "по зависанию" : "по дистанции"
                         if let place = remote?.myPlace {
                             Label("Твоё место \(label) · №\(place)", systemImage: "person.crop.circle")
                         } else {

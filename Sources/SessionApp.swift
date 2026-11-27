@@ -120,9 +120,21 @@ struct SessionApp: App {
                     }
                     if !Task.isCancelled && !registrationComplete { needsSignIn = true }
                 }
+                .task(id: scenePhase == .active && !needsSignIn && RiderCommunity.endpoint != nil) {
+                    guard scenePhase == .active, !needsSignIn, RiderCommunity.endpoint != nil else { return }
+                    while !Task.isCancelled {
+                        await sos.pollOutgoing()
+                        do { try await Task.sleep(for: .seconds(4)) } catch { return }
+                    }
+                }
+                .overlay(alignment: .top) {
+                    if !sos.showingOutgoing { RiderSOSReplyBanner() }
+                }
                 .sheet(item: $sos.inbox) { inbox in
-                    if let id = inbox.selected, inbox.outgoing { RiderSOSOutgoing(id: id) }
-                    else { RiderSOSInbox(selected: inbox.selected) }
+                    RiderSOSInbox(selected: inbox.selected)
+                }
+                .fullScreenCover(isPresented: $sos.showingOutgoing) {
+                    RiderSOSOutgoing()
                 }
         }
     }
