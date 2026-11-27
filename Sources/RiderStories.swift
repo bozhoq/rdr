@@ -35,7 +35,6 @@ struct RiderStoriesStrip: View {
     @State private var queuedProfile: RiderStory?
     @State private var authorProfile: String?
     @State private var opened: Deck?
-    @Binding var expanded: Bool
     @State private var composing = false
     @State private var failed = false
 
@@ -45,82 +44,17 @@ struct RiderStoriesStrip: View {
         let start: Int
     }
 
-    private var hasUnseen: Bool { stories.contains { !$0.seen } }
-
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
-                Button {
-                    expanded.toggle()
-                } label: {
-                    HStack(spacing: 7) {
-                        let preview = stories.first { !$0.seen } ?? stories.first
-                        storyAvatar(photo: preview?.author.avatar ?? avatar, fresh: hasUnseen, size: 25)
-                        Image(systemName: expanded ? "chevron.up" : "chevron.down")
-                            .font(.caption2.weight(.semibold))
-                        Spacer(minLength: 0)
-                    }
+        VStack(alignment: .leading, spacing: 4) {
+            if failed {
+                Button("Обновить истории") { Task { await load() } }
+                    .font(.caption)
+                    .frame(minHeight: 44)
                     .padding(.horizontal, 8)
-                    .frame(maxWidth: .infinity, minHeight: 44)
-                    .background(RiderTheme.surface, in: RoundedRectangle(cornerRadius: 12))
-                    .contentShape(.interaction, Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Истории")
-                .accessibilityValue(hasUnseen ? "Есть новые истории" : "Нет новых историй")
-                .accessibilityHint(expanded ? "Свернуть истории" : "Показать истории")
-
-                RiderPeopleEntry(recorder: recorder)
             }
-
-            if expanded {
-                if failed {
-                    Button {
-                        Task { await load() }
-                    } label: {
-                        Text("Обновить истории").font(.caption)
-                            .frame(minHeight: 44)
-                            .contentShape(.interaction, Rectangle())
-                    }
-                    .padding(.horizontal, 8)
-                }
-                ScrollView(.horizontal) {
-                    HStack(alignment: .top, spacing: 8) {
-                        Button { composing = true } label: {
-                            VStack(spacing: 4) {
-                                RiderAvatar(photo: avatar, size: 44)
-                                    .overlay(alignment: .bottomTrailing) {
-                                        Image(systemName: "plus").font(.system(size: 12, weight: .bold))
-                                            .padding(4).foregroundStyle(.white).background(RiderTheme.action, in: Circle())
-                                    }
-                                Text("Добавить").font(.caption2)
-                            }
-                            .frame(width: 65)
-                            .frame(minHeight: 66)
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Добавить историю")
-
-                        ForEach(authors) { author in
-                            let fresh = stories.contains { $0.author.id == author.id && !$0.seen }
-                            let mine = stories.contains { $0.author.id == author.id && $0.mine }
-                            Button { open(author) } label: {
-                                VStack(spacing: 4) {
-                                    storyAvatar(photo: author.avatar ?? Data(), fresh: fresh, size: 44)
-                                    Text(mine ? "Твои истории" : author.name).font(.caption2).lineLimit(1)
-                                }
-                                .frame(width: 72)
-                                .frame(minHeight: 66)
-                                .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel(mine ? "Твои истории" : author.name + (fresh ? ", новые истории" : ", истории"))
-                        }
-                    }
-                    .padding(.horizontal, 4)
-                }
-                .scrollIndicators(.hidden)
+            HStack(alignment: .center, spacing: 6) {
+                storyStrip
+                RiderPeopleEntry(recorder: recorder)
             }
         }
         .sheet(isPresented: $composing) {
@@ -142,6 +76,47 @@ struct RiderStoriesStrip: View {
                 do { try await Task.sleep(for: .seconds(45)) } catch { return }
             }
         }
+    }
+
+    private var storyStrip: some View {
+        ScrollView(.horizontal) {
+            HStack(alignment: .top, spacing: 8) {
+                Button { composing = true } label: {
+                    VStack(spacing: 4) {
+                        RiderAvatar(photo: avatar, size: 44)
+                            .overlay(alignment: .bottomTrailing) {
+                                Image(systemName: "plus").font(.system(size: 12, weight: .bold))
+                                    .padding(4).foregroundStyle(.white).background(RiderTheme.action, in: Circle())
+                            }
+                        Text("Добавить").font(.caption2)
+                    }
+                    .frame(width: 65)
+                    .frame(minHeight: 66)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Добавить историю")
+
+                ForEach(authors) { author in
+                    let fresh = stories.contains { $0.author.id == author.id && !$0.seen }
+                    let mine = stories.contains { $0.author.id == author.id && $0.mine }
+                    Button { open(author) } label: {
+                        VStack(spacing: 4) {
+                            storyAvatar(photo: author.avatar ?? Data(), fresh: fresh, size: 44)
+                            Text(mine ? "Твои истории" : author.name).font(.caption2).lineLimit(1)
+                        }
+                        .frame(width: 72)
+                        .frame(minHeight: 66)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(mine ? "Твои истории" : author.name + (fresh ? ", новые истории" : ", истории"))
+                }
+            }
+            .padding(.horizontal, 3)
+        }
+        .scrollIndicators(.hidden)
+        .accessibilityLabel("Истории")
     }
 
     private var authors: [RiderPerson] {
@@ -501,11 +476,16 @@ private struct RiderStorySlide: View {
     private func finishTouch(_ gesture: DragGesture.Value, width: CGFloat) {
         guard let touch else { return }
         defer { self.touch = nil }
+        let translation = gesture.translation
+        if !touch.scrubbing && abs(translation.height) >= 60 &&
+            abs(translation.height) > abs(translation.width) * 1.2 {
+            close()
+            return
+        }
         if typing {
             typing = false
             return
         }
-        let translation = gesture.translation
         if touch.scrubbing {
             updateTouch(gesture, width: width)
         } else if abs(translation.width) >= 45 && abs(translation.width) > abs(translation.height) {

@@ -1307,11 +1307,6 @@ private struct RiderPostLocationChoice: View {
     }
 }
 
-private struct RiderFeedTopPreference: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
-}
-
 struct RiderFeedView: View {
     @ObservedObject var recorder: SessionRecorder
     @EnvironmentObject private var social: RiderSocialStore
@@ -1320,13 +1315,8 @@ struct RiderFeedView: View {
     @AppStorage("rider.profilePhoto") private var avatar = Data()
     @State private var selection = Feed.following
     @State private var conversation: RiderPerson?
-    @State private var entries: [RiderFeedEntry]?
-    @State private var storiesExpanded = false
-    @State private var feedTop: CGFloat = 0
-    @State private var storiesOpenedAt: CGFloat = 0
-    @Namespace private var feedViewport
-    @State private var loadedFeed: Feed?
-    @State private var failed = false
+    @State private var entries: [Feed: [RiderFeedEntry]] = [:]
+    @State private var failures: Set<Feed> = []
 
     private enum Feed: String, CaseIterable, Identifiable {
         case following, recommended
@@ -1335,13 +1325,30 @@ struct RiderFeedView: View {
     }
 
     var body: some View {
-        let feed = selection
-        return ScrollView {
-            VStack(alignment: .leading, spacing: 10) {
-                if RiderCommunity.endpoint != nil {
-                    RiderStoriesStrip(recorder: recorder, expanded: $storiesExpanded)
+        VStack(spacing: 6) {
+            if RiderCommunity.endpoint != nil {
+                RiderStoriesStrip(recorder: recorder)
+                    .padding(.horizontal, 12)
+                    .padding(.top, 4)
+            }
+            RiderSections(options: Feed.allCases, selection: $selection, compact: true) { Text($0.title) }
+                .padding(.horizontal, 12)
+            TabView(selection: $selection) {
+                ForEach(Feed.allCases) { feed in
+                    feedPage(feed).tag(feed)
                 }
-                RiderSections(options: Feed.allCases, selection: $selection, compact: true) { Text($0.title) }
+            }
+            .tabViewStyle(.page(indexDisplayMode: .never))
+        }
+        .toolbar(.hidden, for: .navigationBar)
+        .background(RiderTheme.canvas)
+        .navigationDestination(item: $conversation) { RiderThreadView(peer: $0) }
+        .task(id: selection) { await load(selection) }
+    }
+
+    private func feedPage(_ feed: Feed) -> some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 10) {
                 if RiderCommunity.endpoint == nil {
                     Text("Общая лента появится после подключения сервера Rider.").foregroundStyle(.secondary)
                     if !social.posts.isEmpty {
@@ -1351,61 +1358,35 @@ struct RiderFeedView: View {
                             }
                         }
                     }
-                } else if let entries, loadedFeed == feed {
-                    if entries.isEmpty {
+                } else if let items = entries[feed] {
+                    if items.isEmpty {
                         Text(feed == .following ? "Здесь появятся посты райдеров, на которых ты подписан." : "Пока нет новых публикаций.")
                             .foregroundStyle(.secondary)
                     }
-                    ForEach(entries) { entry in
+                    ForEach(items) { entry in
                         RiderFeedCard(post: entry.post, author: entry.author, username: entry.username, avatar: entry.avatar,
                                       entry: entry, onConversation: { conversation = $0 })
                     }
-                } else if failed {
+                } else if failures.contains(feed) {
                     Button("Повторить загрузку") { Task { await load(feed) } }
                 } else {
                     ProgressView("Загружаем ленту")
                 }
             }
             .padding(.horizontal, 12).padding(.vertical, 6)
-            .background(alignment: .top) {
-                GeometryReader { geometry in
-                    Color.clear.preference(key: RiderFeedTopPreference.self,
-                                           value: geometry.frame(in: .named(feedViewport)).minY.rounded())
-                }
-                .frame(height: 0)
-                .allowsHitTesting(false)
-                .accessibilityHidden(true)
-            }
         }
-        .coordinateSpace(name: feedViewport)
-        .onChange(of: storiesExpanded) { _, expanded in
-            if expanded { storiesOpenedAt = feedTop }
-        }
-        .onPreferenceChange(RiderFeedTopPreference.self) { [topPosition = $feedTop, expanded = $storiesExpanded,
-                                                             openedAt = $storiesOpenedAt] top in
-            topPosition.wrappedValue = top
-            if expanded.wrappedValue && abs(top - openedAt.wrappedValue) > 28 {
-                expanded.wrappedValue = false
-            }
-        }
-        .toolbar(.hidden, for: .navigationBar)
-        .scrollContentBackground(.hidden).background(RiderTheme.canvas)
-        .navigationDestination(item: $conversation) { RiderThreadView(peer: $0) }
-        .task(id: feed) { await load(feed) }
         .refreshable { await load(feed) }
     }
 
     @MainActor private func load(_ feed: Feed) async {
         guard RiderCommunity.endpoint != nil, feed == selection else { return }
-        if loadedFeed != feed { entries = nil }
-        failed = false
+        failures.remove(feed)
         do {
             let result = try await RiderCommunity.feed(recommended: feed == .recommended)
             guard !Task.isCancelled, feed == selection else { return }
-            loadedFeed = feed
-            entries = result
+            entries[feed] = result
         } catch {
-            if !Task.isCancelled, feed == selection { failed = true }
+            if !Task.isCancelled, feed == selection { failures.insert(feed) }
         }
     }
 }
@@ -2043,9 +2024,27 @@ struct RiderInboxView: View {
     @State private var sendError: String?
     @State private var deliveryIDs: [String: UUID] = [:]
     @State private var people: [RiderPerson]?
+    @State private var connections: Connections?
     @State private var composing = false
     @State private var failed = false
     @State private var search = ""
+
+    private struct Connections {
+        let following: [RiderPerson]
+        let followers: [RiderPerson]
+        let others: [RiderPerson]
+
+        init(following: [RiderPerson], followers: [RiderPerson], others: [RiderPerson]) {
+            let followed = Set(following.map(\.id))
+            let connected = followed.union(followers.map(\.id))
+            self.following = following.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+            self.followers = followers.filter { !followed.contains($0.id) }
+                .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+            self.others = others.filter { !connected.contains($0.id) }
+        }
+
+        var allIDs: Set<String> { Set((following + followers).map(\.id)) }
+    }
 
     private var choosingRecipient: Bool { shared != nil || composing }
     private var query: String { RiderSearch.query(search) }
@@ -2055,36 +2054,45 @@ struct RiderInboxView: View {
             if RiderCommunity.endpoint == nil {
                 ContentUnavailableView("Сообщения", systemImage: "paperplane",
                                        description: Text("Личные сообщения появятся после подключения сервера Rider."))
-            } else if let people {
-                if people.isEmpty {
-                    Text(choosingRecipient ? "Пока нет доступных райдеров." : "Пока нет переписок.")
-                        .foregroundStyle(.secondary)
-                }
+            } else {
                 if let sendError { Text(sendError).font(.footnote).foregroundStyle(.secondary) }
                 if sending { ProgressView("Отправляем пост") }
-                Section(query.isEmpty ? "" : choosingRecipient ? "Получатели" : "Переписки") {
-                    let matches = people.filter { RiderSearch.matches($0, query: query) }
-                    if !query.isEmpty && matches.isEmpty { Text("Ничего не найдено").foregroundStyle(.secondary) }
-                    ForEach(matches) { recipientRow($0) }
+                if choosingRecipient, let connections {
+                    connectionSection("Подписки", people: connections.following)
+                    connectionSection("Подписчики", people: connections.followers)
+                    if query.isEmpty && !connections.others.isEmpty {
+                        connectionSection("Другие райдеры", people: connections.others)
+                    }
+                } else if !choosingRecipient, let people {
+                    if people.isEmpty && query.isEmpty {
+                        Text("Пока нет переписок.").foregroundStyle(.secondary)
+                    } else {
+                        Section(query.isEmpty ? "" : "Переписки") {
+                            let matches = people.filter { RiderSearch.matches($0, query: query) }
+                            if matches.isEmpty { Text("Ничего не найдено").foregroundStyle(.secondary) }
+                            ForEach(matches) { recipientRow($0) }
+                        }
+                    }
+                } else if failed {
+                    Button("Повторить загрузку") { Task { await load() } }
+                } else {
+                    ProgressView()
                 }
-            } else if failed {
-                Button("Повторить загрузку") { Task { await load() } }
-            } else {
-                ProgressView()
-            }
-            if RiderCommunity.endpoint != nil {
-                RiderGlobalSearchSection(query: query, excluding: Set((people ?? []).map(\.id))) { recipientRow($0) }
+                if !choosingRecipient || connections != nil || failed {
+                    let excluding = choosingRecipient ? (connections?.allIDs ?? []) : Set((people ?? []).map(\.id))
+                    RiderGlobalSearchSection(query: query, excluding: excluding) { recipientRow($0) }
+                }
             }
         }
         .scrollContentBackground(.hidden)
         .background(RiderTheme.canvas)
-        .searchable(text: $search, prompt: "Имя или @юзернейм")
+        .searchable(text: $search, placement: .navigationBarDrawer(displayMode: .always), prompt: "Имя или @юзернейм")
         .navigationTitle(shared != nil ? "Кому отправить" : composing ? "Новое сообщение" : "Сообщения")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             if RiderCommunity.endpoint != nil && shared == nil {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button { people = nil; composing.toggle() } label: {
+                    Button { search = ""; failed = false; composing.toggle() } label: {
                         Label(composing ? "Переписки" : "Новое сообщение", systemImage: composing ? "tray" : "square.and.pencil")
                     }
                 }
@@ -2093,6 +2101,16 @@ struct RiderInboxView: View {
         .task(id: choosingRecipient) { await load() }
         .onChange(of: social.unread.threads) { _, _ in if !choosingRecipient { Task { await load() } } }
         .refreshable { await load() }
+    }
+
+    private func connectionSection(_ title: String, people: [RiderPerson]) -> some View {
+        Section(title) {
+            let matches = people.filter { RiderSearch.matches($0, query: query) }
+            if matches.isEmpty {
+                Text(query.isEmpty ? "Пока никого нет" : "Ничего не найдено").foregroundStyle(.secondary)
+            }
+            ForEach(matches) { recipientRow($0) }
+        }
     }
 
     @ViewBuilder private func recipientRow(_ rider: RiderPerson) -> some View {
@@ -2138,8 +2156,19 @@ struct RiderInboxView: View {
         guard RiderCommunity.endpoint != nil else { return }
         let choosing = choosingRecipient
         do {
-            let result = choosing ? try await RiderCommunity.recipients() : try await RiderCommunity.conversations()
-            if !Task.isCancelled && choosing == choosingRecipient { people = result; failed = false }
+            if choosing {
+                async let following: [RiderPerson] = RiderCommunity.decode("riders/me/following")
+                async let followers: [RiderPerson] = RiderCommunity.decode("riders/me/followers")
+                async let others = (try? RiderCommunity.recipients()) ?? []
+                let (followed, audience, directory) = try await (following, followers, others)
+                guard !Task.isCancelled, choosingRecipient else { return }
+                connections = Connections(following: followed, followers: audience, others: directory)
+            } else {
+                let result = try await RiderCommunity.conversations()
+                guard !Task.isCancelled, !choosingRecipient else { return }
+                people = result
+            }
+            failed = false
         } catch {
             if !Task.isCancelled && choosing == choosingRecipient { failed = true }
         }

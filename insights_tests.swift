@@ -105,6 +105,20 @@ import FoundationXML
         check(boundary.rides.first?.scoringJumps == 1 && boundary.rides.first?.jumps == 2 &&
               boundary.points == 485 && RiderTotals([twoMeterRide]).jumps == 2,
               "Only jumps reaching two metres earn per-jump points before rounding; both count toward achievements")
+        let breakdown = RiderSeasonProgress.earned(for: twoMeterRide, in: [twoMeterRide])
+        check(breakdown?.water == 420 && breakdown?.jumps == 5 && breakdown?.total == boundary.points,
+              "A finished ride attributes time, qualifying jumps and newly unlocked achievements")
+        var partialRide = SessionSummary(startedAt: origin.addingTimeInterval(-65), gpsEnabledAtStart: false,
+                                         batteryAtStartPercent: nil)
+        partialRide.status = .finished
+        partialRide.setup = SessionSetup(sport: .kite)
+        partialRide.durationSeconds = 40
+        var secondPartialRide = SessionSummary(startedAt: origin, gpsEnabledAtStart: false, batteryAtStartPercent: nil)
+        secondPartialRide.status = .finished
+        secondPartialRide.setup = SessionSetup(sport: .kite)
+        secondPartialRide.durationSeconds = 20
+        check(RiderSeasonProgress.earned(for: secondPartialRide, in: [partialRide, secondPartialRide])?.water == 1,
+              "A ride receives the minute point completed with seconds carried within the same season")
         let longSeason = (0..<7).map { i -> SessionSummary in
             var ride = SessionSummary(startedAt: origin.addingTimeInterval(Double(i) * 86400),
                                       gpsEnabledAtStart: false, batteryAtStartPercent: nil)

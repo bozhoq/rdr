@@ -828,6 +828,43 @@ class CommunityTests(unittest.TestCase):
         self.assertEqual(legacy["spot"], "old case")
         self.assertIsNone(legacy["windMS"])
 
+    def test_private_records_hide_values_and_exclude_all_leaderboards(self):
+        rider = self.publish(self.me, "rider")["mine"]["id"]
+        self.publish(self.audience, "viewer")
+        ride = dict(self.ride, distance=12, heightSum=8)
+        self.call("PUT", "/statistics", self.me, dict(generatedAt=self.now, update=dict(
+            year=2026, rides=[self.ride], totals=self.totals, records=[ride], publicRides=[ride])))
+        path = "/riders/" + rider
+        self.assertEqual(self.call("GET", path, self.audience)["distance"], 12)
+        self.assertIn(rider, [row["id"] for row in self.ranking(2026)])
+
+        self.call("PATCH", "/me", self.me, {"recordsPublic": False})
+        self.call("PATCH", "/me", self.me, {"recordsPublic": "false"}, expect=400)
+        # Older clients still edit other profile fields without sending recordsPublic.
+        self.call("PUT", "/me", self.me, dict(name="Rider", username="rider", totals=self.totals))
+        hidden = self.call("GET", path, self.audience)
+        self.assertFalse(hidden["rider"]["profile"]["recordsPublic"])
+        self.assertNotIn("distance", hidden)
+        self.assertEqual(hidden["rider"]["profile"]["totals"]["jumps"], 2)
+        for row in (hidden["rider"]["profile"]["totals"], hidden["rides"][0], hidden["sessionRecords"][0]):
+            self.assertTrue({"height", "airtime", "heightSum", "distance"}.isdisjoint(row))
+        own = self.call("GET", path, self.me)
+        self.assertEqual(own["distance"], 12)
+        self.assertEqual(own["rides"][0]["height"], 5.2)
+        queries = [dict(metric=metric) for metric in ("height", "airtime", "distance")]
+        queries.append(dict(metric="rank", season=2026))
+        for query in queries:
+            for viewer in (self.me, self.audience):
+                tops = self.call("POST", "/tops", viewer, dict(query, withMyPlace=True))
+                self.assertNotIn(rider, [row["id"] for row in tops["leaders"]])
+                if viewer == self.me:
+                    self.assertIsNone(tops["myPlace"])
+
+        self.call("PATCH", "/me", self.me, {"recordsPublic": True})
+        self.assertEqual(self.call("GET", path, self.audience)["distance"], 12)
+        for query in queries:
+            self.assertIn(rider, [row["id"] for row in self.call("POST", "/tops", self.audience, query)])
+
     def test_message_attachment_private_and_retry_safe(self):
         sender = self.publish(self.me, "rider")["mine"]["id"]
         peer = self.publish(self.audience, "viewer")["mine"]["id"]

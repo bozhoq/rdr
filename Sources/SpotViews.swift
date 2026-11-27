@@ -546,9 +546,14 @@ private struct SpotRouteButton: View {
     var body: some View {
         let title = fullWidth ? "Маршрут к споту" : "Построить маршрут"
         return Button(action: openRoute) {
-            Label(spot.areaOnly == true ? "Показать район на карте" : title, systemImage: "location.fill")
-                .font(fullWidth ? .headline : .subheadline.weight(.semibold))
-                .frame(maxWidth: fullWidth ? .infinity : nil, minHeight: fullWidth ? 42 : 28)
+            HStack(spacing: 8) {
+                Image(systemName: "location.fill").accessibilityHidden(true)
+                Text(spot.areaOnly == true ? "Показать район на карте" : title)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .font(fullWidth ? .headline : .subheadline.weight(.semibold))
+            .frame(maxWidth: fullWidth ? .infinity : nil, minHeight: fullWidth ? 42 : 36)
+            .fixedSize(horizontal: false, vertical: true)
         }
         .alert("Маршрут не открылся", isPresented: $routeUnavailable) {
             Button("ОК", role: .cancel) {}
@@ -827,17 +832,11 @@ private struct BestSpotsToday: View {
     }
 
     private func travelRow(for spot: RiderSpot, origin: CLLocation?) -> some View {
-        return ViewThatFits(in: .horizontal) {
-            HStack(spacing: 8) {
-                travelText(for: spot, origin: origin).fixedSize(horizontal: true, vertical: false)
-                Spacer(minLength: 2)
-                SpotRouteButton(spot: spot).fixedSize()
-            }
-            VStack(alignment: .leading, spacing: 6) {
-                travelText(for: spot, origin: origin)
-                SpotRouteButton(spot: spot)
-            }
+        VStack(alignment: .leading, spacing: 6) {
+            travelText(for: spot, origin: origin)
+            SpotRouteButton(spot: spot)
         }
+        .fixedSize(horizontal: false, vertical: true)
         .font(.subheadline.weight(.semibold))
         .buttonStyle(.bordered)
         .tint(RiderTheme.accent)

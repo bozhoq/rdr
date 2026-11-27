@@ -13,6 +13,7 @@ private struct RiderPublication: Codable {
     let avatar: Data?
     var publicProfile: Bool? = nil
     var statsPublic: Bool? = nil
+    var recordsPublic: Bool? = nil
     var birthday: String? = nil
     var showBirthday: Bool? = nil
     var premium: Bool? = nil
@@ -495,7 +496,9 @@ struct RiderProfileView: View {
                 TimelineView(.everyMinute) { context in
                     profile(rank: social.progress(recorder.history, at: max(context.date, Date())).rank)
                 }
-                RiderProfileRecords(totals: totals, distance: RiderPublicRide.summaries(in: recorder.history).compactMap(\.distance).max())
+                RiderProfileRecords(totals: totals,
+                                    distance: RiderPublicRide.summaries(in: recorder.history).compactMap(\.distance).max(),
+                                    locked: mine?.profile.recordsPublic == false)
                 posts
             }
             .padding(12)
@@ -541,7 +544,7 @@ struct RiderProfileView: View {
                     } footer: {
                         Text("1 балл за минуту завершённой каталки и 5 баллов за засчитанный прыжок от 2 м. За одну сессию учитываются до 8 часов и 100 прыжков. На уровне 5+ баллы продолжают накапливаться. Новый сезон начинается 1 января по Москве.")
                     }
-                    Section("Ачивки сезона · \(riderPoints(progress.achievementPoints))") {
+                    Section("Достижения сезона · \(riderPoints(progress.achievementPoints))") {
                         ForEach(progress.achievements) { award in
                             Label(award.title, systemImage: award.unlocked ? "checkmark.seal.fill" : "lock")
                                 .badge(riderPoints(award.seasonBonus, withPlus: true))
@@ -566,7 +569,7 @@ struct RiderProfileView: View {
                     }.padding(16)
                 }
                     .background(RiderTheme.canvas.ignoresSafeArea())
-                    .navigationTitle("Ачивки")
+                    .navigationTitle("Достижения")
                     .navigationBarTitleDisplayMode(.inline)
                     .toolbar {
                         ToolbarItem(placement: .confirmationAction) { Button("Готово") { showingAchievements = false } }
@@ -750,7 +753,7 @@ struct RiderProfileView: View {
                     .font(.caption.weight(.semibold)).foregroundStyle(RiderTheme.foam)
                 Spacer(minLength: 4)
                 Button { showingAchievements = true } label: { RiderCompactAction(icon: "medal") }
-                    .accessibilityLabel("Ачивки")
+                    .accessibilityLabel("Достижения")
                 NavigationLink(value: RiderDestination.statistics) {
                     RiderCompactAction(icon: "clock.arrow.circlepath")
                 }.accessibilityLabel("История каталок")
@@ -780,10 +783,12 @@ struct RiderProfileView: View {
     private var privacyControls: some View {
         let visible = mine.map { $0.profile.publicProfile ?? true } ?? false
         let statsVisible = mine.map { $0.profile.statsPublic ?? true } ?? false
+        let recordsVisible = mine?.profile.recordsPublic ?? true
         return Section("Видимость") {
             Toggle("Публичный профиль", isOn: Binding(get: { visible }, set: { updateVisibility(profile: $0) }))
             Toggle("Публичная статистика", isOn: Binding(get: { statsVisible }, set: { updateVisibility(stats: $0) }))
-            Text("Уровень, баллы, рекорды, часы на воде и ачивки видны всем райдерам. Переключатель статистики открывает графики по ветру, спотам и комплектам.")
+            Toggle("Публичные рекорды", isOn: Binding(get: { recordsVisible }, set: { updateVisibility(records: $0) }))
+            Text("Открой статистику, чтобы показать графики по ветру, спотам и комплектам. Публичные рекорды показываются в профиле и дают участие в «Топах».")
                 .font(.footnote).foregroundStyle(.secondary)
             if statsVisible && !visible {
                 Text("Статистика появится, когда откроешь профиль.").font(.footnote).foregroundStyle(.secondary)
@@ -813,7 +818,7 @@ struct RiderProfileView: View {
         }
     }
 
-    private func updateVisibility(profile: Bool? = nil, stats: Bool? = nil) {
+    private func updateVisibility(profile: Bool? = nil, stats: Bool? = nil, records: Bool? = nil) {
         guard !savingProfile else { return }
         Task {
             if loadingProfile {
@@ -821,18 +826,19 @@ struct RiderProfileView: View {
                 guard !loadingProfile else { return }
             }
             guard mine != nil else {
-                await saveProfile(publicProfile: profile ?? false, statsPublic: stats ?? false)
+                await saveProfile(publicProfile: profile ?? false, statsPublic: stats ?? false, recordsPublic: records)
                 return
             }
             savingProfile = true
             profileError = nil
             defer { savingProfile = false }
-            let flags = ["publicProfile": profile, "statsPublic": stats].compactMapValues { $0 }
+            let flags = ["publicProfile": profile, "statsPublic": stats, "recordsPublic": records].compactMapValues { $0 }
             do {
                 let result: CommunityState = try await RiderCommunity.decode(
                     "me", method: "PATCH", body: JSONEncoder().encode(flags))
                 mine = result.mine
                 social.statisticsRefresh += 1
+                if records != nil { social.statisticsSynced += 1 }
                 await social.refreshReposts()
             } catch {
                 profileError = "Не удалось изменить видимость. Проверь подключение к Rider."
@@ -841,7 +847,8 @@ struct RiderProfileView: View {
     }
 
     @discardableResult
-    @MainActor private func saveProfile(publicProfile: Bool, statsPublic: Bool, handle: String? = nil, fromEditor: Bool = false) async -> Bool {
+    @MainActor private func saveProfile(publicProfile: Bool, statsPublic: Bool, recordsPublic: Bool? = nil,
+                                        handle: String? = nil, fromEditor: Bool = false) async -> Bool {
         guard !savingProfile else { return false }
         savingProfile = true
         profileError = nil
@@ -851,7 +858,7 @@ struct RiderProfileView: View {
         let tag = handle ?? username
         var payload = RiderPublication(name: title.isEmpty ? "Райдер" : title, username: tag.isEmpty ? nil : tag,
                                        bio: fromEditor ? draftBio : bio, totals: RiderTotals([]), avatar: image.isEmpty ? nil : image,
-                                       publicProfile: publicProfile, statsPublic: statsPublic)
+                                       publicProfile: publicProfile, statsPublic: statsPublic, recordsPublic: recordsPublic)
         if fromEditor {
             payload.birthday = hasBirth ? Self.birthFormat.string(from: draftBirth) : ""
             payload.showBirthday = hasBirth && visibleBirth
@@ -861,6 +868,7 @@ struct RiderProfileView: View {
             mine = result.mine
             username = result.mine?.profile.username ?? tag
             social.statisticsRefresh += 1
+            if recordsPublic != nil { social.statisticsSynced += 1 }
             return true
         } catch RiderCommunity.Rejection.conflict {
             profileError = "Этот юзернейм уже занят. Выбери другой."
@@ -1148,6 +1156,7 @@ private struct RiderProfileShortcut: View {
 private struct RiderProfileRecords: View {
     let totals: RiderTotals
     var distance: Double?
+    var locked = false
 
     var body: some View {
         ViewThatFits(in: .horizontal) {
@@ -1170,7 +1179,13 @@ private struct RiderProfileRecords: View {
             icon().font(.subheadline.bold()).foregroundStyle(RiderTheme.accent)
                 .frame(height: 22)
                 .accessibilityHidden(true)
-            Text(value).font(.headline.monospacedDigit())
+            if locked {
+                Image(systemName: "lock.fill")
+                    .font(.headline)
+                    .accessibilityLabel("Рекорд скрыт")
+            } else {
+                Text(value).font(.headline.monospacedDigit())
+            }
             Text(title).font(.footnote.weight(.medium)).foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity)
@@ -1196,10 +1211,10 @@ private struct RiderProfileSummary: View {
                 .accessibilityElement(children: .combine)
 
             Button(action: onAchievements) {
-                summaryRow("Ачивки", value: "\(unlocked) из \(total)", icon: "medal", opensDetails: true)
+                summaryRow("Достижения", value: "\(unlocked) из \(total)", icon: "medal", opensDetails: true)
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Ачивки")
+            .accessibilityLabel("Достижения")
             .accessibilityValue("\(unlocked) из \(total)")
     }
 
@@ -1540,8 +1555,9 @@ struct RiderPublicProfileView: View {
             VStack(alignment: .leading, spacing: 9) {
                 if let page {
                     profile(page.rider, isMine: page.mine, rank: page.points.map { RiderRank.forPoints($0) })
-                    if page.points != nil {
-                        RiderProfileRecords(totals: page.rider.profile.totals, distance: page.distance)
+                    if page.points != nil || page.rider.profile.recordsPublic == false {
+                        RiderProfileRecords(totals: page.rider.profile.totals, distance: page.distance,
+                                            locked: page.rider.profile.recordsPublic == false)
                     } else {
                         Label("Статистика закрыта", systemImage: "lock")
                             .font(.subheadline).foregroundStyle(.secondary).lagoonCard()
@@ -1580,7 +1596,7 @@ struct RiderPublicProfileView: View {
                         }.padding(16)
                     }
                     .background(RiderTheme.canvas.ignoresSafeArea())
-                    .navigationTitle("Ачивки")
+                    .navigationTitle("Достижения")
                     .navigationBarTitleDisplayMode(.inline)
                     .toolbar {
                         ToolbarItem(placement: .confirmationAction) { Button("Готово") { showingAchievements = false } }
@@ -1618,7 +1634,7 @@ struct RiderPublicProfileView: View {
                 Spacer(minLength: 4)
                 if rank != nil {
                     Button { showingAchievements = true } label: { RiderCompactAction(icon: "medal") }
-                        .accessibilityLabel("Ачивки")
+                        .accessibilityLabel("Достижения")
                 }
                 if let rides = page?.rides {
                     NavigationLink {

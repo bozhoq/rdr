@@ -1556,7 +1556,7 @@ struct RiderSecretAchievements: View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Секретные").font(.title3.bold()).accessibilityAddTraits(.isHeader)
             if completed.isEmpty {
-                Label("Здесь появятся секретные ачивки с каталок.", systemImage: "sparkles")
+                Label("Здесь появятся секретные достижения с каталок.", systemImage: "sparkles")
                     .font(.subheadline).foregroundStyle(.secondary)
                     .lagoonCard()
             }
@@ -1673,15 +1673,21 @@ private struct RiderSessionFinish: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             artwork
+            pointsBreakdown
             if let mission = session.mission, success == nil {
                 failedMission(mission)
                     .padding(.horizontal, 5)
             }
             Button(action: compose) {
-                Label("Создать пост", systemImage: "square.and.pencil").frame(maxWidth: .infinity)
+                HStack(spacing: 8) {
+                    Image(systemName: "square.and.pencil").accessibilityHidden(true)
+                    Text("Создать пост")
+                }
+                .frame(maxWidth: .infinity, minHeight: 44, alignment: .center)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.borderedProminent)
-            .padding(.horizontal, 5)
+            .frame(maxWidth: .infinity, alignment: .center)
             if renderFailed { Text("Не удалось подготовить картинку для поста.").font(.footnote).foregroundStyle(.secondary) }
         }
         .task {
@@ -1694,6 +1700,25 @@ private struct RiderSessionFinish: View {
             RiderPostComposer(recorder: recorder, artwork: draft.image,
                               caption: Self.shareText(session: session, highlight: highlight, unlocked: unlocked),
                               sessionEquipment: session.setup.flatMap(RiderPostEquipment.init(setup:)), location: location)
+        }
+    }
+
+    @ViewBuilder private var pointsBreakdown: some View {
+        if let points = RiderSeasonProgress.earned(for: session, in: recorder.history), points.total > 0 {
+            let parts = [
+                points.water > 0 ? "\(points.water) за время на воде" : nil,
+                points.jumps > 0 ? "\(points.jumps) за прыжки" : nil,
+                points.mission > 0 ? "\(points.mission) за задание" : nil,
+                points.achievements > 0 ? "\(points.achievements) за достижения" : nil
+            ].compactMap { $0 }
+            VStack(alignment: .leading, spacing: 4) {
+                Text(riderPoints(points.total, withPlus: true)).font(.headline).monospacedDigit()
+                Text(parts.joined(separator: " · ")).font(.subheadline).foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(12)
+            .background(RiderTheme.surface, in: RoundedRectangle(cornerRadius: 14))
+            .accessibilityElement(children: .combine)
         }
     }
 
@@ -1713,7 +1738,7 @@ private struct RiderSessionFinish: View {
                         .rotationEffect(.degrees(reduceMotion || revealed ? -8 : -28))
                     VStack(alignment: .leading, spacing: 3) {
                         Text(mission.rule.title).font(.subheadline.bold())
-                        Text(unlocked ? "Секретная ачивка открыта" : "Задание выполнено").font(.caption).foregroundStyle(RiderTheme.foam)
+                        Text(unlocked ? "Секретное достижение открыто" : "Задание выполнено").font(.caption).foregroundStyle(RiderTheme.foam)
                     }
                     Spacer(minLength: 4)
                     if unlocked {

@@ -400,19 +400,51 @@ struct RiderSeasonProgress {
         }
     }
 
+    struct RidePoints {
+        let water: Int
+        let jumps: Int
+        let mission: Int
+        let achievements: Int
+
+        var total: Int { water + jumps + mission + achievements }
+    }
+
     let year: Int
     let rides: [Ride]
 
     let followers: Int
 
     private var seconds: Int { rides.reduce(0) { $0 + $1.seconds } }
-    private var jumps: Int { rides.reduce(0) { $0 + $1.jumps } }
-    var achievements: [RiderAchievement] {
-        RiderAchievement.milestones(sessions: rides.count, seconds: Double(seconds), jumps: jumps,
+    var achievements: [RiderAchievement] { Self.milestones(in: rides[...], followers: followers) }
+    var achievementPoints: Int { Self.points(for: achievements) }
+
+    private static func milestones(in rides: ArraySlice<Ride>, followers: Int = 0) -> [RiderAchievement] {
+        RiderAchievement.milestones(sessions: rides.count,
+                                    seconds: Double(rides.reduce(0) { $0 + $1.seconds }),
+                                    jumps: rides.reduce(0) { $0 + $1.jumps },
                                     height: rides.compactMap(\.height).max(), airtime: rides.compactMap(\.airtime).max(),
                                     followers: followers)
     }
-    var achievementPoints: Int { achievements.filter(\.unlocked).reduce(0) { $0 + $1.seasonBonus } }
+
+    private static func points(for achievements: [RiderAchievement]) -> Int {
+        achievements.filter(\.unlocked).reduce(0) { $0 + $1.seasonBonus }
+    }
+
+    static func earned(for session: SessionSummary, in history: [SessionSummary]) -> RidePoints? {
+        let sessions = history.filter { $0.id != session.id } + [session]
+        let ordered = Self(sessions, at: session.startedAt).rides.sorted { lhs, rhs in
+            if lhs.startedAt != rhs.startedAt { return lhs.startedAt < rhs.startedAt }
+            return lhs.id.uuidString < rhs.id.uuidString
+        }
+        guard let index = ordered.firstIndex(where: { $0.id == session.id }) else { return nil }
+        let ride = ordered[index]
+        let earlier = ordered[..<index]
+        let carriedSeconds = earlier.reduce(0) { $0 + $1.seconds } % 60
+        return RidePoints(water: (ride.seconds + carriedSeconds) / 60,
+                          jumps: ride.scoringJumps * 5, mission: ride.missionPoints,
+                          achievements: points(for: milestones(in: ordered[...index])) - points(for: milestones(in: earlier)))
+    }
+
     var points: Int {
         let qualifying = rides.reduce(0) { $0 + $1.scoringJumps }
         return seconds / 60 + qualifying * 5 + achievementPoints + rides.reduce(0) { $0 + $1.missionPoints }

@@ -17,6 +17,9 @@ from urllib.request import urlopen
 import rider_sos
 import rider_discovery
 
+VISIBILITY_FIELDS = ("publicProfile", "statsPublic", "recordsPublic")
+RECORD_FIELDS = {"height", "airtime", "distance", "heightSum"}
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS profiles(id TEXT PRIMARY KEY, document TEXT NOT NULL);
 CREATE VIEW IF NOT EXISTS public_profiles AS
@@ -317,6 +320,7 @@ def season_rankings(db, start, end, year, viewer=None):
         FROM profiles p
         LEFT JOIN season_scores s ON s.owner=p.id AND s.year=?
         LEFT JOIN followers f ON f.target=p.id
+        WHERE coalesce(json_extract(p.document,'$.recordsPublic'),1)=1
     )
     , places AS (SELECT *,row_number() OVER (ORDER BY points DESC,id) AS position FROM ranked)
     SELECT id,document,points,position FROM places WHERE position<=50 OR id=? ORDER BY position""", (start, end, year, viewer))
@@ -389,6 +393,8 @@ def rider_entry(row, owner):
     if key != owner and not (profile.get("showBirthday") and profile.get("publicProfile",True)):
         profile.pop("birthday",None)
         profile.pop("showBirthday",None)
+    if key != owner and not profile.get("recordsPublic", True):
+        profile["totals"] = {k: v for k, v in profile["totals"].items() if k not in RECORD_FIELDS}
     profile["premium"] = is_premium(profile)
     profile.pop("premiumUntil", None)
     return dict(id=key, profile=profile, followers=followers, following=bool(following),
@@ -426,11 +432,15 @@ def rider_path_result(db, owner, key, relation):
         count = season_credit(db, key, year, start, end)["followers"]
         result["points"] = (points[0] if points else 0) + sum(
             bonus for threshold, bonus in ((1, 20), (10, 40), (50, 120)) if count >= threshold)
-        result["distance"] = db.execute("SELECT max(distance) FROM record_details WHERE owner=?",
-                                        (key,)).fetchone()[0]
+        records_visible = key == owner or rider["profile"].get("recordsPublic", True)
+        if records_visible:
+            result["distance"] = db.execute("SELECT max(distance) FROM record_details WHERE owner=?",
+                                            (key,)).fetchone()[0]
         result["year"] = year
         history = db.execute("SELECT document FROM rider_public_rides WHERE owner=?", (key,)).fetchone()
         rides = json.loads(history[0]) if history else []
+        if not records_visible:
+            rides = [{k: v for k, v in ride.items() if k not in RECORD_FIELDS} for ride in rides]
         result["sessionRecords"] = [{k: v for k, v in ride.items() if k in
                                      ("id", "startedAt", "seconds", "jumps", "height", "airtime", "distance")}
                                     for ride in rides]
@@ -813,6 +823,7 @@ def top_rows(db, raw, viewer=None):
         FROM records r JOIN profiles p ON p.id=r.owner
         LEFT JOIN record_details d ON d.owner=r.owner AND d.session_id=r.session_id
         WHERE r.started_at>=? AND r.started_at<? AND {selected} IS NOT NULL
+          AND coalesce(json_extract(p.document,'$.recordsPublic'),1)=1
           AND ((? IS NULL AND ? IS NULL) OR r.spot_id=?
                OR ((r.spot_id IS NULL OR ? IS NULL) AND r.spot_name=?))
         )
@@ -1049,7 +1060,7 @@ def application(env, start_response):
                 try:
                     raw = read_json(env, 1024)
                     if not raw or not isinstance(raw, dict) or any(
-                        key not in ("publicProfile", "statsPublic") or type(value) is not bool
+                        key not in VISIBILITY_FIELDS or type(value) is not bool
                         for key, value in raw.items()
                     ):
                         raise ValueError("invalid visibility")
@@ -1085,8 +1096,9 @@ def application(env, start_response):
                     "SELECT 1 FROM login_contacts WHERE owner=?", (owner,)).fetchone():
                     return send("403 Forbidden", {"error":"verify an email address or phone number first"})
                 doc["onboardingPending"] = False
-                for key in ("publicProfile", "statsPublic"):
-                    value = raw.get(key, True if path == "/registration" else old.get(key, True))
+                for key in VISIBILITY_FIELDS:
+                    use_registration_default = path == "/registration" and key != "recordsPublic"
+                    value = raw.get(key, True if use_registration_default else old.get(key, True))
                     if type(value) is not bool:
                         return send("400 Bad Request", {"error": "invalid visibility"})
                     doc[key] = value
