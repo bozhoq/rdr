@@ -891,6 +891,39 @@ struct RiderJumpRecordIcon: View {
     }
 }
 
+struct RiderJumpDistanceIcon: View {
+    var body: some View {
+        Path { tape in
+            // The case is round along the spool, with a flat edge where the tape exits.
+            tape.move(to: CGPoint(x: 8.4, y: 3.2))
+            tape.addCurve(to: CGPoint(x: 15.8, y: 11),
+                          control1: CGPoint(x: 12.8, y: 3.2), control2: CGPoint(x: 15.8, y: 6.7))
+            tape.addLine(to: CGPoint(x: 15.8, y: 17.2))
+            tape.addQuadCurve(to: CGPoint(x: 14, y: 19), control: CGPoint(x: 15.8, y: 19))
+            tape.addLine(to: CGPoint(x: 8.4, y: 19))
+            tape.addCurve(to: CGPoint(x: 8.4, y: 3.2),
+                          control1: CGPoint(x: -1.2, y: 19), control2: CGPoint(x: -1.2, y: 3.2))
+            tape.closeSubpath()
+            tape.addEllipse(in: CGRect(x: 5, y: 7.9, width: 6.2, height: 6.2))
+
+            tape.move(to: CGPoint(x: 15.8, y: 13))
+            tape.addLine(to: CGPoint(x: 26.9, y: 13))
+            tape.move(to: CGPoint(x: 15.8, y: 17.3))
+            tape.addLine(to: CGPoint(x: 26.9, y: 17.3))
+            tape.move(to: CGPoint(x: 26.9, y: 12.1))
+            tape.addLine(to: CGPoint(x: 26.9, y: 18.2))
+            for tick in 0..<3 {
+                let x = CGFloat(18.4) + CGFloat(tick) * 2.6
+                tape.move(to: CGPoint(x: x, y: 13))
+                tape.addLine(to: CGPoint(x: x, y: tick == 1 ? 15.5 : 14.5))
+            }
+        }
+        .stroke(style: StrokeStyle(lineWidth: 1.25, lineCap: .round, lineJoin: .round))
+        .frame(width: 28, height: 22)
+        .accessibilityHidden(true)
+    }
+}
+
 enum RiderSpotIcon {
     static let image: UIImage = {
         UIGraphicsImageRenderer(size: CGSize(width: 27, height: 27)).image { renderer in
@@ -1292,7 +1325,7 @@ struct SessionDetail: View {
                 let jumps = session.jumpAnalysis?.candidates.compactMap { session.liveEstimate(for: $0) } ?? []
                 HStack(alignment: .top, spacing: 4) {
                     sessionRecord("Топ прыжок", value: jumps.compactMap(\.heightMeters).max(), unit: "м") { RiderJumpRecordIcon() }
-                    sessionRecord("Топ дистанция", value: jumps.compactMap(\.distanceMeters).max(), unit: "м") { Image(systemName: "arrow.left.and.right") }
+                    sessionRecord("Топ дистанция", value: jumps.compactMap(\.distanceMeters).max(), unit: "м") { RiderJumpDistanceIcon() }
                     sessionRecord("Топ завис", value: jumps.compactMap(\.reportedAirtime).max(), unit: "с") { Image(systemName: "stopwatch") }
                 }.padding(.vertical, 4)
             }.listRowBackground(RiderTheme.surface)

@@ -4,8 +4,12 @@ import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 
-struct RiderVoiceTranscript: View {
+private struct RiderVoiceMessage: View {
     let url: URL
+    let playing: Bool
+    let elapsed: String?
+    let play: () -> Void
+    @ScaledMetric(relativeTo: .subheadline) private var rowWidth = RiderChatPlayback.thumbnailDiameter
     @State private var requested = false
     @State private var expanded = false
     @State private var transcript: String?
@@ -13,27 +17,25 @@ struct RiderVoiceTranscript: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
-            Button {
-                if transcript != nil {
-                    expanded.toggle()
-                } else {
-                    error = nil
-                    expanded = true
-                    requested = true
+            HStack(spacing: 4) {
+                Button(action: play) {
+                    HStack(spacing: 6) {
+                        Image(systemName: playing ? "pause.circle.fill" : "play.circle.fill")
+                            .font(.system(size: 21))
+                        Text("Голосовое").font(.subheadline.weight(.semibold))
+                            .lineLimit(1).minimumScaleFactor(0.68)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                    .contentShape(.interaction, Rectangle())
                 }
-            } label: {
-                VStack(spacing: 1) {
-                    Text("А").font(.caption.bold())
-                    Image(systemName: expanded && transcript != nil ? "chevron.up" : "chevron.down")
-                        .font(.system(size: 8, weight: .semibold))
-                }
-                .foregroundStyle(RiderTheme.accent)
-                .frame(width: 44, height: 44)
-                .background(RiderTheme.accent.opacity(0.10), in: RoundedRectangle(cornerRadius: 10))
+                .buttonStyle(.plain)
+                .accessibilityLabel(playing ? "Приостановить голосовое" : "Воспроизвести голосовое")
+                transcriptButton
             }
-            .buttonStyle(.plain)
-            .disabled(requested)
-            .accessibilityLabel(expanded && transcript != nil ? "Свернуть расшифровку" : "Расшифровать голосовое")
+            .foregroundStyle(RiderTheme.accent)
+            if let elapsed {
+                Text(elapsed).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+            }
             if requested {
                 ProgressView("Распознаём речь…").font(.caption)
             } else if expanded, let error {
@@ -42,6 +44,7 @@ struct RiderVoiceTranscript: View {
                 Text(transcript).font(.subheadline).textSelection(.enabled)
             }
         }
+        .frame(width: min(220, max(RiderChatPlayback.thumbnailDiameter, rowWidth)), alignment: .leading)
         .task(id: requested) {
             guard requested else { return }
             defer { requested = false }
@@ -56,6 +59,31 @@ struct RiderVoiceTranscript: View {
                 }
             }
         }
+    }
+
+    private var transcriptButton: some View {
+        Button {
+            if transcript != nil {
+                expanded.toggle()
+            } else {
+                error = nil
+                expanded = true
+                requested = true
+            }
+        } label: {
+            VStack(spacing: 1) {
+                Text("А").font(.system(size: 13, weight: .bold))
+                Image(systemName: expanded && transcript != nil ? "chevron.up" : "chevron.down")
+                    .font(.system(size: 8, weight: .semibold))
+            }
+            .frame(width: 30, height: 30)
+            .background(RiderTheme.accent.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+            .frame(width: 44, height: 44, alignment: .trailing)
+            .contentShape(.interaction, Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(requested)
+        .accessibilityLabel(expanded && transcript != nil ? "Свернуть расшифровку" : "Расшифровать голосовое")
     }
 }
 
@@ -167,9 +195,15 @@ enum RiderMediaEncoding {
         let duration = try await asset.load(.duration)
         guard duration.seconds.isFinite, duration.seconds >= 0.2 else { throw CocoaError(.fileReadCorruptFile) }
         let maximum = CMTime(seconds: limit, preferredTimescale: 600)
-        for preset in [AVAssetExportPreset640x480, AVAssetExportPresetLowQuality] {
+        let bytes: [Int] = sources.compactMap { try? $0.resourceValues(forKeys: [.fileSizeKey]).fileSize }
+        let canRemux = videoComposition == nil && bytes.count == sources.count &&
+            bytes.reduce(0, +) <= RiderChatUpload.maxBytes
+        var presets = canRemux ? [AVAssetExportPresetPassthrough] : []
+        presets += [AVAssetExportPreset640x480, AVAssetExportPresetLowQuality]
+        for preset in presets {
             try Task.checkCancellation()
-            guard let exporter = AVAssetExportSession(asset: asset, presetName: preset) else { continue }
+            guard let exporter = AVAssetExportSession(asset: asset, presetName: preset),
+                  exporter.supportedFileTypes.contains(.mp4) else { continue }
             let output = temporary("mp4")
             defer { try? FileManager.default.removeItem(at: output) }
             exporter.outputURL = output
@@ -186,7 +220,7 @@ enum RiderMediaEncoding {
         throw CocoaError(.fileReadTooLarge)
     }
 
-    private static func joinCircleSegments(_ sources: [URL]) async throws -> (AVComposition, AVVideoComposition) {
+    private static func joinCircleSegments(_ sources: [URL]) async throws -> (AVComposition, AVVideoComposition?) {
         let composition = AVMutableComposition()
         guard let videoTrack = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid),
               let audioTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) else {
@@ -194,6 +228,8 @@ enum RiderMediaEncoding {
         }
         let side: CGFloat = 480
         var instructions: [AVMutableVideoCompositionInstruction] = []
+        var firstGeometry: (size: CGSize, transform: CGAffineTransform)?
+        var matchingGeometry = true
         var cursor = CMTime.zero
         for url in sources {
             try Task.checkCancellation()
@@ -212,6 +248,11 @@ enum RiderMediaEncoding {
 
             let size = try await video.load(.naturalSize)
             let transform = try await video.load(.preferredTransform)
+            if let firstGeometry {
+                matchingGeometry = matchingGeometry && size == firstGeometry.size && transform == firstGeometry.transform
+            } else {
+                firstGeometry = (size, transform)
+            }
             let bounds = CGRect(origin: .zero, size: size).applying(transform).standardized
             guard bounds.width > 0, bounds.height > 0 else { throw CocoaError(.fileReadCorruptFile) }
             let scale = max(side / bounds.width, side / bounds.height)
@@ -227,7 +268,11 @@ enum RiderMediaEncoding {
             instructions.append(instruction)
             cursor = cursor + range.duration
         }
-        guard !instructions.isEmpty else { throw CocoaError(.fileReadCorruptFile) }
+        guard let firstGeometry else { throw CocoaError(.fileReadCorruptFile) }
+        if matchingGeometry {
+            videoTrack.preferredTransform = firstGeometry.transform
+            return (composition, nil)
+        }
         let rendered = AVMutableVideoComposition()
         rendered.instructions = instructions
         rendered.renderSize = CGSize(width: side, height: side)
@@ -456,7 +501,11 @@ struct RiderCameraVideo: UIViewControllerRepresentable {
                 guard self.camera === camera else { return }
                 self.switching = false
                 self.torchOn = false
-                if changed { self.rear = next }
+                if changed {
+                    self.rear = next
+                } else if self.beganAt != nil {
+                    self.event?(.failed("Не удалось переключить камеру. Запись продолжается."))
+                }
             }
         }
     }
@@ -657,15 +706,10 @@ struct RiderCircleRecordingStage: View {
     var body: some View {
         GeometryReader { bounds in
             let size = min(bounds.size.width * 0.88, bounds.size.height * 0.73, 400)
-            ZStack(alignment: .bottomLeading) {
-                LinearGradient(colors: [Color(red: 0.04, green: 0.14, blue: 0.20), .black],
-                               startPoint: .topTrailing, endPoint: .bottomLeading)
-                VStack {
-                    Spacer(minLength: 0)
-                    preview(size: size)
-                    Spacer(minLength: 0)
-                }
-                .frame(maxWidth: .infinity)
+            VStack(spacing: 8) {
+                Spacer(minLength: 0)
+                preview(size: size).allowsHitTesting(false)
+                Spacer(minLength: 0)
                 HStack(spacing: 8) {
                     Button { recorder.flipCamera() } label: { tool("camera.rotate.fill") }
                         .accessibilityLabel(recorder.rear ? "Переключить на фронтальную камеру" : "Переключить на основную камеру")
@@ -676,9 +720,16 @@ struct RiderCircleRecordingStage: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.white)
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.leading, 18)
                 .padding(.bottom, 12)
                 .disabled(recorder.switching)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background {
+                LinearGradient(colors: [Color(red: 0.04, green: 0.14, blue: 0.20), .black],
+                               startPoint: .topTrailing, endPoint: .bottomLeading)
+                    .allowsHitTesting(false)
             }
         }
     }
@@ -688,7 +739,7 @@ struct RiderCircleRecordingStage: View {
             .font(.title3)
             .frame(width: 48, height: 48)
             .background(.white.opacity(0.14), in: Circle())
-            .contentShape(Circle())
+            .contentShape(.interaction, Rectangle())
     }
 
     private func preview(size: CGFloat) -> some View {
@@ -722,6 +773,8 @@ private final class RoundCamera: NSObject, AVCaptureFileOutputRecordingDelegate 
     private var discarded = false
     private var stopRequested = false
     private var segments: [URL] = []
+    private var currentSegment: URL?
+    private var closingSegment = false
     private var remaining: Double = 0
     private var switching: (position: AVCaptureDevice.Position, callback: (Bool) -> Void)?
     // Keep the delegate alive until AVFoundation delivers the final file.
@@ -732,7 +785,6 @@ private final class RoundCamera: NSObject, AVCaptureFileOutputRecordingDelegate 
             self.completion = completion
             self.activeCapture = self
             self.remaining = maxDuration
-            self.session.sessionPreset = .medium
             guard self.useCamera(position),
                   let microphone = AVCaptureDevice.default(for: .audio),
                   let input = try? AVCaptureDeviceInput(device: microphone),
@@ -742,23 +794,48 @@ private final class RoundCamera: NSObject, AVCaptureFileOutputRecordingDelegate 
             }
             self.session.addInput(input)
             self.session.addOutput(self.movie)
+            if self.session.canSetSessionPreset(.vga640x480) {
+                self.session.sessionPreset = .vga640x480
+            } else if self.session.canSetSessionPreset(.medium) {
+                self.session.sessionPreset = .medium
+            }
             self.movie.maxRecordedFileSize = 64 * 1024 * 1024
             self.session.startRunning()
-            self.startSegment()
+            if !self.startSegment() { self.finishCapture() }
         }
     }
 
-    private func startSegment() {
-        movie.connection(with: .video)?.videoOrientation = .portrait
+    private func startSegment() -> Bool {
+        guard let connection = movie.connection(with: .video) else { return false }
+        if connection.isVideoOrientationSupported { connection.videoOrientation = .portrait }
+        let supported = movie.supportedOutputSettingsKeys(for: connection)
+        if supported.contains(AVVideoCodecKey), movie.availableVideoCodecTypes.contains(.h264) {
+            var settings: [String: Any] = [AVVideoCodecKey: AVVideoCodecType.h264]
+            if supported.contains(AVVideoCompressionPropertiesKey) {
+                // Leave room for the audio track and container within the chat upload limit.
+                settings[AVVideoCompressionPropertiesKey] = [AVVideoAverageBitRateKey: 420_000]
+            }
+            movie.setOutputSettings(settings, for: connection)
+        }
+        let url = RiderMediaEncoding.temporary("mov")
+        currentSegment = url
+        closingSegment = false
         movie.maxRecordedDuration = CMTime(seconds: remaining, preferredTimescale: 600)
-        movie.startRecording(to: RiderMediaEncoding.temporary("mov"), recordingDelegate: self)
+        movie.startRecording(to: url, recordingDelegate: self)
+        return true
+    }
+
+    private func requestSegmentEnd() {
+        guard currentSegment != nil, !closingSegment, movie.isRecording else { return }
+        closingSegment = true
+        movie.stopRecording()
     }
 
     func switchCamera(_ position: AVCaptureDevice.Position, completion: @escaping (Bool) -> Void) {
         queue.async {
             guard !self.stopRequested, self.completion != nil, self.switching == nil else { completion(false); return }
             self.switching = (position, completion)
-            if self.movie.isRecording { self.movie.stopRecording() }
+            self.requestSegmentEnd()
         }
     }
 
@@ -798,22 +875,25 @@ private final class RoundCamera: NSObject, AVCaptureFileOutputRecordingDelegate 
         queue.async {
             self.discarded = self.discarded || discard
             self.stopRequested = true
-            if self.movie.isRecording { self.movie.stopRecording() }
+            if self.currentSegment != nil { self.requestSegmentEnd() }
+            else if self.completion != nil { self.finishCapture() }
         }
     }
 
     func fileOutput(_ output: AVCaptureFileOutput, didStartRecordingTo url: URL,
                     from connections: [AVCaptureConnection]) {
         queue.async {
-            if (self.stopRequested || self.switching != nil) && self.movie.isRecording {
-                self.movie.stopRecording()
-            }
+            guard self.currentSegment == url else { return }
+            if self.stopRequested || self.switching != nil { self.requestSegmentEnd() }
         }
     }
 
     func fileOutput(_ output: AVCaptureFileOutput, didFinishRecordingTo url: URL,
                     from connections: [AVCaptureConnection], error: Error?) {
         queue.async {
+            guard self.currentSegment == url else { return }
+            self.currentSegment = nil
+            self.closingSegment = false
             let valid = (error as NSError?)?.userInfo[AVErrorRecordingSuccessfullyFinishedKey] as? Bool ?? (error == nil)
             if !self.discarded && valid {
                 let duration = AVURLAsset(url: url).duration.seconds
@@ -827,18 +907,25 @@ private final class RoundCamera: NSObject, AVCaptureFileOutputRecordingDelegate 
                 try? FileManager.default.removeItem(at: url)
             }
 
-            if let pending = self.switching, !self.stopRequested && self.remaining > 0.2 {
+            if let pending = self.switching, !self.stopRequested, self.remaining > 0.2 {
                 self.switching = nil
                 let changed = self.useCamera(pending.position)
-                self.startSegment()
-                pending.callback(changed)
-            } else if self.discarded {
-                self.complete(.success([]))
-            } else if self.segments.isEmpty, let error {
-                self.complete(.failure(error))
+                let resumed = self.startSegment()
+                pending.callback(changed && resumed)
+                if !resumed { self.finishCapture(after: error) }
             } else {
-                self.complete(.success(self.segments))
+                self.finishCapture(after: error)
             }
+        }
+    }
+
+    private func finishCapture(after error: Error? = nil) {
+        if discarded {
+            complete(.success([]))
+        } else if segments.isEmpty {
+            complete(.failure(error ?? CocoaError(.fileReadCorruptFile)))
+        } else {
+            complete(.success(segments))
         }
     }
 
@@ -864,7 +951,12 @@ private struct CameraPreview: UIViewRepresentable {
     final class Host: UIView {
         override class var layerClass: AnyClass { AVCaptureVideoPreviewLayer.self }
     }
-    func makeUIView(context: Context) -> Host { Host() }
+    func makeUIView(context: Context) -> Host {
+        let host = Host()
+        host.isUserInteractionEnabled = false
+        return host
+    }
+
     func updateUIView(_ view: Host, context: Context) {
         guard let layer = view.layer as? AVCaptureVideoPreviewLayer else { return }
         layer.videoGravity = .resizeAspectFill
@@ -1082,6 +1174,8 @@ struct RiderChatPlayerBar: View {
 }
 
 struct RiderChatPlayback: View {
+    static let thumbnailDiameter: CGFloat = 144
+
     let url: URL
     let circle: Bool
     let message: UUID
@@ -1113,7 +1207,7 @@ struct RiderChatPlayback: View {
                         }.buttonStyle(.plain).accessibilityLabel("Смотреть кружочек")
                     }
                 }
-                .frame(width: active ? 270 : 144, height: active ? 270 : 144)
+                .frame(width: active ? 270 : Self.thumbnailDiameter, height: active ? 270 : Self.thumbnailDiameter)
                 .clipShape(Circle())
                 .overlay { Circle().strokeBorder(RiderTheme.accent.opacity(0.78), lineWidth: 2).allowsHitTesting(false) }
                 .animation(reduceMotion ? nil : .easeInOut(duration: 0.24), value: active)
@@ -1123,14 +1217,8 @@ struct RiderChatPlayback: View {
                     if !active { stopScrub() }
                 }
             } else {
-                Button(action: play) {
-                    HStack(spacing: 8) {
-                        Image(systemName: active && playback.playing ? "pause.circle.fill" : "play.circle.fill")
-                            .font(.title2)
-                        Text("Голосовое").font(.subheadline.weight(.semibold))
-                        if active { Text(RiderChatPlayer.time(playback.position)).font(.caption.monospacedDigit()) }
-                    }.foregroundStyle(RiderTheme.accent)
-                }.buttonStyle(.plain)
+                RiderVoiceMessage(url: url, playing: active && playback.playing,
+                                  elapsed: active ? RiderChatPlayer.time(playback.position) : nil, play: play)
             }
         }
     }

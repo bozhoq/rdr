@@ -1149,19 +1149,19 @@ private struct RiderProfileRecords: View {
     var distance: Double?
 
     var body: some View {
-        VStack(spacing: 5) {
-            Text("Рекорды").font(.title3.bold()).accessibilityAddTraits(.isHeader)
-            ViewThatFits(in: .horizontal) {
-                HStack(alignment: .top, spacing: 0) { recordItems }
-                VStack(spacing: 10) { recordItems }
-            }.padding(.vertical, 8).background(RiderTheme.surface, in: RoundedRectangle(cornerRadius: 14))
-        }.frame(maxWidth: .infinity)
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .top, spacing: 0) { recordItems }
+            VStack(spacing: 10) { recordItems }
+        }
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity)
+        .background(RiderTheme.surface, in: RoundedRectangle(cornerRadius: 14))
     }
 
     @ViewBuilder private var recordItems: some View {
         record("Топ прыжок", value: metric(totals.height, unit: "м")) { RiderJumpRecordIcon() }
         record("Топ завис", value: metric(totals.airtime, unit: "с")) { Image(systemName: "timer") }
-        record("Топ дистанция", value: metric(distance, unit: "м")) { Image(systemName: "arrow.left.and.right") }
+        record("Топ дистанция", value: metric(distance, unit: "м")) { RiderJumpDistanceIcon() }
     }
 
     private func record<Icon: View>(_ title: String, value: String, @ViewBuilder icon: () -> Icon) -> some View {

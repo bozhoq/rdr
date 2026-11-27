@@ -2173,25 +2173,12 @@ struct RiderThreadView: View {
     private var text: String { draft.trimmingCharacters(in: .whitespacesAndNewlines) }
 
     var body: some View {
-        ZStack {
-            if let messages {
-                messageHistory(messages)
-            } else {
-                ScrollView {
-                    if error == nil {
-                        ProgressView().frame(maxWidth: .infinity).padding(20)
-                    }
-                }
-                .refreshable { await load() }
-            }
+        VStack(spacing: 0) {
+            RiderChatPlayerBar(playback: playback)
+            chatViewport
+            composer
         }
-        .overlay {
-            if let preview = recorder.preview, recorder.beganAt != nil {
-                RiderCircleRecordingStage(session: preview, recorder: recorder)
-            }
-        }
-        .safeAreaInset(edge: .top, spacing: 0) { RiderChatPlayerBar(playback: playback) }
-        .safeAreaInset(edge: .bottom, spacing: 0) { composer }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .photosPicker(isPresented: $pickingPhoto, selection: $photo, matching: .images)
         .task(id: photo) { await attachPhoto() }
         .fullScreenCover(isPresented: $cameraPhoto) {
@@ -2204,6 +2191,8 @@ struct RiderThreadView: View {
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.visible, for: .navigationBar)
+        .toolbarBackground(Color(uiColor: .systemBackground), for: .navigationBar)
+        .toolbarBackground(.visible, for: .navigationBar)
         .toolbar {
             ToolbarItem(placement: .principal) {
                 NavigationLink { RiderPublicProfileView(id: peer.id) } label: {
@@ -2237,6 +2226,29 @@ struct RiderThreadView: View {
                 await load()
                 do { try await Task.sleep(for: .seconds(3)) } catch { break }
             }
+        }
+    }
+
+    private var chatViewport: some View {
+        GeometryReader { viewport in
+            ZStack {
+                if let messages {
+                    messageHistory(messages)
+                } else {
+                    ScrollView {
+                        if error == nil {
+                            ProgressView().frame(maxWidth: .infinity).padding(20)
+                        }
+                    }
+                    .refreshable { await load() }
+                }
+                if let preview = recorder.preview, recorder.beganAt != nil {
+                    RiderCircleRecordingStage(session: preview, recorder: recorder)
+                }
+            }
+            // Clip after flipping the scrolling view so messages cannot enter the toolbar or composer.
+            .frame(width: viewport.size.width, height: viewport.size.height)
+            .clipped()
         }
     }
 
@@ -2443,6 +2455,7 @@ struct RiderThreadView: View {
     private func send() {
         let body = text
         let upload = attachment
+        let id = draftID
         guard !sending, !preparingAttachment, !body.isEmpty || upload != nil else { return }
         composingText = false
         sending = true
@@ -2451,8 +2464,14 @@ struct RiderThreadView: View {
         Task {
             defer { sending = false; sendingAt = nil }
             do {
-                messages = try await RiderCommunity.sendMessage(to: peer.id, id: draftID, text: body,
+                let result = try await RiderCommunity.sendMessage(to: peer.id, id: id, text: body,
                                                                   post: nil, attachment: upload)
+                if let upload, let circle = result.first(where: { $0.id == id && $0.mine })?.attachment,
+                   circle.isCircle, circle.filename == upload.filename, circle.size == upload.data.count,
+                   let file = try? RiderChatFile(message: id, filename: circle.filename) {
+                    try? file.store(upload.data)
+                }
+                messages = result
                 messageRevision += 1
                 draftID = UUID()
                 draft = ""
@@ -2516,7 +2535,6 @@ private struct RiderChatAttachmentView: View {
                 }.buttonStyle(.plain).accessibilityLabel("Открыть фото во весь экран")
             } else if let shareFile, attachment.isVoice || attachment.isCircle {
                 RiderChatPlayback(url: shareFile.url, circle: attachment.isCircle, message: message, title: author, playback: playback)
-                if attachment.isVoice { RiderVoiceTranscript(url: shareFile.url) }
             } else if let shareFile {
                 ShareLink(item: shareFile, preview: SharePreview(attachment.filename)) { label("square.and.arrow.up") }
             } else if attachment.showsPhoto && !failed {
@@ -2549,22 +2567,24 @@ private struct RiderChatAttachmentView: View {
         loading = true
         defer { loading = false }
         do {
-            let data = try await RiderCommunity.attachment(for: message, with: peer)
-            guard !Task.isCancelled else { return }
-            guard data.count == attachment.size, data.count <= RiderChatUpload.maxBytes else {
+            let file = try RiderChatFile(message: message, filename: attachment.filename)
+            guard attachment.size > 0, attachment.size <= RiderChatUpload.maxBytes else {
                 throw CocoaError(.fileReadCorruptFile)
             }
-            let name = attachment.filename
-            guard !name.isEmpty, name != ".", name != "..", !name.contains("/"), !name.contains("\\"),
-                  !name.contains(":") else { throw CocoaError(.fileReadInvalidFileName) }
-            let directory = FileManager.default.temporaryDirectory.appendingPathComponent("rider-chat", isDirectory: true)
-                .appendingPathComponent(message.uuidString, isDirectory: true)
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            let url = directory.appendingPathComponent(name)
-            try data.write(to: url, options: [.atomic, .completeFileProtection])
+            if attachment.isCircle,
+               (try? file.url.resourceValues(forKeys: [.fileSizeKey]).fileSize) == attachment.size,
+               FileManager.default.isReadableFile(atPath: file.url.path) {
+                shareFile = file
+                failed = false
+                return
+            }
+            let data = try await RiderCommunity.attachment(for: message, with: peer)
+            guard !Task.isCancelled else { return }
+            guard data.count == attachment.size else { throw CocoaError(.fileReadCorruptFile) }
+            try file.store(data)
             if attachment.showsPhoto,
                let thumbnail = RiderPostComposer.postJPEG(data) { preview = UIImage(data: thumbnail) }
-            shareFile = RiderChatFile(url: url)
+            shareFile = file
             failed = false
         } catch {
             if !Task.isCancelled { failed = true }
@@ -2574,6 +2594,21 @@ private struct RiderChatAttachmentView: View {
 
 private struct RiderChatFile: Transferable {
     let url: URL
+
+    init(message: UUID, filename: String) throws {
+        guard !filename.isEmpty, filename != ".", filename != "..", !filename.contains("/"),
+              !filename.contains("\\"), !filename.contains(":") else {
+            throw CocoaError(.fileReadInvalidFileName)
+        }
+        url = FileManager.default.temporaryDirectory.appendingPathComponent("rider-chat", isDirectory: true)
+            .appendingPathComponent(message.uuidString, isDirectory: true)
+            .appendingPathComponent(filename)
+    }
+
+    func store(_ data: Data) throws {
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try data.write(to: url, options: [.atomic, .completeFileProtection])
+    }
 
     static var transferRepresentation: some TransferRepresentation {
         FileRepresentation(exportedContentType: .data) { SentTransferredFile($0.url) }
